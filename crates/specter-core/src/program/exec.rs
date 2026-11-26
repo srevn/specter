@@ -1,9 +1,9 @@
 //! Leaf types for the action IR — argv specs and placeholders.
 //!
 //! These types describe *what one process looks like*: a frozen `Box<[ArgTemplate]>` of argv parts,
-//! plus a per-step timeout. They are shared between every op variant in [`super::SpawnBody`]
-//! (single `Exec` and N-stage `Pipe`) and never carry control-flow state — that lives one layer up
-//! in [`super::ProgramOp`].
+//! plus a per-step timeout. They are shared between every op variant in [`super::SpawnBody`] (single
+//! `Exec` and N-stage `Pipe`) and never carry control-flow state — that lives one layer up in
+//! [`super::ProgramOp`].
 
 use compact_str::CompactString;
 use smallvec::SmallVec;
@@ -66,9 +66,9 @@ impl ExecAction {
 /// One argv slot's template — an ordered run of literal / placeholder / env parts the resolver
 /// renders into zero or more argv strings.
 ///
-/// Like [`ExecAction`]: no cross-field invariant, so [`Self::new`] is `pub`; `parts` is private
-/// only to force the constructor (no struct-literal bypass) and free the `SmallVec` representation
-/// behind [`Self::parts`].
+/// Like [`ExecAction`]: no cross-field invariant, so [`Self::new`] is `pub`; `parts` is private only
+/// to force the constructor (no struct-literal bypass) and free the `SmallVec` representation behind
+/// [`Self::parts`].
 ///
 /// ```compile_fail
 /// // must not compile: `ArgTemplate.parts` is private
@@ -114,9 +114,9 @@ impl ArgPart {
     }
 
     /// True iff this part is a multi-value [`Placeholder`]. Thin delegator over
-    /// [`Placeholder::is_multivalue`] for ergonomic `iter().any(ArgPart::is_multivalue)` use at
-    /// call sites that need to inspect mixed `Literal` / `Placeholder` parts. `EnvVar` is
-    /// single-value by construction.
+    /// [`Placeholder::is_multivalue`] for ergonomic `iter().any(ArgPart::is_multivalue)` use at call
+    /// sites that need to inspect mixed `Literal` / `Placeholder` parts. `EnvVar` is single-value
+    /// by construction.
     #[must_use]
     pub const fn is_multivalue(&self) -> bool {
         match self {
@@ -126,8 +126,8 @@ impl ArgPart {
     }
 
     /// True iff this part is a diff-derived [`Placeholder`]. See [`Placeholder::is_diff_derived`]
-    /// for the precise predicate. `EnvVar` reads the actuator's captured environment snapshot,
-    /// never the burst's `Diff`, so it never flips this predicate.
+    /// for the precise predicate. `EnvVar` reads the actuator's captured environment snapshot, never
+    /// the burst's `Diff`, so it never flips this predicate.
     #[must_use]
     pub const fn is_diff_derived(&self) -> bool {
         match self {
@@ -140,8 +140,8 @@ impl ArgPart {
 /// Argv-template substitution token. The catalog spans two predicates:
 ///
 /// - **[`Self::is_multivalue`]** — true for any placeholder that can expand to >1 argv slot:
-///   `Created`, `Deleted`, `Modified`, `RenamedFrom`, `RenamedTo`, `Excluded`. Drives the
-///   resolver's prefix-accumulator branching.
+///   `Created`, `Deleted`, `Modified`, `RenamedFrom`, `RenamedTo`, `Excluded`. Drives the resolver's
+///   prefix-accumulator branching.
 /// - **[`Self::is_diff_derived`]** — true for the multi-value placeholders sourced from the burst's
 ///   `Diff`: the original five. `Excluded` is multi-value but reads from `Profile.exclude_strings`,
 ///   not from a `Diff` — keeping it OUT of `is_diff_derived` is what prevents `Sub.needs_diff` from
@@ -230,9 +230,9 @@ mod tests {
         assert!(!part.is_multivalue());
     }
 
-    /// `ExecAction::new(argv, Some(d))` records the per-step deadline; `ExecAction::new(argv,
-    /// None)` leaves `timeout = None`. There is no separate setter — the constructor's
-    /// `Option<Duration>` is the with/without encoding.
+    /// `ExecAction::new(argv, Some(d))` records the per-step deadline; `ExecAction::new(argv, None)`
+    /// leaves `timeout = None`. There is no separate setter — the constructor's `Option<Duration>`
+    /// is the with/without encoding.
     #[test]
     fn exec_action_new_records_optional_timeout() {
         let exec = ExecAction::new(

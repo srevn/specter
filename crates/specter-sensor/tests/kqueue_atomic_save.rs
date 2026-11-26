@@ -1,6 +1,6 @@
 //! Atomic save: `cp file file.tmp; mv file.tmp file` replaces the destination file's inode
-//! atomically. The watched file fd's old inode is unlinked → terminal `FsEvent` (Removed or
-//! Renamed, depending on kernel-side semantics); the watched dir fd sees a `StructureChanged`.
+//! atomically. The watched file fd's old inode is unlinked → terminal `FsEvent` (Removed or Renamed,
+//! depending on kernel-side semantics); the watched dir fd sees a `StructureChanged`.
 //!
 //! The engine vacates the slot on the terminal event; the next dir `StructureChanged` triggers a
 //! reprobe that discovers the new file at the same path with a fresh `ResourceId`.
@@ -32,9 +32,9 @@ fn atomic_save_emits_terminal_on_old_inode_and_structure_on_dir() {
     let r_file = sm.insert(());
 
     // Dir watch needs STRUCTURE so the kernel registers NOTE_WRITE on the directory's vnode and a
-    // child rename produces StructureChanged. The file watch can stay with EMPTY events: the
-    // identity floor (NOTE_DELETE | NOTE_RENAME | NOTE_REVOKE) covers the terminal event we assert
-    // on for the file's old inode.
+    // child rename produces StructureChanged. The file watch can stay with EMPTY events: the identity
+    // floor (NOTE_DELETE | NOTE_RENAME | NOTE_REVOKE) covers the terminal event we assert on for
+    // the file's old inode.
     w.watch(r_dir, tmp.path(), ResourceKind::Dir, ClassSet::STRUCTURE)
         .expect("watch dir");
     w.watch(r_file, &target, ResourceKind::File, ClassSet::EMPTY)

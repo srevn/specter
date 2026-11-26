@@ -66,9 +66,9 @@ fn dense_event_storm_converges_naturally_below_burst_deadline() {
     }
     let last_event = storm_start + storm_step * (storm_count - 1);
 
-    // Each event re-armed the settle timer to `last_event + settle`. Drain timers from there
-    // onward; the next probe must fire close to `last_event + SETTLE` (well below `burst_deadline =
-    // now + MAX_SETTLE`).
+    // Each event re-armed the settle timer to `last_event + settle`. Drain timers from there onward;
+    // the next probe must fire close to `last_event + SETTLE` (well below `burst_deadline = now +
+    // MAX_SETTLE`).
     let probe_emit = last_event + SETTLE;
     let probe_correlation = loop {
         let Some(entry) = e.pop_expired(probe_emit) else {
@@ -116,10 +116,10 @@ fn dense_event_storm_converges_naturally_below_burst_deadline() {
     );
 
     // The Effect must arrive well below the Standard burst's `burst_deadline`. The Seed runs first
-    // (its own burst, single settle window); the Standard burst under test starts at its first
-    // storm event (`storm_start`), so its deadline is `storm_start + MAX_SETTLE`. Natural
-    // convergence costs one settle cycle; the bound tracks `last_event + SETTLE` with a 0.5×SETTLE
-    // slop margin, well below the forced `burst_deadline`.
+    // (its own burst, single settle window); the Standard burst under test starts at its first storm
+    // event (`storm_start`), so its deadline is `storm_start + MAX_SETTLE`. Natural convergence costs
+    // one settle cycle; the bound tracks `last_event + SETTLE` with a 0.5×SETTLE slop margin, well
+    // below the forced `burst_deadline`.
     let burst_deadline = storm_start + MAX_SETTLE;
     let upper_bound = last_event + SETTLE + SETTLE / 2 + Duration::from_millis(2);
     assert!(

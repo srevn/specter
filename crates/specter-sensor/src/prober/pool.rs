@@ -3,22 +3,22 @@
 //! # Lifecycle
 //!
 //! 1. [`WorkerProber::new(out, concurrency)`](WorkerProber::new) spawns `concurrency.get()` threads
-//!    named `sp-prober-{i}` — `concurrency: NonZeroUsize` retires the runtime clamp the prior
-//!    `usize` signature carried. The prefix is abbreviated (not the full `specter-prober-`) so the
-//!    name fits Linux's `TASK_COMM_LEN` (15 visible bytes + null) at every legal
-//!    `--probe-concurrency` value — preserving the index in `/proc/<pid>/task/<tid>/comm`. Each
-//!    worker holds clones of the queue receiver, the response sender, and the expectation map, and
-//!    runs on a 32 MiB stack ([`PROBER_WORKER_STACK`]) sized for the subtree walker's
-//!    `PATH_MAX`-deep recursion in an unoptimized (debug) build.
+//!    named `sp-prober-{i}` — `concurrency: NonZeroUsize` retires the runtime clamp the prior `usize`
+//!    signature carried. The prefix is abbreviated (not the full `specter-prober-`) so the name fits
+//!    Linux's `TASK_COMM_LEN` (15 visible bytes + null) at every legal `--probe-concurrency` value
+//!    — preserving the index in `/proc/<pid>/task/<tid>/comm`. Each worker holds clones of the queue
+//!    receiver, the response sender, and the expectation map, and runs on a 32 MiB stack
+//!    ([`PROBER_WORKER_STACK`]) sized for the subtree walker's `PATH_MAX`-deep recursion in an
+//!    unoptimized (debug) build.
 //! 2. The bin maps each `ProbeOp::Probe` from the engine to [`Prober::submit`]; each
 //!    `ProbeOp::Cancel` to [`Prober::cancel`].
 //! 3. Workers loop `recv → check expectation → catch_unwind(run_probe) → cleanup → send`. Panics
 //!    convert to `Failed(EIO)`; the worker survives.
 //! 4. On bin shutdown, [`WorkerProber::shutdown`] drops the queue sender and joins every worker
-//!    thread. The same body runs from [`Drop`] (see "Teardown discipline" below) — the explicit
-//!    path returns each worker's `(index, thread::Result<()>)` so the operator-narration site can
-//!    log per-worker join errors at the right phase of bin teardown, while [`Drop`] is the safety
-//!    net that fires on any drop path the explicit teardown can't reach.
+//!    thread. The same body runs from [`Drop`] (see "Teardown discipline" below) — the explicit path
+//!    returns each worker's `(index, thread::Result<()>)` so the operator-narration site can log
+//!    per-worker join errors at the right phase of bin teardown, while [`Drop`] is the safety net
+//!    that fires on any drop path the explicit teardown can't reach.
 //!
 //! # Teardown discipline
 //!
@@ -34,8 +34,8 @@
 //! The bin drops the engine driver as part of its shutdown sequence (see `App::run`). The drop
 //! releases the engine-side receiver, so the next [`ProberResponseSender::send`] from a worker
 //! returns [`crate::SendError::Disconnected`]. The worker logs that exit at `debug!` and unwinds
-//! its loop — the bin owns whatever shutdown cause logging the operator needs, at the right
-//! severity, on its own thread.
+//! its loop — the bin owns whatever shutdown cause logging the operator needs, at the right severity,
+//! on its own thread.
 //!
 //! # Cancellation discipline
 //!
@@ -58,10 +58,10 @@
 //! - The inner `catch_unwind` in [`run_worker`] catches probe-side panics and emits
 //!   `Failed(PROBER_FAULT)`. The worker survives and resumes its `recv → check → run → cleanup →
 //!   send` loop.
-//! - Lock-acquisition panics (e.g., a panicking allocator during `BTreeMap::insert`) recover
-//!   silently via [`lock_expected`]. The `BTreeMap` operations we run inside the lock are
-//!   exception-safe under Rust's allocator-panic semantics, so the recovered map is structurally
-//!   consistent and the surviving worker continues dispatching probes against it.
+//! - Lock-acquisition panics (e.g., a panicking allocator during `BTreeMap::insert`) recover silently
+//!   via [`lock_expected`]. The `BTreeMap` operations we run inside the lock are exception-safe under
+//!   Rust's allocator-panic semantics, so the recovered map is structurally consistent and the
+//!   surviving worker continues dispatching probes against it.
 //!
 //! There is no outer `catch_unwind` around the worker loop body: with the two primitives above, the
 //! only remaining panic surface is `out.send` (which returns `SendError`, never panics) and the
@@ -102,8 +102,8 @@ pub(super) type ExpectedMap = Arc<Mutex<BTreeMap<ProfileId, ProbeCorrelation>>>;
 /// operations are exception-safe under Rust's allocator-panic semantics — allocation happens *before*
 /// tree mutation, so an allocator panic inside `insert` cannot leave the recovered map structurally
 /// torn. A worker that panics while holding the lock therefore corrupts no invariant we depend on,
-/// and silent recovery is the right policy: surviving workers continue dispatching probes against an
-/// unchanged-or-cleanly-updated expectation map rather than panic-cascading the whole pool.
+/// and silent recovery is the right policy: surviving workers continue dispatching probes against
+/// an unchanged-or-cleanly-updated expectation map rather than panic-cascading the whole pool.
 ///
 /// This is the single panic-recovery primitive in the prober. The `catch_unwind` boundary in
 /// [`run_worker`] handles probe panics; this helper handles lock-acquisition panics. Together they
@@ -171,10 +171,10 @@ impl WorkerProber {
         let (queue_tx, queue_rx) = crossbeam::channel::unbounded::<ProbeRequest>();
         let expected: ExpectedMap = Arc::new(Mutex::new(BTreeMap::new()));
 
-        // Distribute the sink across workers: workers 0..N-1 take a clone, worker N-1 takes the
-        // moved original. This honours the by-value parameter contract ("the function consumes
-        // `out`") rather than letting clippy see N clones + a stale `out` drop at function-return —
-        // and saves one `Arc::clone` per pool as a side-effect.
+        // Distribute the sink across workers: workers 0..N-1 take a clone, worker N-1 takes the moved
+        // original. This honours the by-value parameter contract ("the function consumes `out`")
+        // rather than letting clippy see N clones + a stale `out` drop at function-return — and saves
+        // one `Arc::clone` per pool as a side-effect.
         let mut remaining_out: Option<Arc<dyn ProberResponseSender>> = Some(out);
 
         let mut workers = Vec::with_capacity(concurrency);
@@ -203,10 +203,10 @@ impl WorkerProber {
                 Err(e) => {
                     // Partial-spawn cleanup: drop the queue Sender so any worker already in `recv`
                     // exits on `Disconnected`, then join each spawned handle. A panic here means a
-                    // worker died before it ever entered its loop body — log it so the operator
-                    // sees the real failure alongside the spawn error we're about to return. The
-                    // remaining (untaken) `out` drops naturally when `remaining_out` leaves scope
-                    // at function return.
+                    // worker died before it ever entered its loop body — log it so the operator sees
+                    // the real failure alongside the spawn error we're about to return. The remaining
+                    // (untaken) `out` drops naturally when `remaining_out` leaves scope at function
+                    // return.
                     drop(queue_tx);
                     for (worker, h) in workers.into_iter().enumerate() {
                         if let Err(panic) = h.join() {
@@ -238,10 +238,10 @@ impl WorkerProber {
     /// post-mortem logs can correlate a panicking handle back to its thread name without reaching
     /// for thread-local state.
     ///
-    /// **Idempotent.** A second call (from [`Drop`] after the bin's explicit teardown, or vice
-    /// versa) returns an empty `Vec`: the [`Option::take`] yields `None` on the second go, and
-    /// `mem::take` on the workers `Vec` leaves it empty. The per-worker fan-out is the
-    /// operator-narration shape; [`Drop`] runs the same body and warn-logs any join error itself.
+    /// **Idempotent.** A second call (from [`Drop`] after the bin's explicit teardown, or vice versa)
+    /// returns an empty `Vec`: the [`Option::take`] yields `None` on the second go, and `mem::take`
+    /// on the workers `Vec` leaves it empty. The per-worker fan-out is the operator-narration shape;
+    /// [`Drop`] runs the same body and warn-logs any join error itself.
     #[must_use]
     pub fn shutdown(&mut self) -> Vec<(usize, thread::Result<()>)> {
         drop(self.queue_tx.take());
@@ -358,9 +358,9 @@ pub(super) fn run_probe(req: &ProbeRequest) -> ProbeOutcome {
 /// canned results without touching the production [`run_probe`] path.
 ///
 /// Production [`WorkerProber::new`] passes [`run_probe`] directly; tests in `prober/tests.rs` pass
-/// closures that `panic!()`, simulate concurrent expectation-map writes, etc. The closure is
-/// invoked from inside `catch_unwind(AssertUnwindSafe(...))`, so a test-injected panic is recovered
-/// exactly as a production panic would be.
+/// closures that `panic!()`, simulate concurrent expectation-map writes, etc. The closure is invoked
+/// from inside `catch_unwind(AssertUnwindSafe(...))`, so a test-injected panic is recovered exactly
+/// as a production panic would be.
 pub(super) fn run_worker<F>(
     rx: &Receiver<ProbeRequest>,
     out: &dyn ProberResponseSender,

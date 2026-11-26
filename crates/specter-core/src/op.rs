@@ -47,8 +47,9 @@ impl NonEmptyPathSet {
         self.0.len()
     }
 
-    /// Always `false` — the wrapper's load-bearing invariant. `const` so the proof is inspectable at
-    /// compile time; pairs with [`Self::len`] to satisfy `len_without_is_empty` without `#[allow]`.
+    /// Always `false` — the wrapper's load-bearing invariant. `const` so the proof is inspectable
+    /// at compile time; pairs with [`Self::len`] to satisfy `len_without_is_empty` without
+    /// `#[allow]`.
     #[must_use]
     pub const fn is_empty(&self) -> bool {
         false
@@ -66,9 +67,9 @@ impl NonEmptyPathSet {
 ///
 /// - [`Self::Chains`] — the root→leaf chains of the paths the burst's events named: off them, the
 ///   event stream vouches for what an unmoved directory holds.
-/// - [`Self::WholeSubtree`] — every directory, where nothing vouches for an unmoved one: a walk
-///   with no prior to trust, one whose events cannot witness an in-place write (which need not move
-///   any directory's `lstat`), or the rebase of a tree the command just wrote.
+/// - [`Self::WholeSubtree`] — every directory, where nothing vouches for an unmoved one: a walk with
+///   no prior to trust, one whose events cannot witness an in-place write (which need not move any
+///   directory's `lstat`), or the rebase of a tree the command just wrote.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum ProofObligation {
     Chains(NonEmptyPathSet),
@@ -83,14 +84,14 @@ pub enum ProofObligation {
 /// Boxing the heavy `Subtree` variant was considered and rejected: every non-Descent burst produces
 /// one, at most one Probe is in flight per burst, and `Arc<DirSnapshot>` baselines are already the
 /// dominant payload. The enclosing `ProbeOp` lives in a `StepOutput::probe_ops` `BTreeMap` node —
-/// heap-allocated on insert regardless of variant width — so the variant width never rides an
-/// inline slot.
+/// heap-allocated on insert regardless of variant width — so the variant width never rides an inline
+/// slot.
 #[derive(Debug, Clone)]
 pub enum ProbeRequest {
     /// File-anchor verify / Seed / Rebase. The walker runs a single `lstat` and returns
-    /// `ProbeOutcome::AnchorOk(LeafEntry)` (or `Vanished` on absent / kind-mismatch / `Failed {
-    /// errno }` on I/O). No baseline (a leaf has no descendants to skip), no `obligation` (a single
-    /// `lstat` is definitionally authoritative — no subtree to discharge a proof over), no `forced`
+    /// `ProbeOutcome::AnchorOk(LeafEntry)` (or `Vanished` on absent / kind-mismatch / `Failed { errno
+    /// }` on I/O). No baseline (a leaf has no descendants to skip), no `obligation` (a single `lstat`
+    /// is definitionally authoritative — no subtree to discharge a proof over), no `forced`
     /// (mtime-skip is not a concept for `lstat`).
     AnchorFile {
         /// Profile the engine demuxes the response back to. Echoed back on `ProbeResponse` and used
@@ -115,9 +116,9 @@ pub enum ProbeRequest {
         /// deepest start that still covers every dirty path (for a Standard burst, the deepest
         /// directory the Profile's snapshot lists on the way to the dirty-LCA; for Seed and Rebase,
         /// the anchor), at-or-under `anchor_path`. `Arc::clone` of `tree.path_of(target)` shipped
-        /// on the wire — the walker has no `Tree` and never needs the engine's `ResourceId`. An
-        /// empty path is the lone failure mode (the engine's stale-id sentinel); the walker treats
-        /// empty as `Vanished`.
+        /// on the wire — the walker has no `Tree` and never needs the engine's `ResourceId`. An empty
+        /// path is the lone failure mode (the engine's stale-id sentinel); the walker treats empty
+        /// as `Vanished`.
         target_path: Arc<Path>,
         /// The Profile anchor: the basis every dirent's scope is measured from
         /// (`child_path.strip_prefix(anchor_path)`), as the engine's `covers` measures it. Measured
@@ -141,8 +142,8 @@ pub enum ProbeRequest {
         /// What the walk must read afresh.
         obligation: ProofObligation,
         /// `true` ⇒ walker bypasses mtime-skip at every directory regardless of `baseline_subtree`
-        /// and `obligation`. Engine sets this when `PreFireBurst.forced` is true (max-settle
-        /// deadline elapsed; force-fire).
+        /// and `obligation`. Engine sets this when `PreFireBurst.forced` is true (max-settle deadline
+        /// elapsed; force-fire).
         ///
         /// Defensive: mtime-skip is correct under normal semantics, but a forced probe wants the
         /// freshest possible snapshot regardless of cost.
@@ -164,10 +165,10 @@ pub enum ProbeRequest {
         owner: ProfileId,
         /// Engine-monotonic correlation token — pairs request with response.
         correlation: ProbeCorrelation,
-        /// Filesystem path of the descent prefix at probe-emission time. The engine routes
-        /// responses by `(owner, correlation)` against the owner's state-resident `ProbeSlot` (the
-        /// descent prefix lives on `DescentState`); the walker only needs the path. `Arc::clone` of
-        /// the slot's materialised path — no rebuild.
+        /// Filesystem path of the descent prefix at probe-emission time. The engine routes responses
+        /// by `(owner, correlation)` against the owner's state-resident `ProbeSlot` (the descent
+        /// prefix lives on `DescentState`); the walker only needs the path. `Arc::clone` of the
+        /// slot's materialised path — no rebuild.
         target_path: Arc<Path>,
         /// The awaited head segment of the descent's remaining path at emission time. Frozen for
         /// the lifetime of the armed probe slot: every head mutation (forward advance, rewind
@@ -204,12 +205,12 @@ impl ProbeRequest {
         }
     }
 
-    /// The filesystem path this probe targets, regardless of variant — every variant carries
-    /// exactly one. A **test-only projection** (gated behind `testkit`): production never reads a
+    /// The filesystem path this probe targets, regardless of variant — every variant carries exactly
+    /// one. A **test-only projection** (gated behind `testkit`): production never reads a
     /// `ProbeRequest` back after emit. The walker dispatches on the request *variant* (`run_probe`
-    /// destructures each arm and reads the relevant path field directly), not through this
-    /// accessor; `MockProber` routing and probe-target assertions use it to recover the path
-    /// without re-matching the variant.
+    /// destructures each arm and reads the relevant path field directly), not through this accessor;
+    /// `MockProber` routing and probe-target assertions use it to recover the path without
+    /// re-matching the variant.
     #[cfg(feature = "testkit")]
     #[must_use]
     pub fn target_path(&self) -> &Path {
@@ -221,8 +222,8 @@ impl ProbeRequest {
     }
 }
 
-/// Walker→engine probe response. Flat — `(owner, correlation)` is the staleness key the engine
-/// gates against the owner's in-flight `ProbeSlot`; `outcome` carries the per-variant payload.
+/// Walker→engine probe response. Flat — `(owner, correlation)` is the staleness key the engine gates
+/// against the owner's in-flight `ProbeSlot`; `outcome` carries the per-variant payload.
 #[derive(Debug, Clone)]
 pub struct ProbeResponse {
     pub owner: ProfileId,
@@ -260,8 +261,8 @@ impl ProofAuthority {
 /// (`ProbeFailureExt::from_io`): `core` may not name `libc`.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum ProbeFailure {
-    /// The path refused the read (`EACCES`, `EIO`, …): a fact about the path. Absence is the
-    /// caller's to draw first. A fault in the prober itself answers as one, with `EIO`.
+    /// The path refused the read (`EACCES`, `EIO`, …): a fact about the path. Absence is the caller's
+    /// to draw first. A fault in the prober itself answers as one, with `EIO`.
     Denied { errno: i32 },
     /// The daemon lacked a resource (`EMFILE`, `ENFILE`, `ENOSPC`, `ENOMEM`, `EAGAIN`) at some read
     /// the probe made: it observed nothing, and says nothing of the path.
@@ -304,8 +305,8 @@ pub enum ProbeOutcome {
     },
     /// `Descent` request answered: a structural query gets a structural answer, not a snapshot. Sole
     /// producer is the walker's `probe_descent`. `Some(kind)` — `lstat(prefix/segment)` succeeded;
-    /// the awaited segment exists with this kind. `None` — the prefix is a healthy directory but the
-    /// segment is absent (descent parks on the standing absence observation). A vanished or
+    /// the awaited segment exists with this kind. `None` — the prefix is a healthy directory but
+    /// the segment is absent (descent parks on the standing absence observation). A vanished or
     /// non-directory prefix collapses to [`Self::Vanished`] (rewind) and a root I/O error to
     /// [`Self::Failed`], exactly as the other request shapes. Carrying no payload a verdict could
     /// fold is the type-level statement that structural queries are not quiescence observations.
@@ -315,8 +316,8 @@ pub enum ProbeOutcome {
     Vanished,
     /// The probe could not answer. A walk stops at the first read that wants a resource, and fails
     /// at a root it can neither read whole nor stand on an earlier listing for; a refusal below the
-    /// root answers in the snapshot ([`crate::DirChild::Denied`], or the directory's earlier
-    /// listing) and the certificate instead.
+    /// root answers in the snapshot ([`crate::DirChild::Denied`], or the directory's earlier listing)
+    /// and the certificate instead.
     Failed(ProbeFailure),
 }
 
@@ -347,8 +348,8 @@ pub enum WatchOp {
 }
 
 impl WatchOp {
-    /// The Resource this op targets. Every variant carries one — the match is exhaustive and
-    /// `const`. This is the determinism-sort key for [`crate::StepOutput::watch_ops`].
+    /// The Resource this op targets. Every variant carries one — the match is exhaustive and `const`.
+    /// This is the determinism-sort key for [`crate::StepOutput::watch_ops`].
     #[must_use]
     pub const fn resource(&self) -> ResourceId {
         match self {
@@ -368,16 +369,16 @@ impl WatchOp {
 /// because errno-name matching needs `libc`, which is banned in `core` per `deny.toml`.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum WatchFailure {
-    /// Backpressure: kernel resource limit reached. Engine clamps `watch_demand := 0` on the
-    /// affected resource and waits for natural retry on the parent's next reconcile.
+    /// Backpressure: kernel resource limit reached. Engine clamps `watch_demand := 0` on the affected
+    /// resource and waits for natural retry on the parent's next reconcile.
     ///
-    /// kqueue: `EMFILE` / `ENFILE` from `open(O_EVTONLY)`. inotify: `ENOSPC` from
-    /// `inotify_add_watch` (`max_user_watches`). Both: `ENOMEM`, when the kernel cannot allocate.
+    /// kqueue: `EMFILE` / `ENFILE` from `open(O_EVTONLY)`. inotify: `ENOSPC` from `inotify_add_watch`
+    /// (`max_user_watches`). Both: `ENOMEM`, when the kernel cannot allocate.
     Pressure { errno: i32 },
 
-    /// Path-fatal: the path doesn't resolve to an inode the engine expects. Engine treats as
-    /// terminal for the resource and re-resolves via descent (anchor case ⇒ `finalize_anchor_lost`;
-    /// descendant case ⇒ clamp + wait for parent).
+    /// Path-fatal: the path doesn't resolve to an inode the engine expects. Engine treats as terminal
+    /// for the resource and re-resolves via descent (anchor case ⇒ `finalize_anchor_lost`; descendant
+    /// case ⇒ clamp + wait for parent).
     ///
     /// kqueue: `ENOENT` / `EACCES` / `ELOOP` / `ENOTDIR`. inotify: same set, plus `ENOTDIR` under
     /// `IN_ONLYDIR`.
@@ -441,8 +442,8 @@ impl ProbeOp {
 /// pipeline deliver `EffectComplete` naturally. The engine routes that late completion to
 /// `EffectCompleteOutsideAwaiting` (the Profile has already left `Awaiting` by then).
 ///
-/// **Memory.** `Submit(Effect)` is the dominant variant width; the engine→actuator FIFO channel
-/// slot size is dictated by it. `Cancel { profile }` pays only the discriminant on top of an 8-byte
+/// **Memory.** `Submit(Effect)` is the dominant variant width; the engine→actuator FIFO channel slot
+/// size is dictated by it. `Cancel { profile }` pays only the discriminant on top of an 8-byte
 /// `ProfileId`. Boxing `Submit` would add a heap allocation per emitted Effect for no gain — bursts
 /// emit Effects in batches; `Cancel` is sparse (gate-deadline only).
 #[allow(clippy::large_enum_variant)]

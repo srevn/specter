@@ -13,9 +13,9 @@
 //! load-bearing for `destination = file`: the appender's worker thread is shut down when the
 //! `WorkerGuard` drops, and any subsequent `tracing::*` event is dropped on the floor by
 //! `tracing-appender::non_blocking`. If the engine driver owned the guard, every event between
-//! `drop(driver)` and end-of-`run()` ("watcher thread joined", "specter exited cleanly", etc.)
-//! would be silently lost. Holding the guard on `App::run`'s stack frame defers the appender
-//! shutdown until the very end of the process lifetime.
+//! `drop(driver)` and end-of-`run()` ("watcher thread joined", "specter exited cleanly", etc.) would
+//! be silently lost. Holding the guard on `App::run`'s stack frame defers the appender shutdown until
+//! the very end of the process lifetime.
 //!
 //! Two SIGHUP-driven hooks live on [`ObservabilityHandle`]:
 //!
@@ -26,8 +26,8 @@
 //!
 //! - **Reopen-on-SIGHUP** — when destination = `file`, the underlying `Arc<Mutex<File>>` is
 //!   swappable. The bin calls [`ObservabilityHandle::reopen_file`] unconditionally on SIGHUP so
-//!   `logrotate copytruncate` / move-then-create rotation cycles see their freshly-opened path
-//!   picked up without restart.
+//!   `logrotate copytruncate` / move-then-create rotation cycles see their freshly-opened path picked
+//!   up without restart.
 
 use specter_config::{LogConfig, LogDestination, LogLevel};
 use std::fs::OpenOptions;
@@ -41,8 +41,8 @@ use tracing_subscriber::{
 
 /// Control surface for SIGHUP-driven runtime updates.
 ///
-/// Held by the engine driver; the bin's `App::run` keeps the paired [`ObservabilityGuard`]
-/// separately so `Drop` order doesn't truncate trailing log events.
+/// Held by the engine driver; the bin's `App::run` keeps the paired [`ObservabilityGuard`] separately
+/// so `Drop` order doesn't truncate trailing log events.
 ///
 /// Cheap to construct via `ObservabilityHandle::noop` for tests that don't exercise the SIGHUP API.
 pub(crate) struct ObservabilityHandle {
@@ -79,9 +79,9 @@ impl ObservabilityHandle {
         handle.modify(|f| *f = new_filter)
     }
 
-    /// Reopen the file destination. `Ok(())` when destination is `Stderr` (no-op). Production
-    /// callers (the SIGHUP path) call this unconditionally; logrotate's `copytruncate` mode
-    /// benefits even when the path didn't change in config.
+    /// Reopen the file destination. `Ok(())` when destination is `Stderr` (no-op). Production callers
+    /// (the SIGHUP path) call this unconditionally; logrotate's `copytruncate` mode benefits even
+    /// when the path didn't change in config.
     pub(crate) fn reopen_file(&self) -> io::Result<()> {
         let Some(handle) = &self.file_reopen else {
             return Ok(());
@@ -230,9 +230,9 @@ const fn level_directive(level: LogLevel) -> &'static str {
 
 /// Map `try_init`'s opaque error to an `io::Error` whose `Display` text identifies the cause. The
 /// `ErrorKind` is `Other` — there is no standard `io::ErrorKind` variant for "global subscriber
-/// already installed," and `AlreadyExists` is path-existence semantics that would mislead any
-/// caller matching on kind. The bin's callers (`App::run`) match on neither — they format `Display`
-/// to stderr and exit — so the kind is purely documentary.
+/// already installed," and `AlreadyExists` is path-existence semantics that would mislead any caller
+/// matching on kind. The bin's callers (`App::run`) match on neither — they format `Display` to
+/// stderr and exit — so the kind is purely documentary.
 fn already_installed_err(e: &tracing_subscriber::util::TryInitError) -> io::Error {
     io::Error::other(format!("global tracing subscriber already installed: {e}"))
 }
@@ -242,8 +242,8 @@ fn already_installed_err(e: &tracing_subscriber::util::TryInitError) -> io::Erro
 /// The `Arc<Mutex<File>>` lives behind both [`ReopenableFile`] (which implements [`Write`] and is
 /// consumed by `tracing-appender`) and a detached [`ReopenHandle`] held by [`ObservabilityHandle`].
 /// Reopening swaps the inner `File`; the appender's worker thread keeps locking and writing,
-/// oblivious. Mutex contention is negligible because the worker thread is the sole writer and
-/// reopens happen at SIGHUP cadence.
+/// oblivious. Mutex contention is negligible because the worker thread is the sole writer and reopens
+/// happen at SIGHUP cadence.
 struct ReopenableFile {
     inner: Arc<Mutex<std::fs::File>>,
 }
@@ -265,9 +265,9 @@ impl ReopenableFile {
 
 impl Write for ReopenableFile {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        // A poisoned mutex means a previous holder panicked mid-write; we can't claim anything
-        // about the underlying File state, so we surface the error and let `tracing-appender`'s
-        // NonBlocking writer count it as a drop.
+        // A poisoned mutex means a previous holder panicked mid-write; we can't claim anything about
+        // the underlying File state, so we surface the error and let `tracing-appender`'s NonBlocking
+        // writer count it as a drop.
         let mut guard = self
             .inner
             .lock()
@@ -291,11 +291,11 @@ impl ReopenHandle {
     fn reopen(&self, path: &Path) -> io::Result<()> {
         let new_file = OpenOptions::new().create(true).append(true).open(path)?;
         // Reopening replaces the inner File wholesale; we don't read any mid-panic state from it,
-        // so a poisoned mutex is recoverable. `PoisonError::into_inner` returns the guard but
-        // leaves the Mutex flagged poisoned — `Mutex::clear_poison` (stable since 1.77) actually
-        // resets the flag so subsequent `lock()` calls succeed. Order matters: clear *after* the
-        // swap, since `clear_poison` is `&Mutex` and the guard holds an exclusive borrow; we drop
-        // the guard first, then clear.
+        // so a poisoned mutex is recoverable. `PoisonError::into_inner` returns the guard but leaves
+        // the Mutex flagged poisoned — `Mutex::clear_poison` (stable since 1.77) actually resets
+        // the flag so subsequent `lock()` calls succeed. Order matters: clear *after* the swap, since
+        // `clear_poison` is `&Mutex` and the guard holds an exclusive borrow; we drop the guard
+        // first, then clear.
         let was_poisoned = self.inner.is_poisoned();
         let mut guard = self.inner.lock().unwrap_or_else(|e| {
             tracing::warn!("reopenable-file mutex was poisoned; recovering on reopen");
@@ -355,15 +355,15 @@ mod tests {
 
     #[test]
     fn reopen_recovers_from_poisoned_mutex() {
-        // A panicking write would normally leave the mutex poisoned and permanently break
-        // logrotate. Verify reopen recovers by clearing the poison and swapping in a fresh File.
+        // A panicking write would normally leave the mutex poisoned and permanently break logrotate.
+        // Verify reopen recovers by clearing the poison and swapping in a fresh File.
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("specter.log");
         let w = ReopenableFile::open(&path).unwrap();
         let h = w.handle();
         let inner = Arc::clone(&w.inner);
-        // Poison the mutex via a panic inside a held guard. Suppress the child thread's panic
-        // message so the test output stays focused on the reopen-recovery assertion.
+        // Poison the mutex via a panic inside a held guard. Suppress the child thread's panic message
+        // so the test output stays focused on the reopen-recovery assertion.
         let prior_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
         let _ = std::thread::spawn(move || {
@@ -386,8 +386,8 @@ mod tests {
 
     #[test]
     fn open_failure_error_includes_path() {
-        // ENOENT on the parent directory should surface a message that names the offending log
-        // path, not just "No such file or directory" — operators need to see which file failed.
+        // ENOENT on the parent directory should surface a message that names the offending log path,
+        // not just "No such file or directory" — operators need to see which file failed.
         let cfg = LogConfig {
             level: LogLevel::Info,
             destination: LogDestination::File,

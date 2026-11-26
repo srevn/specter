@@ -26,9 +26,9 @@ use std::time::{Duration, Instant};
 /// Where a Sub anchors.
 ///
 /// `Resource` names a slot the caller has already materialised; the engine trusts it after an O(1)
-/// liveness check. `Path` names an absolute path the engine resolves at attach time — immediate
-/// when every component already exists, otherwise pending descent until the anchor materialises and
-/// a Seed burst establishes the baseline.
+/// liveness check. `Path` names an absolute path the engine resolves at attach time — immediate when
+/// every component already exists, otherwise pending descent until the anchor materialises and a
+/// Seed burst establishes the baseline.
 #[derive(Clone, Debug)]
 pub enum SubAttachAnchor {
     Resource(ResourceId),
@@ -60,8 +60,8 @@ impl SpawnSpec {
         }
     }
 
-    /// The lowered bytecode IR. Borrowed as the `Arc` so emit sites refcount-bump straight onto
-    /// each [`crate::Effect`] — one allocation per validated Sub, never re-wrapped.
+    /// The lowered bytecode IR. Borrowed as the `Arc` so emit sites refcount-bump straight onto each
+    /// [`crate::Effect`] — one allocation per validated Sub, never re-wrapped.
     #[must_use]
     pub const fn program(&self) -> &Arc<ActionProgram> {
         &self.program
@@ -136,12 +136,12 @@ impl MintSpec {
 /// fresh Subs start unfired structurally (no purge step to forget).
 #[derive(Copy, Clone, Debug, Default)]
 pub struct FireHistory {
-    /// `true` once this Sub has emitted at least one Effect. Sole load-bearing reader is the B1
-    /// dedup suppress (`!forced && nothing_changed && has_fired` — a never-fired Sub is its own
-    /// first emission); the per-Profile SeedDrift filter ([`SubRegistry::fired_in`]) and the
-    /// recovery-drift short-circuit ([`SubRegistry::any_fired`]) read it Profile-wide. The
-    /// invariant is the weakest tier in the engine — drift self-corrects on the next real change —
-    /// so a plain `bool` carries it with no edge-method ceremony beyond the registry funnel.
+    /// `true` once this Sub has emitted at least one Effect. Sole load-bearing reader is the B1 dedup
+    /// suppress (`!forced && nothing_changed && has_fired` — a never-fired Sub is its own first
+    /// emission); the per-Profile SeedDrift filter ([`SubRegistry::fired_in`]) and the recovery-drift
+    /// short-circuit ([`SubRegistry::any_fired`]) read it Profile-wide. The invariant is the weakest
+    /// tier in the engine — drift self-corrects on the next real change — so a plain `bool` carries
+    /// it with no edge-method ceremony beyond the registry funnel.
     pub has_fired: bool,
     /// Engine instant of this Sub's last Effect emission; `None` until the first fire. Observational
     /// only — distinct from `has_fired` (the load-bearing B1-dedup signal): this carries the
@@ -153,10 +153,10 @@ pub struct FireHistory {
     /// the IPC `list` projection. Saturating-add on increment (`u64` holds a millennium of
     /// microsecond-cadence fires).
     pub fire_count: u64,
-    /// Cumulative B1-dedup-suppressed verdicts — bumped when this `SubtreeRoot` Sub's
-    /// `fire_decision` resolves to `FireVerdict::SuppressDedup` (unchanged tree, already fired, not
-    /// forced). Observational; surfaces in `list --wide`. `PerStableFile` never suppresses (its
-    /// dedup is diff-membership), so this counter stays zero on those Subs.
+    /// Cumulative B1-dedup-suppressed verdicts — bumped when this `SubtreeRoot` Sub's `fire_decision`
+    /// resolves to `FireVerdict::SuppressDedup` (unchanged tree, already fired, not forced).
+    /// Observational; surfaces in `list --wide`. `PerStableFile` never suppresses (its dedup is
+    /// diff-membership), so this counter stays zero on those Subs.
     pub dedup_suppressed_count: u64,
 }
 
@@ -164,8 +164,8 @@ pub struct FireHistory {
 /// [`crate::Diagnostic::DiscoveryMinted`] says of it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MintEntry {
-    /// Found by an enumeration — before the template holds a certified set, or in a branch the
-    /// daemon could not read until now. It may predate the watch, so its Seed pins cold.
+    /// Found by an enumeration — before the template holds a certified set, or in a branch the daemon
+    /// could not read until now. It may predate the watch, so its Seed pins cold.
     Enumerated,
     /// Missing from a set the template held certified, in a branch the daemon had read: it appeared
     /// under watch, and its Seed owes the first fire.
@@ -275,17 +275,18 @@ pub struct SubAttachRequest {
 ///
 /// Name-keyed: `removed` carries operator watch names; `added`, `modified_identity`, and
 /// `modified_params` carry pre-id [`SubAttachRequest`]s, each naming its Sub. The engine resolves
-/// name → [`SubId`] at apply time through its own authoritative `by_name` index — identity
-/// resolution is a registry-owner operation, not the loader's.
+/// name → [`SubId`] at apply time through its own authoritative `by_name` index — identity resolution
+/// is a registry-owner operation, not the loader's.
 ///
 /// **The `modified` bucket is split.** Two semantically distinct transformations live behind a
 /// "modified watch":
 ///
-/// - **Identity change** (`modified_identity`): the target, the scan, `max_settle` or the events mask
-///   differs from the prior spec, for either kind of target. Any of these moves a Sub to a different
-///   Profile partition (the partition key is `(anchor_resource, ProfileIdentity::config_hash())`).
-///   The engine asks the attach's gate first, then performs `detach_old → attach_new`; a refused
-///   target leaves the old Sub in place — structural rollback at the composition layer.
+/// - **Identity change** (`modified_identity`): the target, the scan, `max_settle` or the events
+///   mask differs from the prior spec, for either kind of target. Any of these moves a Sub to a
+///   different Profile partition (the partition key is `(anchor_resource,
+///   ProfileIdentity::config_hash())`). The engine asks the attach's gate first, then performs
+///   `detach_old → attach_new`; a refused target leaves the old Sub in place — structural rollback
+///   at the composition layer.
 /// - **Params change** (`modified_params`): the target and identity are unchanged; only the
 ///   [`SubParams`] differ. The engine rebinds the live Sub in place, a template with the set it
 ///   minted ([`SubRegistry::rebind`]): no Profile churn, no kernel-watch flap, no baseline loss. On
@@ -341,8 +342,8 @@ pub enum EffectScope {
 ///   timestamps). Both Files and Dirs.
 ///
 /// The set is backed by a `u8` bitmask — `bits()` is the canonical representation folded into the
-/// Profile config hash via [`ProfileIdentity::config_hash`] (two Subs differing only on classes
-/// fork separate Profiles).
+/// Profile config hash via [`ProfileIdentity::config_hash`] (two Subs differing only on classes fork
+/// separate Profiles).
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd)]
 pub struct ClassSet(u8);
 
@@ -352,26 +353,26 @@ impl ClassSet {
     pub const CONTENT: Self = Self(1 << 1);
     pub const METADATA: Self = Self(1 << 2);
 
-    /// Default for [`EffectScope::SubtreeRoot`] — STRUCTURE | CONTENT. CONTENT implies per-file
-    /// FDs, so in-place edits surface as events instead of going unseen until the next probe.
+    /// Default for [`EffectScope::SubtreeRoot`] — STRUCTURE | CONTENT. CONTENT implies per-file FDs,
+    /// so in-place edits surface as events instead of going unseen until the next probe.
     pub const DEFAULT_SUBTREE_ROOT: Self = Self(0b011);
 
-    /// Default for [`EffectScope::PerStableFile`] — CONTENT | METADATA. The user opted into
-    /// per-file granularity; metadata is part of "this file's state changed".
+    /// Default for [`EffectScope::PerStableFile`] — CONTENT | METADATA. The user opted into per-file
+    /// granularity; metadata is part of "this file's state changed".
     pub const DEFAULT_PER_FILE: Self = Self(0b110);
 
     /// Classes whose subscription suffices to witness in-place writes over a settle window — the
     /// semantic mask the verdict floor reads via [`crate::Profile::events_witness_quiescence`] to
     /// decide whether `EventsReliable` or the Layer-C hash channel folds the quiescence verdict.
     ///
-    /// Today reduces to [`Self::CONTENT`]: CONTENT events fire for in-place writes — the only
-    /// change kind that can span the settle window invisibly. STRUCTURE and METADATA are point
-    /// events (atomic creates/renames; chmod/touch) and never bridge a gap. Adding STREAM /
-    /// SPARSE_GROW / XATTR to the witness vocabulary is a one-line decision here.
+    /// Today reduces to [`Self::CONTENT`]: CONTENT events fire for in-place writes — the only change
+    /// kind that can span the settle window invisibly. STRUCTURE and METADATA are point events
+    /// (atomic creates/renames; chmod/touch) and never bridge a gap. Adding STREAM / SPARSE_GROW /
+    /// XATTR to the witness vocabulary is a one-line decision here.
     ///
     /// **Kernel-event-vocabulary assumption.** The criterion assumes the kernel surfaces every
-    /// in-place write as a CONTENT-class event at the write boundary (`NOTE_WRITE` / `NOTE_EXTEND` on
-    /// kqueue, `IN_MODIFY` / `IN_CLOSE_WRITE` on inotify). `mmap`-driven writes via dirty-page
+    /// in-place write as a CONTENT-class event at the write boundary (`NOTE_WRITE` / `NOTE_EXTEND`
+    /// on kqueue, `IN_MODIFY` / `IN_CLOSE_WRITE` on inotify). `mmap`-driven writes via dirty-page
     /// flushes, async-I/O completions, and `splice(2)` zero-copy paths may not satisfy this on every
     /// supported platform. Workloads with such writers should subscribe to a mask that does *not*
     /// cover [`Self::IN_PLACE_WRITES`] (e.g. `STRUCTURE` only), forcing the hash-channel safety net.
@@ -386,16 +387,16 @@ impl ClassSet {
     /// — the criterion for scan shapes whose proof object is a match set (`ScanConfig::MatchChain`)
     /// rather than a subtree content hash. Membership changes (entries appearing / vanishing /
     /// renaming at chain positions) are all STRUCTURE point events; no in-place-write analog can
-    /// span the window invisibly, so a STRUCTURE-covering mask folds the verdict via
-    /// `EventsReliable` — N=1, no hash-channel ride.
+    /// span the window invisibly, so a STRUCTURE-covering mask folds the verdict via `EventsReliable`
+    /// — N=1, no hash-channel ride.
     ///
     /// **HAZARD — an "equal hash ⇒ skip reconcile" shortcut has two obstructions.** The load-bearing
     /// one is registry-delta starvation: a discovery template can join its Profile with no tree event
     /// in sight (hot reload, mid-life join), and its mints are then owed on an *unchanged* tree — a
     /// hash gate would skip exactly the pass that owes them. The template's [`MintState::miss`] does
-    /// not disarm it: an appearance says the template holds a certified set, not that a pass ran for
-    /// it. A template that joins a descent whose prefix is then seen absent holds the empty set, and
-    /// a prefix found again with the content its settled hash recorded would skip that template's
+    /// not disarm it: an appearance says the template holds a certified set, not that a pass ran
+    /// for it. A template that joins a descent whose prefix is then seen absent holds the empty set,
+    /// and a prefix found again with the content its settled hash recorded would skip that template's
     /// first pass; a gate needs its own record of which templates a pass has reconciled. The second
     /// obstruction is hash noise: a matched *file* terminus still folds `{mtime, size, leaf_hash}`
     /// into the pruned snapshot hash, so an unwatched in-place append moves the hash without an event
@@ -460,12 +461,12 @@ impl std::ops::BitAndAssign for ClassSet {
     }
 }
 
-/// A live Sub's reaction: the params it runs or the spec it stamps, and the state it carries at
-/// rest — a fire history on the spawn side, a [`MintState`] on the mint side.
+/// A live Sub's reaction: the params it runs or the spec it stamps, and the state it carries at rest
+/// — a fire history on the spawn side, a [`MintState`] on the mint side.
 ///
 /// Every spawn-field consumer dispatches on this sum, so the template case cannot be forgotten — a
-/// `Mint` Sub has no `scope`, `program`, or fire history of its own (the minted Subs' reaction
-/// lives on its spec; the mint never fires an Effect).
+/// `Mint` Sub has no `scope`, `program`, or fire history of its own (the minted Subs' reaction lives
+/// on its spec; the mint never fires an Effect).
 #[derive(Debug)]
 pub enum Reaction {
     Spawn {
@@ -513,8 +514,8 @@ pub struct Sub {
 }
 
 impl Sub {
-    /// A Sub a request declared at one anchor: it runs `params`, and starts never fired. The
-    /// slotmap key is the Sub's identity authority — there is no `id` field.
+    /// A Sub a request declared at one anchor: it runs `params`, and starts never fired. The slotmap
+    /// key is the Sub's identity authority — there is no `id` field.
     #[must_use]
     pub fn declared(profile: ProfileId, name: CompactString, params: SubParams) -> Self {
         Self {
@@ -597,9 +598,9 @@ impl Sub {
         }
     }
 
-    /// Whether this Sub is a discovery template — its reaction is minting Subs, never firing
-    /// Effects. A template comes from a request's [`SubAttachTarget::Pattern`] alone, which seats
-    /// it on the chain Profile its pattern names.
+    /// Whether this Sub is a discovery template — its reaction is minting Subs, never firing Effects.
+    /// A template comes from a request's [`SubAttachTarget::Pattern`] alone, which seats it on the
+    /// chain Profile its pattern names.
     #[must_use]
     pub const fn is_template(&self) -> bool {
         matches!(self.reaction, Reaction::Mint { .. })
@@ -662,18 +663,18 @@ impl Sub {
 ///
 /// - `by_profile` groups Subs by `ProfileId` (insertion order within a Profile).
 /// - `by_name` resolves an operator-facing or synthesised name to its `SubId`. Indexes **every**
-///   Sub regardless of provenance: the config validator reserves the `@` byte, so a
-///   `[[watch]].name` never carries one and a minted `<template_name>@<matched_path>` always does —
-///   the two populations are disjoint by construction and their union is unique. Callers that tell
-///   them apart read [`Sub::minted_by`] on the resolved Sub. The index is load-bearing — hot-reload
-///   resolves every `removed`/`modified` name to an id through [`Self::find_by_name`] (O(log N)).
+///   Sub regardless of provenance: the config validator reserves the `@` byte, so a `[[watch]].name`
+///   never carries one and a minted `<template_name>@<matched_path>` always does — the two
+///   populations are disjoint by construction and their union is unique. Callers that tell them apart
+///   read [`Sub::minted_by`] on the resolved Sub. The index is load-bearing — hot-reload resolves
+///   every `removed`/`modified` name to an id through [`Self::find_by_name`] (O(log N)).
 /// - `by_template` holds each template's minted set ([`Self::minted`]), keyed on the `minted_by`
 ///   every minted Sub carries. An entry leaves with its last member, or with its template, whose
 ///   removal hands the members back ([`Removed::orphans`]).
 ///
 /// A duplicate name is loud in dev — `insert`'s `debug_assert!` — and unreachable in correct
-/// operation: the validator (static side) and the discovery reconcile's dedup (dynamic side)
-/// prevent it, and the `@`-disjointness keeps the two construction sites from racing each other. A
+/// operation: the validator (static side) and the discovery reconcile's dedup (dynamic side) prevent
+/// it, and the `@`-disjointness keeps the two construction sites from racing each other. A
 /// release-mode breach is contained by `remove`'s id-checked clear of `by_name`: the index is
 /// last-writer-wins, so the name resolves to the later id, and the id-check refuses to clear that
 /// mapping when the earlier (shadowed) id is removed — the *mapping* stays 1:1, the wrong name→id
@@ -693,8 +694,8 @@ pub struct SubRegistry {
 #[must_use = "a removed template hands back the Subs it minted; the caller owes their detach"]
 pub struct Removed {
     pub sub: Sub,
-    /// The Subs that name `sub` their template ([`Sub::minted_by`]), in id order — still
-    /// registered, their template gone. Empty for any Sub that minted nothing.
+    /// The Subs that name `sub` their template ([`Sub::minted_by`]), in id order — still registered,
+    /// their template gone. Empty for any Sub that minted nothing.
     pub orphans: BTreeSet<SubId>,
 }
 
@@ -724,8 +725,8 @@ impl SubRegistry {
     }
 
     /// Remove a Sub by id and clear it from every index; `None` for a stale id. A template leaves
-    /// with its minted set: the members stay registered and come back as [`Removed::orphans`],
-    /// whose detach the caller owes.
+    /// with its minted set: the members stay registered and come back as [`Removed::orphans`], whose
+    /// detach the caller owes.
     #[must_use]
     pub fn remove(&mut self, id: SubId) -> Option<Removed> {
         let sub = self.subs.remove(id)?;
@@ -813,8 +814,8 @@ impl SubRegistry {
     ///
     /// A declared Sub's name and a minted one resolve alike — callers that tell them apart read
     /// [`Sub::minted_by`] on the resolved Sub. The config validator reserves the `@` byte, so a
-    /// declared name and a minted `<template_name>@<matched_path>` cannot collide; uniqueness
-    /// across the union is structural.
+    /// declared name and a minted `<template_name>@<matched_path>` cannot collide; uniqueness across
+    /// the union is structural.
     ///
     /// Load-bearing: the engine's hot-reload shim resolves every `removed`/`modified` name through
     /// here.
@@ -825,9 +826,9 @@ impl SubRegistry {
 
     /// The `Spawn` arm's mutable fire history for `sub` — the shared body of the four fire-history
     /// edges. Two misses, two loudnesses: a stale id is a silent `None` (the history already died
-    /// with the slotmap entry — a benign detach race), while a `Mint` hit is a **debug-loud**
-    /// `None` (a fire-history write on a template is a routing logic error — discovery fires
-    /// attachments, never Effects). `edge` names the calling edge in the assert.
+    /// with the slotmap entry — a benign detach race), while a `Mint` hit is a **debug-loud** `None`
+    /// (a fire-history write on a template is a routing logic error — discovery fires attachments,
+    /// never Effects). `edge` names the calling edge in the assert.
     fn spawn_history_mut(&mut self, sub: SubId, edge: &str) -> Option<&mut FireHistory> {
         match &mut self.subs.get_mut(sub)?.reaction {
             Reaction::Spawn { history, .. } => Some(history),
@@ -844,8 +845,8 @@ impl SubRegistry {
 
     /// The `Mint` arm's mutable state for `sub` — the shared body of the template edges, and the
     /// dual of [`Self::spawn_history_mut`]: a stale id is a silent `None` (the template died with
-    /// its slotmap entry — a benign detach race), a `Spawn` hit a **debug-loud** `None` (a
-    /// template's state lives only on `Mint`). `edge` names the calling edge in the assert.
+    /// its slotmap entry — a benign detach race), a `Spawn` hit a **debug-loud** `None` (a template's
+    /// state lives only on `Mint`). `edge` names the calling edge in the assert.
     fn mint_state_mut(&mut self, sub: SubId, edge: &str) -> Option<&mut MintState> {
         match &mut self.subs.get_mut(sub)?.reaction {
             Reaction::Mint { state, .. } => Some(state),
@@ -871,14 +872,15 @@ impl SubRegistry {
     }
 
     /// Record `count` successful Effect emissions on `sub` at `now`. Bumps
-    /// [`FireHistory::fire_count`] by `count` (saturating) and writes [`FireHistory::last_fired_at`]
-    /// = `Some(now)`. Observational — [`Self::mark_fired`] is the load-bearing B1-dedup edge; this
-    /// one carries the per-Sub fire history the operator-facing `list` projection renders.
+    /// [`FireHistory::fire_count`] by `count` (saturating) and writes
+    /// [`FireHistory::last_fired_at`] = `Some(now)`. Observational — [`Self::mark_fired`] is the
+    /// load-bearing B1-dedup edge; this one carries the per-Sub fire history the operator-facing
+    /// `list` projection renders.
     ///
     /// Called at most once per Sub per `emit_effects` pass on the emit-side. `count` is `1` for a
     /// `SubtreeRoot` emission and the per-file count for a `PerStableFile` emission (aggregated so
-    /// `Diagnostic::SubFired`'s wire stream isn't amplified by N). A stale `SubId` is a silent
-    /// no-op — the counter already died with the slotmap entry, mirroring [`Self::mark_fired`].
+    /// `Diagnostic::SubFired`'s wire stream isn't amplified by N). A stale `SubId` is a silent no-op
+    /// — the counter already died with the slotmap entry, mirroring [`Self::mark_fired`].
     pub fn record_fired(&mut self, sub: SubId, count: u32, now: Instant) {
         if let Some(h) = self.spawn_history_mut(sub, "record_fired") {
             h.fire_count = h.fire_count.saturating_add(u64::from(count));
@@ -933,17 +935,17 @@ impl SubRegistry {
 
     /// Clear `sub`'s fire history — the `EffectComplete::Failed` clear. A failed Effect produced no
     /// observation worth deduplicating against, so the next stable verdict at this Sub must re-fire
-    /// even on an unchanged tree. No-op on a stale `SubId` (already detached ⇒ its history is
-    /// already gone).
+    /// even on an unchanged tree. No-op on a stale `SubId` (already detached ⇒ its history is already
+    /// gone).
     pub fn clear_fired(&mut self, sub: SubId) {
         if let Some(h) = self.spawn_history_mut(sub, "clear_fired") {
             h.has_fired = false;
         }
     }
 
-    /// Whether any Sub on `profile` has fired — the fast `seed_drift_observed` short-circuit
-    /// ("never fired ⇒ no prior emission to re-fire on recovery"). The scan legitimately runs
-    /// Profile-wide: a `Mint` Sub reports never-fired through [`Sub::has_fired`] — no assert.
+    /// Whether any Sub on `profile` has fired — the fast `seed_drift_observed` short-circuit ("never
+    /// fired ⇒ no prior emission to re-fire on recovery"). The scan legitimately runs Profile-wide:
+    /// a `Mint` Sub reports never-fired through [`Sub::has_fired`] — no assert.
     #[must_use]
     pub fn any_fired(&self, profile: ProfileId) -> bool {
         self.at(profile)
@@ -951,8 +953,8 @@ impl SubRegistry {
             .any(|sid| self.subs.get(*sid).is_some_and(Sub::has_fired))
     }
 
-    /// The Subs on `profile` that have fired — the SeedDrift conservative-recovery fire-filter
-    /// basis. `Mint` Subs naturally never qualify ([`Sub::has_fired`] is structurally `false`).
+    /// The Subs on `profile` that have fired — the SeedDrift conservative-recovery fire-filter basis.
+    /// `Mint` Subs naturally never qualify ([`Sub::has_fired`] is structurally `false`).
     ///
     /// **Order is membership only.** The caller filters with `.contains`; the observable Effect order
     /// is established globally by [`crate::StepOutput::sort_for_emission`] (the load-bearing `(SubId,
@@ -969,8 +971,8 @@ impl SubRegistry {
 
     /// The least settle of the Subs on `profile` — the floor its Profile debounces at; `None` for a
     /// Profile with no Sub. Loud, not filtered: `insert` and `remove` keep `by_profile` and the
-    /// slotmap in lockstep, so an id one holds and the other does not is a breach of this
-    /// registry's own invariant, and a floor folded past it would be silently too high.
+    /// slotmap in lockstep, so an id one holds and the other does not is a breach of this registry's
+    /// own invariant, and a floor folded past it would be silently too high.
     #[must_use]
     pub fn settle_floor(&self, profile: ProfileId) -> Option<Duration> {
         self.at(profile)
@@ -1012,12 +1014,12 @@ impl SubRegistry {
     /// so the variant dispatch excludes it structurally.
     ///
     /// **Must not be collapsed into [`crate::Profile::has_per_file_fds`].** That predicate is
-    /// events-mask derived (`CONTENT | METADATA` present) and a `SubtreeRoot` Sub watching
-    /// `CONTENT` sets it just as much as a `PerStableFile` Sub does — it is *necessary* for
-    /// per-file FDs but *not sufficient* for "this Profile carries a per-file-*scoped* reaction".
-    /// Swapping this scan for `has_per_file_fds` would false-positive the recovery-drop diagnostic
-    /// on Subtree-only Profiles that happen to watch content. The spawn scope is the only sound
-    /// witness; the scan stays.
+    /// events-mask derived (`CONTENT | METADATA` present) and a `SubtreeRoot` Sub watching `CONTENT`
+    /// sets it just as much as a `PerStableFile` Sub does — it is *necessary* for per-file FDs but
+    /// *not sufficient* for "this Profile carries a per-file-*scoped* reaction". Swapping this scan
+    /// for `has_per_file_fds` would false-positive the recovery-drop diagnostic on Subtree-only
+    /// Profiles that happen to watch content. The spawn scope is the only sound witness; the scan
+    /// stays.
     #[must_use]
     pub fn has_per_stable_file_sub(&self, profile: ProfileId) -> bool {
         self.at(profile).iter().any(|sid| {
@@ -1110,10 +1112,10 @@ mod tests {
     #[test]
     fn references_diff_derived_false_for_anchor_only_program() {
         assert!(!anchor_only_program().references_diff_derived());
-        // The full non-diff-derived set: every single-value placeholder PLUS `Excluded`
-        // (multi-value but not diff-derived). Including `Excluded` here is the load-bearing
-        // assertion of the `is_multivalue` / `is_diff_derived` split — using the `Excluded` variant
-        // in a template must NOT ratchet `Sub.needs_diff` true.
+        // The full non-diff-derived set: every single-value placeholder PLUS `Excluded` (multi-value
+        // but not diff-derived). Including `Excluded` here is the load-bearing assertion of the
+        // `is_multivalue` / `is_diff_derived` split — using the `Excluded` variant in a template
+        // must NOT ratchet `Sub.needs_diff` true.
         for p in [
             Placeholder::Path,
             Placeholder::Relative,
@@ -1148,12 +1150,12 @@ mod tests {
         assert!(!spec.needs_diff());
     }
 
-    /// A freshly built Sub starts with no fire history — the B1-dedup / SeedDrift baseline.
-    /// Relocated from the deleted per-Profile `new_profile_initialises_fired_subs_empty`: the
-    /// history now lives per-Sub, so the "starts empty" contract is asserted on the Sub, not the
-    /// Profile. Also pins the three observational counters' fresh state — `record_fired` /
-    /// `record_dedup_suppressed` are the only writers, so a fresh Sub can never carry inherited
-    /// history from a slotmap slot's prior occupant.
+    /// A freshly built Sub starts with no fire history — the B1-dedup / SeedDrift baseline. Relocated
+    /// from the deleted per-Profile `new_profile_initialises_fired_subs_empty`: the history now lives
+    /// per-Sub, so the "starts empty" contract is asserted on the Sub, not the Profile. Also pins
+    /// the three observational counters' fresh state — `record_fired` / `record_dedup_suppressed`
+    /// are the only writers, so a fresh Sub can never carry inherited history from a slotmap slot's
+    /// prior occupant.
     #[test]
     fn fresh_sub_starts_unfired() {
         let sub = declared(ProfileId::default(), "build");
@@ -1165,8 +1167,8 @@ mod tests {
     }
 
     /// `record_fired` accumulates per-pass counts into `fire_count` and stamps `last_fired_at` with
-    /// the supplied instant. The B1-dedup `has_fired` is untouched — `mark_fired` and
-    /// `record_fired` are disjoint edge methods on disjoint pieces of fire history.
+    /// the supplied instant. The B1-dedup `has_fired` is untouched — `mark_fired` and `record_fired`
+    /// are disjoint edge methods on disjoint pieces of fire history.
     #[test]
     fn record_fired_bumps_count_and_stamps_last_fired() {
         let mut reg = SubRegistry::new();
@@ -1359,8 +1361,8 @@ mod tests {
     }
 
     /// The minted set follows the two edges: `insert` files a minted Sub under its template and
-    /// `remove` takes it out; a template's removal hands back what it still minted — registered
-    /// until its detach — and no entry outlives the Subs it holds.
+    /// `remove` takes it out; a template's removal hands back what it still minted — registered until
+    /// its detach — and no entry outlives the Subs it holds.
     #[test]
     fn minted_set_follows_insert_and_remove_and_leaves_with_its_template() {
         let mut reg = SubRegistry::new();
@@ -1441,8 +1443,9 @@ mod tests {
         );
     }
 
-    /// `Sub::declared` does not re-wrap the program: the caller's Arc is the same allocation the Sub
-    /// stores. The minted Arc from the config layer's `lower_to_program` flows through without churn.
+    /// `Sub::declared` does not re-wrap the program: the caller's Arc is the same allocation the
+    /// Sub stores. The minted Arc from the config layer's `lower_to_program` flows through without
+    /// churn.
     #[test]
     fn sub_new_does_not_rewrap_program_arc() {
         let program = anchor_only_program();
@@ -1573,8 +1576,8 @@ mod tests {
         );
     }
 
-    /// Stale `SubId` returns `None`. The dispatcher resolves through `find_by_name` in the same
-    /// step as the rebind, so this surface is rarely hit in production; the engine wraps it in a
+    /// Stale `SubId` returns `None`. The dispatcher resolves through `find_by_name` in the same step
+    /// as the rebind, so this surface is rarely hit in production; the engine wraps it in a
     /// `RebindUnknownSub` diagnostic when it does.
     #[test]
     fn rebind_returns_none_on_stale_sub_id() {

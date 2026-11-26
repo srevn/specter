@@ -10,16 +10,16 @@
 //!   listing, and `Vanished` at the walk's root. A child's own `ENOENT` leaves the level whole.
 //! - **Want of a resource**: it says nothing of the tree, so the walk stops with `Failed(Transient)`.
 //! - **Denied**, anything else: the level cannot be read whole, so it is denied as one, and what
-//!   stands in for it is decided by [`WalkContext::stand_in`] — its earlier listing, matched by
-//!   name and identity, or [`DirChild::Denied`], an identity with no content. A root with no
-//!   earlier listing is one the walk cannot answer for: `Failed(Denied)`.
+//!   stands in for it is decided by [`WalkContext::stand_in`] — its earlier listing, matched by name
+//!   and identity, or [`DirChild::Denied`], an identity with no content. A root with no earlier
+//!   listing is one the walk cannot answer for: `Failed(Denied)`.
 //!
-//! The certificate names every directory the walk had cause to read and could not. A subtree
-//! watch's lever over a directory it may not read is `exclude`, whose gate runs before the `lstat`.
+//! The certificate names every directory the walk had cause to read and could not. A subtree watch's
+//! lever over a directory it may not read is `exclude`, whose gate runs before the `lstat`.
 //!
 //! An unforced walk does not read a directory it owes no read — no obligation runs through it and
-//! its `lstat` has not moved since its earlier listing — and stands on that listing, at every
-//! depth. Symlinks are never followed.
+//! its `lstat` has not moved since its earlier listing — and stands on that listing, at every depth.
+//! Symlinks are never followed.
 
 use crate::ProbeFailureExt;
 use crate::prober::PROBER_FAULT;
@@ -102,8 +102,8 @@ impl WalkContext<'_> {
         }
     }
 
-    /// True iff the walk has cause to read the directory at `path` afresh over `listing`, its
-    /// earlier listing: an obligation runs through it, or its `lstat` (`root_meta`) moved since.
+    /// True iff the walk has cause to read the directory at `path` afresh over `listing`, its earlier
+    /// listing: an obligation runs through it, or its `lstat` (`root_meta`) moved since.
     fn owes_read(&self, path: &Path, root_meta: DirMeta, listing: &DirSnapshot) -> bool {
         matches!(self.obligation, ProofObligation::WholeSubtree)
             || listing.root_meta() != root_meta
@@ -237,10 +237,11 @@ pub(super) fn probe_subtree(
     }
 }
 
-/// A descent's structural query: does `segment` exist under `prefix`, and as what kind? On a miss, a
-/// second `lstat`, of the prefix, tells what is missing — the segment alone (`kind: None`), or the
-/// prefix itself (`Vanished`) — and an unreadable prefix is `Failed`, a non-observation rather than
-/// an absence. The two `lstat`s are not atomic; the next event re-probes whatever the second saw.
+/// A descent's structural query: does `segment` exist under `prefix`, and as what kind? On a miss,
+/// a second `lstat`, of the prefix, tells what is missing — the segment alone (`kind: None`), or
+/// the prefix itself (`Vanished`) — and an unreadable prefix is `Failed`, a non-observation rather
+/// than an absence. The two `lstat`s are not atomic; the next event re-probes whatever the second
+/// saw.
 pub(super) fn probe_descent(prefix: &Path, segment: &str) -> ProbeOutcome {
     match std::fs::symlink_metadata(prefix.join(segment)) {
         Ok(meta) => ProbeOutcome::SegmentObserved {
@@ -447,8 +448,8 @@ mod tests {
 
     /// Mounts cannot be built in a unit test, so the cross-device pin is the predicate composition:
     /// a device-mismatched child still descends under `MatchChain` (a chain's levels may cross
-    /// mounts) and refuses under `Subtree`, and the same-device control proves the `dev ==
-    /// root_dev` translation is not inverted.
+    /// mounts) and refuses under `Subtree`, and the same-device control proves the `dev == root_dev`
+    /// translation is not inverted.
     #[test]
     fn should_recurse_device_gate_is_shape_policy() {
         let obligation = ProofObligation::WholeSubtree;

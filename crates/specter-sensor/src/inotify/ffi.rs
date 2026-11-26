@@ -1,6 +1,6 @@
 //! Thin libc wrappers over the inotify syscalls — the lone `unsafe` surface in this module. Each
-//! function below is a direct syscall; module-level `#[allow(unsafe_code)]` keeps the audit
-//! boundary at the file edge, mirroring [`crate::kqueue::ffi`].
+//! function below is a direct syscall; module-level `#[allow(unsafe_code)]` keeps the audit boundary
+//! at the file edge, mirroring [`crate::kqueue::ffi`].
 //!
 //! ## CLOEXEC discipline
 //!
@@ -14,8 +14,8 @@
 //! `inotify_init1(IN_NONBLOCK)` arms the inotify fd as non-blocking so [`read_inotify`] returns
 //! `Ok(0)` on `EAGAIN` (empty queue) and never wedges the calling thread. The trait surface
 //! ([`crate::FsWatcher::drain_ready`]) wraps this in a drain-to-empty loop that terminates on
-//! `Ok(0)`; callers block at the reactor level on [`std::os::fd::AsFd::as_fd`] of the watcher,
-//! never inside the FFI.
+//! `Ok(0)`; callers block at the reactor level on [`std::os::fd::AsFd::as_fd`] of the watcher, never
+//! inside the FFI.
 
 #![allow(unsafe_code)]
 
@@ -31,8 +31,8 @@ use std::path::Path;
 /// Convert a `Path` into a NUL-terminated C string for syscalls. Embedded NULs (impossible from a
 /// real Linux path component but defensible from fuzzed input) surface as a typed `io::Error::other`.
 /// The watcher's trait wrapper classifies that as [`crate::WatchFailure::Invariant`] (errno = 0 hits
-/// the `_` arm in `WatchFailureExt::from_io`), which is the correct routing — a NUL-bearing path is a
-/// programmer / config error, not a kernel-pressure or path-fatal signal.
+/// the `_` arm in `WatchFailureExt::from_io`), which is the correct routing — a NUL-bearing path is
+/// a programmer / config error, not a kernel-pressure or path-fatal signal.
 fn path_to_cstring(path: &Path) -> io::Result<CString> {
     CString::new(path.as_os_str().as_bytes())
         .map_err(|_| Error::other("path contains an interior NUL byte"))
@@ -40,9 +40,9 @@ fn path_to_cstring(path: &Path) -> io::Result<CString> {
 
 /// Create an inotify instance with `IN_NONBLOCK | IN_CLOEXEC`.
 ///
-/// `IN_NONBLOCK` lets the watcher's drain-to-empty loop terminate on `Ok(0)` (kernel reports
-/// `EAGAIN` on an empty queue) instead of blocking the calling thread; `IN_CLOEXEC` plugs the
-/// fork+exec leak (see module docs).
+/// `IN_NONBLOCK` lets the watcher's drain-to-empty loop terminate on `Ok(0)` (kernel reports `EAGAIN`
+/// on an empty queue) instead of blocking the calling thread; `IN_CLOEXEC` plugs the fork+exec leak
+/// (see module docs).
 pub(super) fn inotify_init() -> io::Result<OwnedFd> {
     // SAFETY: `inotify_init1` returns a fresh non-negative fd or -1. The flag set is a valid bit-or
     // of two libc constants. No memory or fd ownership crosses the boundary.
@@ -62,9 +62,9 @@ pub(super) fn inotify_init() -> io::Result<OwnedFd> {
 /// - The returned `wd` is non-negative on success; on update of an existing path the kernel returns
 ///   the same `wd`, on a path resolving to a different inode it returns a fresh `wd`.
 ///
-/// The watcher's [`super::watcher::InotifyWatcher::watch`] uses the wd-equality check to detect
-/// inode swaps under an atomic rename of the watched path — the load-bearing race the
-/// `/proc/self/fd/N` install is designed to close.
+/// The watcher's [`super::watcher::InotifyWatcher::watch`] uses the wd-equality check to detect inode
+/// swaps under an atomic rename of the watched path — the load-bearing race the `/proc/self/fd/N`
+/// install is designed to close.
 pub(super) fn inotify_add_watch(fd: &OwnedFd, path: &Path, mask: u32) -> io::Result<c_int> {
     let cstr = path_to_cstring(path)?;
     // SAFETY: `cstr` is a valid NUL-terminated C string for the duration of the call (lifetime
@@ -90,8 +90,8 @@ pub(super) fn inotify_add_watch(fd: &OwnedFd, path: &Path, mask: u32) -> io::Res
 /// [`super::super::kqueue::ffi::register_vnode`]'s fd-bound registration), not a watcher concern;
 /// callers hand over the `O_PATH` fd plus mask and read back the watch descriptor.
 ///
-/// Returns the watch descriptor on success, matching [`inotify_add_watch`]'s contract. The
-/// realistic error set is `EACCES` (no `inotify(7)` permission on the inode), `ENOSPC`
+/// Returns the watch descriptor on success, matching [`inotify_add_watch`]'s contract. The realistic
+/// error set is `EACCES` (no `inotify(7)` permission on the inode), `ENOSPC`
 /// (`/proc/sys/fs/inotify/max_user_watches` exceeded), `ENOMEM`.
 pub(super) fn inotify_add_watch_fd(
     inotify_fd: &OwnedFd,
@@ -100,9 +100,9 @@ pub(super) fn inotify_add_watch_fd(
 ) -> io::Result<c_int> {
     let mut buf = [0u8; PROC_FD_PATH_BUF];
     let cstr = format_proc_fd_path(&mut buf, watched_fd.as_raw_fd());
-    // SAFETY: `cstr.as_ptr()` is a valid `*const c_char` for the duration of the syscall (`buf`
-    // lives on the stack across this call); `mask` is a valid `IN_*` bit set; `inotify_fd` is a
-    // valid open inotify_fd.
+    // SAFETY: `cstr.as_ptr()` is a valid `*const c_char` for the duration of the syscall (`buf` lives
+    // on the stack across this call); `mask` is a valid `IN_*` bit set; `inotify_fd` is a valid open
+    // inotify_fd.
     let wd = unsafe { libc::inotify_add_watch(inotify_fd.as_raw_fd(), cstr.as_ptr(), mask) };
     if wd < 0 {
         return Err(Error::last_os_error());
@@ -110,17 +110,17 @@ pub(super) fn inotify_add_watch_fd(
     Ok(wd)
 }
 
-/// `/proc/self/fd/<c_int>\0` stack buffer size. `/proc/self/fd/` is 14 bytes; a non-negative
-/// `c_int` (i32 on every Linux target) is at most 10 decimal digits (`i32::MAX = 2_147_483_647`);
-/// plus NUL = 25 bytes. 32 is comfortable round-power-of-two storage.
+/// `/proc/self/fd/<c_int>\0` stack buffer size. `/proc/self/fd/` is 14 bytes; a non-negative `c_int`
+/// (i32 on every Linux target) is at most 10 decimal digits (`i32::MAX = 2_147_483_647`); plus NUL =
+/// 25 bytes. 32 is comfortable round-power-of-two storage.
 const PROC_FD_PATH_BUF: usize = 32;
 
 /// Format `/proc/self/fd/<fd>` into the start of `buf` and return a borrowed [`CStr`] view of the
 /// populated prefix.
 ///
-/// Panics on a negative fd — [`OwnedFd::as_raw_fd`] is non-negative by API contract, so a panic
-/// here is a structural break (the watcher would otherwise format the two's-complement value as the
-/// procfs path, silently watching whatever inode that aliased fd refers to).
+/// Panics on a negative fd — [`OwnedFd::as_raw_fd`] is non-negative by API contract, so a panic here
+/// is a structural break (the watcher would otherwise format the two's-complement value as the procfs
+/// path, silently watching whatever inode that aliased fd refers to).
 fn format_proc_fd_path(buf: &mut [u8; PROC_FD_PATH_BUF], fd: RawFd) -> &CStr {
     const PREFIX: &[u8] = b"/proc/self/fd/";
     let fd_unsigned =
@@ -129,9 +129,9 @@ fn format_proc_fd_path(buf: &mut [u8; PROC_FD_PATH_BUF], fd: RawFd) -> &CStr {
     let digits_written = write_decimal_u32(&mut buf[PREFIX.len()..], fd_unsigned);
     let nul_pos = PREFIX.len() + digits_written;
     buf[nul_pos] = 0;
-    // SAFETY: `buf[..=nul_pos]` ends in NUL and contains no interior NULs: PREFIX is constant
-    // ASCII; `write_decimal_u32` writes only ASCII digits (`b'0'..=b'9'`); position `nul_pos` is
-    // the first NUL byte placed above.
+    // SAFETY: `buf[..=nul_pos]` ends in NUL and contains no interior NULs: PREFIX is constant ASCII;
+    // `write_decimal_u32` writes only ASCII digits (`b'0'..=b'9'`); position `nul_pos` is the first
+    // NUL byte placed above.
     unsafe { CStr::from_bytes_with_nul_unchecked(&buf[..=nul_pos]) }
 }
 
@@ -142,8 +142,8 @@ fn write_decimal_u32(buf: &mut [u8], mut value: u32) -> usize {
         buf[0] = b'0';
         return 1;
     }
-    // Digits accumulate least-significant-first into a scratch buffer, then reverse-copy into
-    // `buf`. Avoids the two-pass "compute length first" overhead at the cost of 10 stack bytes.
+    // Digits accumulate least-significant-first into a scratch buffer, then reverse-copy into `buf`.
+    // Avoids the two-pass "compute length first" overhead at the cost of 10 stack bytes.
     let mut tmp = [0u8; 10];
     let mut len = 0;
     while value > 0 {
@@ -190,8 +190,8 @@ pub(super) fn inotify_rm_watch(fd: &OwnedFd, wd: c_int) -> io::Result<()> {
 pub(super) fn read_inotify(fd: &OwnedFd, buf: &mut [u8]) -> io::Result<usize> {
     loop {
         // SAFETY: `buf` is a `&mut [u8]` with valid length; `fd` is a valid open inotify_fd. The
-        // kernel writes whole records into the prefix; the trailing tail is undefined but the
-        // caller consumes only the returned `n` bytes.
+        // kernel writes whole records into the prefix; the trailing tail is undefined but the caller
+        // consumes only the returned `n` bytes.
         let n = unsafe { libc::read(fd.as_raw_fd(), buf.as_mut_ptr().cast::<c_void>(), buf.len()) };
         if n >= 0 {
             return Ok(usize::try_from(n).unwrap_or(0));
@@ -208,12 +208,12 @@ pub(super) fn read_inotify(fd: &OwnedFd, buf: &mut [u8]) -> io::Result<usize> {
 /// Open `path` with `O_PATH | O_NOFOLLOW | O_CLOEXEC`. The fd binds to a specific inode regardless
 /// of subsequent path-level renames; used by the watcher's race-free install.
 ///
-/// `O_PATH` permits `fstat` even without read permission and does not pin the inode against
-/// `unlink` — exactly the discipline kqueue's `O_EVTONLY` provides on Darwin. `O_CLOEXEC` covers
-/// the `open → fstat → add_watch → drop(fd)` window: the actuator's fork+exec can race against any
-/// of those steps, and a leaked `O_PATH` fd in the child would prolong the inode's reference count
-/// for the child's lifetime. Plugging the leak at open() time is uniform with the watcher's three
-/// persistent fds.
+/// `O_PATH` permits `fstat` even without read permission and does not pin the inode against `unlink`
+/// — exactly the discipline kqueue's `O_EVTONLY` provides on Darwin. `O_CLOEXEC` covers the `open →
+/// fstat → add_watch → drop(fd)` window: the actuator's fork+exec can race against any of those
+/// steps, and a leaked `O_PATH` fd in the child would prolong the inode's reference count for the
+/// child's lifetime. Plugging the leak at open() time is uniform with the watcher's three persistent
+/// fds.
 pub(super) fn open_o_path(path: &Path) -> io::Result<OwnedFd> {
     let cstr = path_to_cstring(path)?;
     // SAFETY: `cstr` is a valid NUL-terminated C string; `flags` is a valid `O_*` bit set. `open`
@@ -234,9 +234,9 @@ pub(super) fn open_o_path(path: &Path) -> io::Result<OwnedFd> {
 /// Stat an `O_PATH` fd to determine [`ResourceKind`].
 ///
 /// Used by the watcher's verification step against the engine's expected `kind` on a fresh
-/// `WatchOp::Watch` — the `fstat` happens on the same fd that subsequently feeds
-/// `inotify_add_watch` via `/proc/self/fd/N`, so the kind we read here is the kind the kernel will
-/// resolve at install time.
+/// `WatchOp::Watch` — the `fstat` happens on the same fd that subsequently feeds `inotify_add_watch`
+/// via `/proc/self/fd/N`, so the kind we read here is the kind the kernel will resolve at install
+/// time.
 pub(super) fn fstat_kind(fd: &OwnedFd) -> io::Result<ResourceKind> {
     let mut s = MaybeUninit::<libc::stat>::uninit();
     // SAFETY: `fd` is a valid open fd; `s` is a writable `*mut libc::stat`. `fstat` returns 0 and
@@ -303,9 +303,9 @@ mod tests {
 
     /// [`read_inotify`] on an empty queue must return promptly: the `IN_NONBLOCK` flag armed at
     /// [`inotify_init`] makes `read(2)` return `EAGAIN` immediately, which the helper folds into
-    /// `Ok(0)`. Pins the non-blocking contract the trait surface
-    /// ([`crate::FsWatcher::drain_ready`]) relies on for the drain-to-empty loop's termination — a
-    /// regression that dropped `IN_NONBLOCK` would deadlock here on a fresh inotify fd.
+    /// `Ok(0)`. Pins the non-blocking contract the trait surface ([`crate::FsWatcher::drain_ready`])
+    /// relies on for the drain-to-empty loop's termination — a regression that dropped `IN_NONBLOCK`
+    /// would deadlock here on a fresh inotify fd.
     #[test]
     fn read_inotify_empty_queue_returns_promptly() {
         let fd = inotify_init().expect("inotify_init");

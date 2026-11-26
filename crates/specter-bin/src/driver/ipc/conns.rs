@@ -8,8 +8,8 @@
 //! Every mutation that touches the per-conn role, the `missed` / `first_dropped_at` back-pressure
 //! accounting, the `close_after_flush` flag, or the write-queue bytes flows through a typed `&mut
 //! self` method on [`ConnState`]. The Hub's kernel-fd surface (listener, per-conn streams, registry
-//! clone, accept) keeps its responsibilities; per-conn state-machine mechanics live here as the
-//! sole writer set. A future dispatch path that re-implements a capacity gate or a role flip cannot
+//! clone, accept) keeps its responsibilities; per-conn state-machine mechanics live here as the sole
+//! writer set. A future dispatch path that re-implements a capacity gate or a role flip cannot
 //! diverge — there is no public field setter to reach for.
 //!
 //! # Visibility
@@ -35,12 +35,12 @@ use std::time::SystemTime;
 /// # Two-cap discipline
 ///
 /// `WRITE_QUEUE_HIGH_WATER` is the *hard* ceiling. The *soft* cap every legitimate push honours is
-/// [`ACCEPT_CAP`], which sits [`RESPONSE_TOO_BIG_RESERVE`] bytes below the hard ceiling. The
-/// reserve is sacrosanct: only [`ConnState::push_err_in_reserve`] reaches it, and only with a
-/// single structured [`crate::ipc::protocol::WireErrorCode::ResponseTooBig`] Err line. Every other
-/// writer ([`ConnState::push_response`], [`ConnState::try_dispatch_diag`]) refuses bytes that would
-/// push the queue past `ACCEPT_CAP`. Reaching the hard ceiling is then a structural invariant of
-/// the reserve writer — not a runtime check against pathological accumulation.
+/// [`ACCEPT_CAP`], which sits [`RESPONSE_TOO_BIG_RESERVE`] bytes below the hard ceiling. The reserve
+/// is sacrosanct: only [`ConnState::push_err_in_reserve`] reaches it, and only with a single
+/// structured [`crate::ipc::protocol::WireErrorCode::ResponseTooBig`] Err line. Every other writer
+/// ([`ConnState::push_response`], [`ConnState::try_dispatch_diag`]) refuses bytes that would push
+/// the queue past `ACCEPT_CAP`. Reaching the hard ceiling is then a structural invariant of the
+/// reserve writer — not a runtime check against pathological accumulation.
 pub(in crate::driver) const WRITE_QUEUE_HIGH_WATER: usize = 256 * 1024;
 
 /// Bytes held at the top of [`WRITE_QUEUE_HIGH_WATER`] for the structured
@@ -60,11 +60,11 @@ pub(in crate::driver) const WRITE_QUEUE_HIGH_WATER: usize = 256 * 1024;
 pub(in crate::driver) const RESPONSE_TOO_BIG_RESERVE: usize = 1024;
 
 /// Soft cap every legitimate write path honours. Bytes above this drop into the structured-Err path
-/// ([`ConnState::push_response`]'s Refused arm via the upstream
-/// [`super::hub::Hub::enqueue_response`] Refused arm) or the missed-marker accumulator
-/// ([`ConnState::try_dispatch_diag`]'s Dropped arm). Computed as [`WRITE_QUEUE_HIGH_WATER`] −
-/// [`RESPONSE_TOO_BIG_RESERVE`] so the arithmetic relationship between the two cap surfaces is
-/// single-source: bumping either constant moves `ACCEPT_CAP` with it.
+/// ([`ConnState::push_response`]'s Refused arm via the upstream [`super::hub::Hub::enqueue_response`]
+/// Refused arm) or the missed-marker accumulator ([`ConnState::try_dispatch_diag`]'s Dropped arm).
+/// Computed as [`WRITE_QUEUE_HIGH_WATER`] − [`RESPONSE_TOO_BIG_RESERVE`] so the arithmetic
+/// relationship between the two cap surfaces is single-source: bumping either constant moves
+/// `ACCEPT_CAP` with it.
 pub(in crate::driver) const ACCEPT_CAP: usize = WRITE_QUEUE_HIGH_WATER - RESPONSE_TOO_BIG_RESERVE;
 
 /// What a line is about, as a filtered stream reads it: a Sub, and the template that minted it.
@@ -113,17 +113,17 @@ pub(in crate::driver) struct ConnState {
     ///
     /// - **Oversize input** (the read accumulator exceeds [`crate::ipc::framing::MAX_LINE_BYTES`]
     ///   or a complete line crosses the cap): set true via [`ConnState::arm_close_after_flush`].
-    /// - **Over-cap response** (a verb projection serializes into a payload that would push the
-    ///   queue past [`ACCEPT_CAP`]): set true via [`ConnState::push_response`]'s overflow arm. The
+    /// - **Over-cap response** (a verb projection serializes into a payload that would push the queue
+    ///   past [`ACCEPT_CAP`]): set true via [`ConnState::push_response`]'s overflow arm. The
     ///   structured [`crate::ipc::protocol::WireErrorCode::ResponseTooBig`] Err line is queued into
     ///   the reserve via [`ConnState::push_err_in_reserve`] by the upstream
     ///   [`super::hub::Hub::enqueue_response`], so the flush carries the operator-actionable signal
     ///   ahead of the close.
     ///
     /// `drain_writable` observes the flag when the queue empties via a successful flush; the
-    /// Hub-level `try_terminate_if_idle` handles the queue-empty-at-arm case (where no WRITABLE
-    /// edge would ever run drain_writable). Together the two paths cover both arming shapes:
-    /// bytes-queued → flush-then-terminate, empty-queue → terminate-inline.
+    /// Hub-level `try_terminate_if_idle` handles the queue-empty-at-arm case (where no WRITABLE edge
+    /// would ever run drain_writable). Together the two paths cover both arming shapes: bytes-queued
+    /// → flush-then-terminate, empty-queue → terminate-inline.
     pub(in crate::driver) close_after_flush: bool,
 }
 
@@ -139,12 +139,12 @@ pub(in crate::driver) enum ConnRole {
     /// `missed` accumulates dropped-due-to-backpressure diags for the next `Missed` marker emission.
     Sub {
         /// `Some(sid)` ⇒ deliver only the lines a stream filtered on `sid` takes
-        /// ([`DiagSub::reaches`]): a watch's stream, `wait`'s. `None` ⇒ unfiltered (`tail`).
-        /// Resolved server-side at Subscribe time so a typo never reaches the fan-out path.
+        /// ([`DiagSub::reaches`]): a watch's stream, `wait`'s. `None` ⇒ unfiltered (`tail`). Resolved
+        /// server-side at Subscribe time so a typo never reaches the fan-out path.
         filter: Option<SubId>,
-        /// Back-pressure marker window — count + start-of-window timestamp pair, or the closed
-        /// state. Flushed lazily as a `WireDiagnostic::Missed` line before the next dispatched diag
-        /// so causal order is preserved on the wire. Mutated exclusively through
+        /// Back-pressure marker window — count + start-of-window timestamp pair, or the closed state.
+        /// Flushed lazily as a `WireDiagnostic::Missed` line before the next dispatched diag so
+        /// causal order is preserved on the wire. Mutated exclusively through
         /// [`MissedWindow::record_drop`] (capacity refusal) and [`MissedWindow::take`]
         /// (marker-flushed edge); the sum type makes the prior two-field invariant (`count > 0 ⇒
         /// since.is_some()`) structurally unrepresentable.
@@ -162,8 +162,8 @@ pub(in crate::driver) enum ConnRole {
 /// construction.
 ///
 /// Operators reading a `_missed` marker see start-of-window time (when the drops began), not flush
-/// time (when the daemon got around to mentioning them) — the marker's `at` is the captured
-/// `since`, not the dispatch-time stamp.
+/// time (when the daemon got around to mentioning them) — the marker's `at` is the captured `since`,
+/// not the dispatch-time stamp.
 #[derive(Debug, Default, Eq, PartialEq)]
 pub(in crate::driver) enum MissedWindow {
     /// No drops pending since the last successful marker flush.
@@ -197,9 +197,9 @@ impl MissedWindow {
         }
     }
 
-    /// Take the open window's `(count, since)` and reset to [`MissedWindow::Closed`]. Returns
-    /// `None` when no window was open. Callers that only need the reset (the marker bytes were
-    /// pre-built ahead of the capacity gate) may `let _ = .take()`.
+    /// Take the open window's `(count, since)` and reset to [`MissedWindow::Closed`]. Returns `None`
+    /// when no window was open. Callers that only need the reset (the marker bytes were pre-built
+    /// ahead of the capacity gate) may `let _ = .take()`.
     pub(in crate::driver) const fn take(&mut self) -> Option<(u32, SystemTime)> {
         match std::mem::replace(self, Self::Closed) {
             Self::Closed => None,
@@ -208,9 +208,9 @@ impl MissedWindow {
     }
 }
 
-/// Outcome of one [`ConnState::try_dispatch_diag`] attempt. The Hub's fan-out loop discards the
-/// value (per-conn missed accounting is internal to the method); the discriminant is exposed for
-/// unit-test observation of the axis the call took.
+/// Outcome of one [`ConnState::try_dispatch_diag`] attempt. The Hub's fan-out loop discards the value
+/// (per-conn missed accounting is internal to the method); the discriminant is exposed for unit-test
+/// observation of the axis the call took.
 #[must_use]
 #[derive(Debug, Eq, PartialEq)]
 pub(in crate::driver) enum DispatchOutcome {
@@ -232,9 +232,9 @@ pub(in crate::driver) enum PushOutcome {
     /// [`super::hub::Hub::arm_writable_interests`] at end of tick).
     Accepted,
     /// Bytes did NOT fit; `close_after_flush` was armed internally. The Hub-level caller pairs this
-    /// with [`super::hub::Hub::try_terminate_if_idle`] so a refusal against a previously-empty
-    /// queue terminates the conn inline (rather than lingering with an armed close that no WRITABLE
-    /// edge will ever observe).
+    /// with [`super::hub::Hub::try_terminate_if_idle`] so a refusal against a previously-empty queue
+    /// terminates the conn inline (rather than lingering with an armed close that no WRITABLE edge
+    /// will ever observe).
     Refused,
 }
 
@@ -265,9 +265,9 @@ impl ConnState {
     /// method. The fan-out path skips `Reqs` conns, so any diag emission between the ack enqueue
     /// and this role flip is structurally absent from this conn's queue.
     ///
-    /// One-shot-per-conn is the contract: a fresh conn enters `Reqs`, flips to `Sub` once, and
-    /// never flips back. The *structural* gate lives at the [`super::dispatch`] Subscribe handler —
-    /// a repeat Subscribe on a `Sub` conn returns
+    /// One-shot-per-conn is the contract: a fresh conn enters `Reqs`, flips to `Sub` once, and never
+    /// flips back. The *structural* gate lives at the [`super::dispatch`] Subscribe handler — a
+    /// repeat Subscribe on a `Sub` conn returns
     /// [`crate::ipc::protocol::WireErrorCode::AlreadySubscribed`] before reaching this method. The
     /// `debug_assert!` here is the contract witness: any future caller that bypasses the handler
     /// gate fails loudly in debug builds.
@@ -306,16 +306,16 @@ impl ConnState {
     /// 4. Capacity gate: combined `(queue_len + marker_bytes + diag_line)` must fit under
     ///    [`ACCEPT_CAP`]. The diag fan-out path honours the response-cap reserve too — a streaming
     ///    diag that could fill the reserve would deny the next
-    ///    [`crate::ipc::protocol::WireErrorCode::ResponseTooBig`] Err its guaranteed-fit space.
-    ///    When the combined size does not fit, the diag drops and [`MissedWindow::record_drop`]
-    ///    bumps the window — opening one on the `Closed → Open` edge or `saturating_add`-bumping
-    ///    `count` on a subsequent drop.
+    ///    [`crate::ipc::protocol::WireErrorCode::ResponseTooBig`] Err its guaranteed-fit space. When
+    ///    the combined size does not fit, the diag drops and [`MissedWindow::record_drop`] bumps
+    ///    the window — opening one on the `Closed → Open` edge or `saturating_add`-bumping `count`
+    ///    on a subsequent drop.
     /// 5. Otherwise: flush any pending Missed marker (carrying the open window's `since` as the
     ///    marker's `at` so operators see start-of-window time, not flush time), reset the window
     ///    via [`MissedWindow::take`], then push the diag bytes.
     ///
-    /// `at` threads from the caller so every conn observes a byte-identical timestamp for one
-    /// engine emission; the marker path uses the open window's captured `since` instead.
+    /// `at` threads from the caller so every conn observes a byte-identical timestamp for one engine
+    /// emission; the marker path uses the open window's captured `since` instead.
     pub(in crate::driver) fn try_dispatch_diag(
         &mut self,
         diag_line: &[u8],
@@ -364,14 +364,15 @@ impl ConnState {
 
     /// Push response bytes into the write_queue.
     ///
-    /// Capacity-gated on the soft cap: if the projected queue length would exceed [`ACCEPT_CAP`] (the
-    /// soft cap, sitting [`RESPONSE_TOO_BIG_RESERVE`] bytes below [`WRITE_QUEUE_HIGH_WATER`]), the
-    /// queue is left untouched and `close_after_flush` is armed via [`Self::arm_close_after_flush`].
-    /// The Hub-level [`super::hub::Hub::enqueue_response`] pairs the `Refused` outcome with
-    /// [`Self::push_err_in_reserve`] (queueing the structured `ResponseTooBig` Err into the reserve
-    /// so operators see an actionable signal ahead of the close) and then
-    /// [`super::hub::Hub::try_terminate_if_idle`] (a no-op once the Err line populated the queue —
-    /// the flush-then-terminate path on the next WRITABLE drain handles teardown).
+    /// Capacity-gated on the soft cap: if the projected queue length would exceed [`ACCEPT_CAP`]
+    /// (the soft cap, sitting [`RESPONSE_TOO_BIG_RESERVE`] bytes below [`WRITE_QUEUE_HIGH_WATER`]),
+    /// the queue is left untouched and `close_after_flush` is armed via
+    /// [`Self::arm_close_after_flush`]. The Hub-level [`super::hub::Hub::enqueue_response`] pairs
+    /// the `Refused` outcome with [`Self::push_err_in_reserve`] (queueing the structured
+    /// `ResponseTooBig` Err into the reserve so operators see an actionable signal ahead of the
+    /// close) and then [`super::hub::Hub::try_terminate_if_idle`] (a no-op once the Err line
+    /// populated the queue — the flush-then-terminate path on the next WRITABLE drain handles
+    /// teardown).
     pub(in crate::driver) fn push_response(&mut self, bytes: &[u8]) -> PushOutcome {
         if self.write_queue.len().saturating_add(bytes.len()) > ACCEPT_CAP {
             self.arm_close_after_flush();
@@ -487,9 +488,10 @@ mod tests {
         }
     }
 
-    /// `arm_close_after_flush` is idempotent — repeated calls are silent no-ops. The fan-out path and
-    /// the read drain both reach the method in the same tick when a peer streams an oversize payload
-    /// that also triggers an over-water response; the second arm must not panic in release nor debug.
+    /// `arm_close_after_flush` is idempotent — repeated calls are silent no-ops. The fan-out path
+    /// and the read drain both reach the method in the same tick when a peer streams an oversize
+    /// payload that also triggers an over-water response; the second arm must not panic in release
+    /// nor debug.
     #[test]
     fn arm_close_after_flush_is_idempotent() {
         let (mut conn, _peer) = fresh_conn();
@@ -540,8 +542,8 @@ mod tests {
         assert!(conn.write_queue.is_empty());
     }
 
-    /// A conn filtered on a template takes a line about a Sub it minted — the dynamic watch's
-    /// stream — and skips one about a Sub another template minted.
+    /// A conn filtered on a template takes a line about a Sub it minted — the dynamic watch's stream
+    /// — and skips one about a Sub another template minted.
     #[test]
     fn try_dispatch_diag_filtered_on_a_template_takes_what_it_minted() {
         let (mut conn, _peer) = fresh_conn();
@@ -568,8 +570,8 @@ mod tests {
         assert_eq!(queued, line, "the minted Sub's line alone is queued");
     }
 
-    /// Happy path: an unfiltered Sub-mode conn under the capacity cap accepts the diag bytes
-    /// verbatim into the write_queue.
+    /// Happy path: an unfiltered Sub-mode conn under the capacity cap accepts the diag bytes verbatim
+    /// into the write_queue.
     #[test]
     fn try_dispatch_diag_pushes_on_unfiltered_sub() {
         let (mut conn, _peer) = fresh_conn();
@@ -612,8 +614,8 @@ mod tests {
     }
 
     /// First-drop time is captured at the `0 → 1` transition of `missed`. Subsequent drops in the
-    /// same window do NOT re-capture, so the marker carries the start-of-window timestamp
-    /// (operators see when drops began, not when the system got around to mentioning them).
+    /// same window do NOT re-capture, so the marker carries the start-of-window timestamp (operators
+    /// see when drops began, not when the system got around to mentioning them).
     #[test]
     fn try_dispatch_diag_preserves_first_dropped_at_across_subsequent_drops() {
         let (mut conn, _peer) = fresh_conn();
@@ -652,9 +654,9 @@ mod tests {
         }
     }
 
-    /// Causal ordering: when a missed window is open and a fresh diag fits, the marker line is
-    /// queued BEFORE the diag bytes so operators see "lost N events" preceding the next reachable
-    /// diag on the wire.
+    /// Causal ordering: when a missed window is open and a fresh diag fits, the marker line is queued
+    /// BEFORE the diag bytes so operators see "lost N events" preceding the next reachable diag on
+    /// the wire.
     #[test]
     fn try_dispatch_diag_flushes_missed_marker_before_diag_in_causal_order() {
         let (mut conn, _peer) = fresh_conn();
@@ -693,9 +695,9 @@ mod tests {
         assert_eq!(second_v["diag"], "placeholder");
     }
 
-    /// Wire-level pin for the marker's `at`: it is the first-drop time, not the flush-time.
-    /// Operators reading a `_missed` marker see when drops began, not when the system got around to
-    /// mentioning them.
+    /// Wire-level pin for the marker's `at`: it is the first-drop time, not the flush-time. Operators
+    /// reading a `_missed` marker see when drops began, not when the system got around to mentioning
+    /// them.
     #[test]
     fn try_dispatch_diag_marker_uses_first_dropped_at_not_flush_at() {
         let (mut conn, _peer) = fresh_conn();

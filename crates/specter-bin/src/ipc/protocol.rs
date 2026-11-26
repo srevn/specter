@@ -8,9 +8,9 @@
 //! client ──write──> [WireRequest] ────────> driver (parses + dispatches inline)
 //! ```
 //!
-//! [`WireRequest`] is the only request type the daemon ever sees: the mio-reactor driver reads
-//! bytes off each per-conn stream, parses one `WireRequest` per line, and dispatches inline on the
-//! same thread — no channel envelope, no per-request reply channel, no per-conn worker thread.
+//! [`WireRequest`] is the only request type the daemon ever sees: the mio-reactor driver reads bytes
+//! off each per-conn stream, parses one `WireRequest` per line, and dispatches inline on the same
+//! thread — no channel envelope, no per-request reply channel, no per-conn worker thread.
 //!
 //! Deserialize-only: operators address by name, not by id, so the daemon refuses to admit `WireId`
 //! values from clients.
@@ -42,9 +42,9 @@ use super::wire::{
 ///
 /// The type carries name-only addressing by construction: no variant holds a [`WireId`] field, so
 /// clients cannot round-trip a slotmap key whose generation has since expired engine-side (a fresh
-/// disable/enable would reuse the slot index and the cached id would silently resolve to a
-/// different Sub). The structural floor lives in the field shapes, not in a missing `Serialize`
-/// impl — both directions of the wire round-trip the same JSON object.
+/// disable/enable would reuse the slot index and the cached id would silently resolve to a different
+/// Sub). The structural floor lives in the field shapes, not in a missing `Serialize` impl — both
+/// directions of the wire round-trip the same JSON object.
 ///
 /// Tagged internally on `op`; both the tag value and the field names use `snake_case` so the wire
 /// form matches the operator vocabulary (`{"op":"status"}`, `{"op":"show","name":"foo"}`).
@@ -70,14 +70,14 @@ pub(crate) enum WireRequest {
         name: CompactString,
     },
     /// Arm an `absorb` window on each Profile the named watch fires on — its own, or each one a
-    /// dynamic watch's template minted onto — folding the next fireable burst there into the
-    /// baseline instead of firing (the echo-suppression signal for an expected replication). `name`
-    /// resolves to the watch's Sub driver-side; the wire carries no id, same name-only addressing
-    /// as every other verb. `duration_ms` is the window length: `None` ⇒ the engine's default (one
-    /// `settle` interval, consume-on-first); `Some(ms)` ⇒ a time-boxed window. The wire has no
-    /// `Duration` type, so the duration rides as a scalar millisecond count (matching
-    /// [`WireTime`]'s hand-rolled-scalar discipline); the driver rebuilds the `Duration` — and
-    /// clamps it — before lifting `Input::ArmAbsorb`.
+    /// dynamic watch's template minted onto — folding the next fireable burst there into the baseline
+    /// instead of firing (the echo-suppression signal for an expected replication). `name` resolves
+    /// to the watch's Sub driver-side; the wire carries no id, same name-only addressing as every
+    /// other verb. `duration_ms` is the window length: `None` ⇒ the engine's default (one `settle`
+    /// interval, consume-on-first); `Some(ms)` ⇒ a time-boxed window. The wire has no `Duration`
+    /// type, so the duration rides as a scalar millisecond count (matching [`WireTime`]'s
+    /// hand-rolled-scalar discipline); the driver rebuilds the `Duration` — and clamps it — before
+    /// lifting `Input::ArmAbsorb`.
     Absorb {
         name: CompactString,
         #[serde(default)]
@@ -101,14 +101,14 @@ pub(crate) enum WireRequest {
 /// `"kind"`; struct variants (`SubscribeAck`, `Err`) carry their own fields; unit variants (`Ok`)
 /// carry only the tag.
 ///
-/// `Deserialize` is symmetric with `Serialize` so client code can parse responses back from the
-/// wire — every variant payload carries `Deserialize`. The wire schema is one canonical shape; the
-/// same JSON object the daemon writes is what the client reads.
+/// `Deserialize` is symmetric with `Serialize` so client code can parse responses back from the wire
+/// — every variant payload carries `Deserialize`. The wire schema is one canonical shape; the same
+/// JSON object the daemon writes is what the client reads.
 ///
 /// Unknown-field strictness on the client side lives at the wire boundary via
 /// [`crate::ipc::framing::parse_strict`] — a future daemon field this client doesn't know about
-/// reaches the verb handler as a parse error rather than silently dropping the value. Symmetric
-/// with the daemon-side request gate (see [`WireRequest`]'s rustdoc).
+/// reaches the verb handler as a parse error rather than silently dropping the value. Symmetric with
+/// the daemon-side request gate (see [`WireRequest`]'s rustdoc).
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum ResponsePayload {
@@ -133,10 +133,10 @@ pub(crate) enum ResponsePayload {
 ///
 /// Every variant is a unit value; `#[serde(rename_all = "snake_case")]` makes the wire form a bare
 /// quoted token (`"unknown_sub"`, `"already_subscribed"`, …) symmetric with the rest of the
-/// wire-projection layer's discipline ([`WireFsEvent`](super::wire),
-/// [`WireStateLabel`](super::wire), etc.). Serialize and Deserialize validate the same finite set,
-/// so a client receiving a daemon-emitted error parses into the same typed variant the daemon
-/// constructed — no host type behind the field, no separate adapter, no `Cow`.
+/// wire-projection layer's discipline ([`WireFsEvent`](super::wire), [`WireStateLabel`](super::wire),
+/// etc.). Serialize and Deserialize validate the same finite set, so a client receiving a
+/// daemon-emitted error parses into the same typed variant the daemon constructed — no host type
+/// behind the field, no separate adapter, no `Cow`.
 ///
 /// [`Display`](std::fmt::Display) writes the exact wire form via [`Self::as_str`], so the client
 /// renderer (`eprintln!("specter <verb>: {code}: {error}")`) emits the wire token verbatim.
@@ -165,39 +165,39 @@ pub(crate) enum WireErrorCode {
     TomlDisabled,
     /// Connection cap reached — too many concurrent operator clients.
     Busy,
-    /// Daemon refused a response whose serialized bytes would exceed the per-conn write-queue
-    /// accept cap. Symmetric with [`Self::Busy`]: both are cap-class failures, both close the conn
-    /// after the structured Err line flushes, both let operator scripts branch on a single
+    /// Daemon refused a response whose serialized bytes would exceed the per-conn write-queue accept
+    /// cap. Symmetric with [`Self::Busy`]: both are cap-class failures, both close the conn after
+    /// the structured Err line flushes, both let operator scripts branch on a single
     /// closed-vocabulary token rather than parsing an `UnexpectedEof`.
     ///
     /// Emitted by [`crate::driver::Hub::enqueue_response`]'s Refused arm; the structured line is
     /// queued into the per-conn reserve (sized so the Err always fits regardless of queue state)
     /// and `close_after_flush` is armed by the upstream `push_response`. The `error` field carries
-    /// the byte counts as `response of N bytes exceeds per-conn cap of M bytes`, renderable
-    /// verbatim by the operator client.
+    /// the byte counts as `response of N bytes exceeds per-conn cap of M bytes`, renderable verbatim
+    /// by the operator client.
     ResponseTooBig,
     /// Request line failed JSON parse, or carries an unknown `op`.
     Malformed,
     /// `Subscribe` invoked on a conn that already flipped to subscriber role. Subscribe is one-shot
-    /// per conn — a repeat call would silently overwrite the prior `name` filter and drop any
-    /// pending back-pressure accounting. The handler refuses with this structured error so the
-    /// operator sees a deterministic failure instead of an invisible state mutation.
+    /// per conn — a repeat call would silently overwrite the prior `name` filter and drop any pending
+    /// back-pressure accounting. The handler refuses with this structured error so the operator sees
+    /// a deterministic failure instead of an invisible state mutation.
     ///
     /// The wire vocabulary is pinned by `tests::wire_error_code_round_trips_every_variant`; the
     /// handler-side gate that reaches this variant lives on [`crate::driver::EngineDriver`]'s
     /// Subscribe arm.
     AlreadySubscribed,
     /// Daemon is winding down — mutating verbs (`Reload`, `Disable`, `Enable`, `Absorb`) refused.
-    /// The gate fires iff `EngineDriver::first_term.is_some()` — the operator pulsed SIGINT /
-    /// SIGTERM and the actuator is in the middle of its SIGTERM → grace → SIGKILL → reap-drain
-    /// pipeline. Read-only verbs (`Status`, `List`, `Show`, `Subscribe`) continue working so
-    /// operators can observe in-flight shutdown via `specter tail`; the engine still emits
-    /// diagnostics during shutdown (late effect completions, post-fire rebase ceilings, etc.).
+    /// The gate fires iff `EngineDriver::first_term.is_some()` — the operator pulsed SIGINT / SIGTERM
+    /// and the actuator is in the middle of its SIGTERM → grace → SIGKILL → reap-drain pipeline.
+    /// Read-only verbs (`Status`, `List`, `Show`, `Subscribe`) continue working so operators can
+    /// observe in-flight shutdown via `specter tail`; the engine still emits diagnostics during
+    /// shutdown (late effect completions, post-fire rebase ceilings, etc.).
     ///
-    /// Operator-script branch: a `code == "shutting_down"` Err surfaces "daemon is going away;
-    /// don't retry against this PID"; the operator can re-issue the verb against the next boot.
-    /// Subscribe stays accessible because its mutation is bin-local — flipping `conn.role` doesn't
-    /// touch engine state and is safe to enact during shutdown.
+    /// Operator-script branch: a `code == "shutting_down"` Err surfaces "daemon is going away; don't
+    /// retry against this PID"; the operator can re-issue the verb against the next boot. Subscribe
+    /// stays accessible because its mutation is bin-local — flipping `conn.role` doesn't touch engine
+    /// state and is safe to enact during shutdown.
     ShuttingDown,
 }
 
@@ -216,8 +216,8 @@ impl WireErrorCode {
         Self::ShuttingDown,
     ];
 
-    /// Wire-form token for this variant — the same `code` field value the JSON shape carries.
-    /// Mirrors the `#[serde(rename_all = "snake_case")]` projection exactly.
+    /// Wire-form token for this variant — the same `code` field value the JSON shape carries. Mirrors
+    /// the `#[serde(rename_all = "snake_case")]` projection exactly.
     ///
     /// Exhaustive `match` — a new variant without a paired arm fails to compile, keeping the wire
     /// vocabulary single-source against `tests::wire_error_code_round_trips_every_variant`'s
@@ -280,10 +280,10 @@ impl std::fmt::Display for WireErrorCode {
 /// `#[serde(transparent)]` collapses the JSON form to a bare integer (`42`), not a wrapped object
 /// (`{"WireId":42}`).
 ///
-/// `Deserialize` rounds out the wire shape so a client-side response carrier (`StatusResponse`,
-/// etc.) parses the embedded ids back into `WireId` newtypes. The asymmetry around `From<SubId>`
-/// etc. (one-way projections) is preserved: `Deserialize` is the wire shape, the `From` impls are
-/// the engine-side projection.
+/// `Deserialize` rounds out the wire shape so a client-side response carrier (`StatusResponse`, etc.)
+/// parses the embedded ids back into `WireId` newtypes. The asymmetry around `From<SubId>` etc.
+/// (one-way projections) is preserved: `Deserialize` is the wire shape, the `From` impls are the
+/// engine-side projection.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
 pub(crate) struct WireId(pub(crate) u64);
@@ -307,8 +307,8 @@ impl From<ResourceId> for WireId {
 }
 
 /// Why an operator-declared Sub is currently not in the engine registry. Surfaced on
-/// [`ListRow::disabled`] and [`ShowResponse::Disabled::source`] so operators distinguish "I
-/// disabled this via IPC and haven't re-enabled" from "the TOML has `enabled = false`".
+/// [`ListRow::disabled`] and [`ShowResponse::Disabled::source`] so operators distinguish "I disabled
+/// this via IPC and haven't re-enabled" from "the TOML has `enabled = false`".
 ///
 /// Lives in this module rather than alongside the other wire projections because the discrimination
 /// is bin-local: there is no `specter-core` analogue to project from.
@@ -329,8 +329,8 @@ impl DisabledSource {
 
     /// Wire-form token — mirrors the snake_case serde rename. Surfaces in `list -o human`'s
     /// `DISABLED` column and `show -o human`'s disabled-arm parenthetical via its
-    /// [`Display`](std::fmt::Display) impl; the renderer paths reach the wire form through `{}`
-    /// with no intermediate helper.
+    /// [`Display`](std::fmt::Display) impl; the renderer paths reach the wire form through `{}` with
+    /// no intermediate helper.
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Runtime => "runtime",
@@ -396,8 +396,8 @@ pub(crate) struct StatusResponse {
 /// plus the attribution enum that drove it. Mirrors `crate::driver::state::LastReload` on the wire;
 /// the JSON form stays flat (the two inner fields inline directly alongside [`StatusResponse`]'s
 /// siblings via `#[serde(flatten)]`) so operator scripts that parsed `status.last_reload_at` /
-/// `status.last_reload_via` continue to read the same byte shape on the `Some` side. The `None`
-/// side omits both keys entirely — the type-driven encoding of "never reloaded yet."
+/// `status.last_reload_via` continue to read the same byte shape on the `Some` side. The `None` side
+/// omits both keys entirely — the type-driven encoding of "never reloaded yet."
 ///
 /// Field renames keep the Rust ergonomics (`lr.at`, `lr.via`) without touching the JSON contract —
 /// see [`Self::at`] and [`Self::via`].
@@ -428,8 +428,8 @@ pub(crate) struct ListResponse {
 ///
 /// - Attached `spawn` rows fill every field; `disabled` is `None`.
 /// - Attached `mint` rows (discovery templates) carry `None` fire stats — a template mints Subs and
-///   never fires an Effect, so there is no history to report; the `reaction` discriminator
-///   attributes the n/a.
+///   never fires an Effect, so there is no history to report; the `reaction` discriminator attributes
+///   the n/a.
 /// - Runtime-disabled rows fill `name` + `disabled = Some(Runtime)`; engine-derived fields are `None`
 ///   (the Sub is not in `engine.subs()`, so the Profile / state / anchor / counters do not exist).
 /// - TOML-disabled rows fill `name` + `disabled = Some(Toml)`; same reason.
@@ -458,9 +458,9 @@ pub(crate) struct ListRow {
     /// `min(remaining_subs.settles)` across the Profile's attached Subs), the Profile-level fold.
     /// `None` for non-attached rows.
     pub(crate) settle_ms: Option<u64>,
-    /// Which reaction kind this row's Sub carries — `spawn` (fires a program) or `mint` (a
-    /// discovery template; its row's fire-stat `None`s are structural, not "never fired"). `None`
-    /// for non-attached rows.
+    /// Which reaction kind this row's Sub carries — `spawn` (fires a program) or `mint` (a discovery
+    /// template; its row's fire-stat `None`s are structural, not "never fired"). `None` for
+    /// non-attached rows.
     pub(crate) reaction: Option<WireReactionKind>,
     /// Disable-source discriminator. `None` for attached rows.
     pub(crate) disabled: Option<DisabledSource>,
@@ -495,29 +495,29 @@ pub(crate) enum ShowResponse {
 
 /// [`WireRequest`] is structurally infallible to serialize: every variant carries only plain-data
 /// fields ([`CompactString`] / unit), every derived `Serialize` walks through `serialize_str` /
-/// `serialize_unit` against in-memory values, and no field uses a `serialize_with` adapter that
-/// could fail. Marks the client-side request path ([`crate::ipc::client::connect::write_request`])
-/// safe for the `Vec<u8>`-returning wrapper without an `.expect`-at-a-distance.
+/// `serialize_unit` against in-memory values, and no field uses a `serialize_with` adapter that could
+/// fail. Marks the client-side request path ([`crate::ipc::client::connect::write_request`]) safe
+/// for the `Vec<u8>`-returning wrapper without an `.expect`-at-a-distance.
 impl InfallibleSerialize for WireRequest {}
 
 /// [`ResponsePayload`] is structurally infallible to serialize: the variant payloads are plain-data
 /// structs ([`StatusResponse`], [`ListResponse`], [`ShowResponse`], [`SubDetails`]) whose fields
-/// are primitives, [`String`], [`Option`], [`Vec`], [`WireId`], [`WireTime`] (manual
-/// `serialize_str` over an invariant-by-construction RFC-3339 token), [`WirePath`] (transparent
-/// `String`), or other `Wire*` enums and structs built from them (closed-set derives).
-/// [`SubDetails`]'s flattened [`WireReaction`] keeps the property: internally-tagged serialization
-/// can fail only for variant payloads that cannot carry an inline tag (newtype/tuple variants), and
-/// both its variants are struct-shaped over the same plain-data field set. Marks the daemon-side
-/// response paths ([`crate::driver::Hub::enqueue_response`] +
-/// [`crate::driver::Hub::drain_accept`]'s cap-arm best-effort Busy write) safe for the wrapper.
+/// are primitives, [`String`], [`Option`], [`Vec`], [`WireId`], [`WireTime`] (manual `serialize_str`
+/// over an invariant-by-construction RFC-3339 token), [`WirePath`] (transparent `String`), or other
+/// `Wire*` enums and structs built from them (closed-set derives). [`SubDetails`]'s flattened
+/// [`WireReaction`] keeps the property: internally-tagged serialization can fail only for variant
+/// payloads that cannot carry an inline tag (newtype/tuple variants), and both its variants are
+/// struct-shaped over the same plain-data field set. Marks the daemon-side response paths
+/// ([`crate::driver::Hub::enqueue_response`] + [`crate::driver::Hub::drain_accept`]'s cap-arm
+/// best-effort Busy write) safe for the wrapper.
 impl InfallibleSerialize for ResponsePayload {}
 
 /// `specter show <name>` detail block for an attached Sub.
 ///
 /// The per-reaction payload (`scope` / `program` / fire and absorb stats, or the mint knobs and the
-/// matches' windows) lives on the flattened [`WireReaction`], internally tagged `reaction` — a
-/// third inline tag alongside `kind` and `status`, same one-flat-object discipline. The top-level
-/// fields are exactly the ones that hold for *any* attached Sub.
+/// matches' windows) lives on the flattened [`WireReaction`], internally tagged `reaction` — a third
+/// inline tag alongside `kind` and `status`, same one-flat-object discipline. The top-level fields
+/// are exactly the ones that hold for *any* attached Sub.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct SubDetails {
     /// Operator-facing name.
@@ -528,10 +528,10 @@ pub(crate) struct SubDetails {
     pub(crate) profile: WireId,
     /// Operator-display state (`StateLabel`). `None` signals the same engine-invariant breach
     /// [`ListRow::state`] does: the attached Sub's Profile is gone. Symmetric across `show -o json`
-    /// and `list -o json` — operators decode the breach identically on both verbs, and the IPC
-    /// layer projects the missing Profile as `None` rather than panicking the daemon out from under
-    /// every concurrent operator session. The breach loudness lives engine-side (the `ProbeSlot`
-    /// tripwire, the registries' `debug_assert!`), not in the projection layer.
+    /// and `list -o json` — operators decode the breach identically on both verbs, and the IPC layer
+    /// projects the missing Profile as `None` rather than panicking the daemon out from under every
+    /// concurrent operator session. The breach loudness lives engine-side (the `ProbeSlot` tripwire,
+    /// the registries' `debug_assert!`), not in the projection layer.
     pub(crate) state: Option<WireStateLabel>,
     /// Anchor path (`engine.tree().path_of(profile.resource)`). `None` signals "anchor vanished /
     /// not yet resolved" — symmetric with [`ListRow::anchor`], so operators reading `list -o json`
@@ -540,20 +540,20 @@ pub(crate) struct SubDetails {
     /// `Sub::settle().as_millis()` — this Sub's own debounce. On a `mint` row this is the discovery
     /// walk's debounce, distinct from the template knob `minted_settle_ms` the minted Subs inherit.
     pub(crate) settle_ms: u64,
-    /// `Sub::minted_by()` projection — `Some(_)` iff a template minted the Sub, naming it apart
-    /// from a declared Sub on the same anchor. Top-level rather than `spawn` payload: it is Sub
-    /// identity, not reaction state.
+    /// `Sub::minted_by()` projection — `Some(_)` iff a template minted the Sub, naming it apart from
+    /// a declared Sub on the same anchor. Top-level rather than `spawn` payload: it is Sub identity,
+    /// not reaction state.
     pub(crate) minted_by: Option<WireId>,
     /// Per-reaction payload, flattened — see [`WireReaction`].
     #[serde(flatten)]
     pub(crate) reaction: WireReaction,
 }
 
-/// Per-reaction `show` payload — the wire projection of `specter_core::Reaction`, honest per
-/// variant: a `spawn` row reports its own program, fire history and absorb window; a `mint` row (a
-/// template) reports the knobs its minted Subs inherit, how many it holds and the absorb windows
-/// across them, and carries no fire or fold stats of its own — a template fires attachments, never
-/// Effects, and its own Profile, which reconciles, is never armed.
+/// Per-reaction `show` payload — the wire projection of `specter_core::Reaction`, honest per variant:
+/// a `spawn` row reports its own program, fire history and absorb window; a `mint` row (a template)
+/// reports the knobs its minted Subs inherit, how many it holds and the absorb windows across them,
+/// and carries no fire or fold stats of its own — a template fires attachments, never Effects, and
+/// its own Profile, which reconciles, is never armed.
 ///
 /// Internally tagged `reaction` and flattened into [`SubDetails`], so every payload key lands in
 /// the same flat JSON object as the rest of the detail block. The `spawn` keys are bare (they
@@ -567,8 +567,8 @@ pub(crate) enum WireReaction {
     Spawn {
         /// `SpawnSpec.scope` projection.
         scope: WireEffectScope,
-        /// One line per `ActionProgram` instruction. Rendering rules live with the projection
-        /// helper (`specter-bin`'s `ipc::project::program`); this field pins only the shape.
+        /// One line per `ActionProgram` instruction. Rendering rules live with the projection helper
+        /// (`specter-bin`'s `ipc::project::program`); this field pins only the shape.
         program: Vec<String>,
         /// Wall-clock projection of the last Effect emission. `None` until the first fire.
         last_fired_at: Option<WireTime>,
@@ -576,17 +576,17 @@ pub(crate) enum WireReaction {
         fire_count: u64,
         /// Cumulative B1-dedup suppressions.
         dedup_suppressed_count: u64,
-        /// The Profile's armed `absorb` window, live-gated: `None` once its expiry has passed,
-        /// though the engine's lazy expiry leaves it resident. Per Profile — every Sub on the
-        /// Profile shares one window.
+        /// The Profile's armed `absorb` window, live-gated: `None` once its expiry has passed, though
+        /// the engine's lazy expiry leaves it resident. Per Profile — every Sub on the Profile shares
+        /// one window.
         absorb: Option<WireAbsorbWindow>,
         /// Folds the Profile has absorbed — the fold counterpart of `fire_count`, per Profile (a
         /// fold is), projected per Sub.
         absorb_count: u64,
     },
     Mint {
-        /// Minted Subs' debounce — the template's `settle` knob (the `[[watch]].settle` the
-        /// operator declared; the template's own debounce is the top-level `settle_ms`).
+        /// Minted Subs' debounce — the template's `settle` knob (the `[[watch]].settle` the operator
+        /// declared; the template's own debounce is the top-level `settle_ms`).
         minted_settle_ms: u64,
         /// Minted Subs' effect scope.
         minted_scope: WireEffectScope,
@@ -724,8 +724,8 @@ mod tests {
         }
     }
 
-    /// A typoed `op` is a parse failure — the wire surface refuses to silently match nothing.
-    /// Catches operator typos (e.g. `sub_fire` for `status`) at the daemon boundary.
+    /// A typoed `op` is a parse failure — the wire surface refuses to silently match nothing. Catches
+    /// operator typos (e.g. `sub_fire` for `status`) at the daemon boundary.
     #[test]
     fn wire_request_rejects_unknown_op() {
         assert!(serde_json::from_str::<WireRequest>(r#"{"op":"sub_fire"}"#).is_err());
@@ -733,12 +733,12 @@ mod tests {
         assert!(serde_json::from_str::<WireRequest>(r"{}").is_err());
     }
 
-    /// `parse_strict` rejects a typoed payload field on a struct variant — the bug class the
-    /// boundary gate exists to prevent. `{"op":"subscribe","names":"build"}` (note the trailing
-    /// `s`) would silently parse with `name = None` under bare `serde_json::from_slice` and the
-    /// daemon would subscribe unfiltered, ignoring the operator's intent. With the boundary gate
-    /// the typo surfaces as an unknown-field rejection the [`crate::driver::ipc`] handler turns
-    /// into [`WireErrorCode::Malformed`].
+    /// `parse_strict` rejects a typoed payload field on a struct variant — the bug class the boundary
+    /// gate exists to prevent. `{"op":"subscribe","names":"build"}` (note the trailing `s`) would
+    /// silently parse with `name = None` under bare `serde_json::from_slice` and the daemon would
+    /// subscribe unfiltered, ignoring the operator's intent. With the boundary gate the typo surfaces
+    /// as an unknown-field rejection the [`crate::driver::ipc`] handler turns into
+    /// [`WireErrorCode::Malformed`].
     ///
     /// Bare `from_slice` is exercised first to pin the bug shape (silent accept) the boundary gate
     /// fixes; the strict parse is the structural floor.
@@ -763,9 +763,9 @@ mod tests {
     }
 
     /// `parse_strict` rejects an unknown top-level field on a [`ResponsePayload`] — the daemon-bug
-    /// class the client-side boundary gate ([`crate::ipc::client::connect::read_response`])
-    /// surfaces as [`std::io::ErrorKind::InvalidData`] rather than silently dropping the value.
-    /// Symmetric protection with the daemon-side request gate.
+    /// class the client-side boundary gate ([`crate::ipc::client::connect::read_response`]) surfaces
+    /// as [`std::io::ErrorKind::InvalidData`] rather than silently dropping the value. Symmetric
+    /// protection with the daemon-side request gate.
     #[test]
     fn parse_strict_rejects_unknown_field_on_response_payload() {
         let bytes = br#"{"kind":"ok","stray":1}"#;
@@ -928,8 +928,8 @@ mod tests {
 
     /// `StatusResponse` round-trips through serde with the flattened `last_reload` pair preserved
     /// on the `Some` side. The serialize-deserialize chain reaches the wire field renames (`at` ↔
-    /// `last_reload_at`, `via` ↔ `last_reload_via`) in lockstep — a rename drift on either side
-    /// fails this test rather than silently dropping the value.
+    /// `last_reload_at`, `via` ↔ `last_reload_via`) in lockstep — a rename drift on either side fails
+    /// this test rather than silently dropping the value.
     #[test]
     fn status_response_round_trips_last_reload_pair() {
         let original = sample_status(Some(WireLastReload {
@@ -959,8 +959,8 @@ mod tests {
     ///    boundary.
     ///
     /// The wire-side invariant therefore holds at the operator-facing surface even though the inner
-    /// deserialize tolerates partial input — pinning both behaviors keeps the test honest about
-    /// where the structural gate actually lives.
+    /// deserialize tolerates partial input — pinning both behaviors keeps the test honest about where
+    /// the structural gate actually lives.
     #[test]
     fn status_response_partial_last_reload_shape_caught_at_boundary() {
         let at_only = partial_status_bytes("last_reload_via");
@@ -994,11 +994,11 @@ mod tests {
 
     /// `SubDetails.reaction` flattens onto the wire as an internally-tagged payload: the `reaction`
     /// key carries the variant token (lockstep with [`WireReactionKind`]'s vocabulary — the `list`
-    /// discriminator and the `show` tag must never drift apart), the `spawn` payload inlines its bare
-    /// keys, and the `mint` payload inlines `minted_*` keys — crucially `minted_settle_ms` coexisting
-    /// with the top-level `settle_ms` (the flatten would emit a duplicate JSON key if the template
-    /// knob ever lost its prefix). Both variants round-trip through [`parse_strict`], pinning that
-    /// serde's flatten + internal-tag machinery deserializes the shape the daemon emits.
+    /// discriminator and the `show` tag must never drift apart), the `spawn` payload inlines its
+    /// bare keys, and the `mint` payload inlines `minted_*` keys — crucially `minted_settle_ms`
+    /// coexisting with the top-level `settle_ms` (the flatten would emit a duplicate JSON key if
+    /// the template knob ever lost its prefix). Both variants round-trip through [`parse_strict`],
+    /// pinning that serde's flatten + internal-tag machinery deserializes the shape the daemon emits.
     #[test]
     fn sub_details_flattens_reaction_variants() {
         let spawn = sample_details(WireReaction::Spawn {
@@ -1088,10 +1088,10 @@ mod tests {
         ));
     }
 
-    /// A cross-variant stray key — a `mint` payload key on a `spawn` row — fails the strict
-    /// boundary parse. Serde's flatten machinery silently ignores keys the matched variant doesn't
-    /// consume (the deny-unknown-fields gap `parse_strict` exists to close), so the round-trip walk
-    /// is the only wall against a daemon emitting, or an operator script forging, a chimera row.
+    /// A cross-variant stray key — a `mint` payload key on a `spawn` row — fails the strict boundary
+    /// parse. Serde's flatten machinery silently ignores keys the matched variant doesn't consume
+    /// (the deny-unknown-fields gap `parse_strict` exists to close), so the round-trip walk is the
+    /// only wall against a daemon emitting, or an operator script forging, a chimera row.
     #[test]
     fn sub_details_cross_variant_key_caught_at_boundary() {
         let spawn = sample_details(WireReaction::Spawn {

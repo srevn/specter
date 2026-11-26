@@ -271,8 +271,8 @@ mod tests {
 
     #[test]
     fn watch_op_rejected_constructor_yields_input() {
-        // `EMFILE` (Too many open files) is 24 on macOS / FreeBSD / Linux — hard-coded here so
-        // `core` keeps its no-`libc` discipline.
+        // `EMFILE` (Too many open files) is 24 on macOS / FreeBSD / Linux — hard-coded here so `core`
+        // keeps its no-`libc` discipline.
         const EMFILE: i32 = 24;
 
         let ids = fresh_resource_ids(1);

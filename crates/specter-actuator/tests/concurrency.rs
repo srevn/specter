@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 
 #[test]
 fn cap_two_with_four_distinct_subs_serializes_two_at_a_time() {
-    // With cap=2 and four distinct (sub, resource) pairs, the wall-clock time should be ~2x a
-    // single child's runtime, not ~4x.
+    // With cap=2 and four distinct (sub, resource) pairs, the wall-clock time should be ~2x a single
+    // child's runtime, not ~4x.
     let mut h = Harness::new(nz(2));
     let dir = tempfile::tempdir().expect("tempdir");
     let cwd = dir.path().to_path_buf();

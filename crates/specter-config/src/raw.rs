@@ -4,9 +4,9 @@ use std::time::Duration;
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawConfig {
-    /// Block of operator-facing engine telemetry settings — level, destination, file path. The
-    /// schema groups them under one table: a top-level `log_level` is rejected as an unknown field
-    /// (no migration). Use `[log]\nlevel = "debug"`.
+    /// Block of operator-facing engine telemetry settings — level, destination, file path. The schema
+    /// groups them under one table: a top-level `log_level` is rejected as an unknown field (no
+    /// migration). Use `[log]\nlevel = "debug"`.
     ///
     /// `#[serde(default)]` collapses "no `[log]` table" and "empty `[log]` table" into the same
     /// `RawLogConfig::default()` state (every field `None`). Both surface identically through
@@ -38,19 +38,19 @@ pub(crate) struct RawWatch {
     /// Walk descendants of the anchor recursively. Default `true` — the recursive case is the
     /// dominant operator intent (a watch on `/srv/build` almost always wants files anywhere
     /// underneath). `false` confines the watch to the anchor's immediate children. A plain `bool`
-    /// suffices: "absent" and "explicit `false`" carry no distinction, so the `default_true`
-    /// default covers both.
+    /// suffices: "absent" and "explicit `false`" carry no distinction, so the `default_true` default
+    /// covers both.
     #[serde(default = "default_true")]
     pub recursive: bool,
     pub pattern: Option<String>,
     pub exclude: Option<Vec<String>>,
-    /// Include dot-prefixed entries. Default `false` — dotfiles are editor swap files, VCS
-    /// metadata, OS caches, almost never the signal the operator is watching. Set `hidden = true`
-    /// for cases like `/home/$USER/.config` where the dotfiles ARE the payload.
+    /// Include dot-prefixed entries. Default `false` — dotfiles are editor swap files, VCS metadata,
+    /// OS caches, almost never the signal the operator is watching. Set `hidden = true` for cases
+    /// like `/home/$USER/.config` where the dotfiles ARE the payload.
     #[serde(default)]
     pub hidden: bool,
-    /// Debounce window after the last event. TOML accepts duration strings (`"200ms"`, `"1s"`,
-    /// `"1m 30s"`); omitted ⇒ [`crate::config::DEFAULT_SETTLE`].
+    /// Debounce window after the last event. TOML accepts duration strings (`"200ms"`, `"1s"`, `"1m
+    /// 30s"`); omitted ⇒ [`crate::config::DEFAULT_SETTLE`].
     #[serde(default, deserialize_with = "optional_duration")]
     pub settle: Option<Duration>,
     /// Forced-fire deadline after burst start. TOML accepts duration strings (`"1h"`, `"30m"`);
@@ -61,8 +61,8 @@ pub(crate) struct RawWatch {
     pub max_depth: Option<u32>,
     pub events: Option<Vec<String>>,
     /// Suppress this entry without removing it from the TOML. Default `true` — present entries are
-    /// effective by default; `false` is structurally equivalent to "absent from the config"
-    /// (filtered by [`crate::Config::active_watches`] before the engine sees anything).
+    /// effective by default; `false` is structurally equivalent to "absent from the config" (filtered
+    /// by [`crate::Config::active_watches`] before the engine sees anything).
     #[serde(default = "default_true")]
     pub enabled: bool,
 }
@@ -71,10 +71,10 @@ const fn default_true() -> bool {
     true
 }
 
-/// One entry in `actions = [...]`. Variants light up additively as sibling `Option<…>` fields:
-/// `exec` for a single process, `pipe` for a chain of processes wired stdout→stdin, and the `when`
-/// / `then` / `else` triple for conditionals. `deny_unknown_fields` catches typos at the variant
-/// tag level (e.g., `exce`, `paralel`).
+/// One entry in `actions = [...]`. Variants light up additively as sibling `Option<…>` fields: `exec`
+/// for a single process, `pipe` for a chain of processes wired stdout→stdin, and the `when` / `then`
+/// / `else` triple for conditionals. `deny_unknown_fields` catches typos at the variant tag level
+/// (e.g., `exce`, `paralel`).
 ///
 /// Validation enforces "exactly one variant set" — the variant tags `exec`, `pipe`, and `when` are
 /// mutually exclusive on a single `[[watch.actions]]` entry. Inside a conditional, `when` is the
@@ -85,40 +85,40 @@ const fn default_true() -> bool {
 pub(crate) struct RawAction {
     /// `Some(argv)` for `{ exec = [...] }` actions. Mutually exclusive with `when` and `pipe`.
     pub exec: Option<Vec<String>>,
-    /// `Some(stages)` for `{ pipe = [{ exec = [...] }, ...] }` actions. Each stage is one
-    /// [`RawExec`] (its own argv + optional per-stage `timeout`); the actuator wires their stdouts
-    /// to the next stage's stdin via `pipe(2)` and aggregates outcomes with pipefail-on semantics.
-    /// Validation rejects empty arrays and single-stage pipes (use top-level `exec` directly).
+    /// `Some(stages)` for `{ pipe = [{ exec = [...] }, ...] }` actions. Each stage is one [`RawExec`]
+    /// (its own argv + optional per-stage `timeout`); the actuator wires their stdouts to the next
+    /// stage's stdin via `pipe(2)` and aggregates outcomes with pipefail-on semantics. Validation
+    /// rejects empty arrays and single-stage pipes (use top-level `exec` directly).
     pub pipe: Option<Vec<RawExec>>,
-    /// Predicate of a conditional action. `Some(predicate)` opens the `when` / `then` / `else`
-    /// group; the validator requires `then` alongside it. The predicate carries its own per-step
-    /// `timeout` inside the nested [`RawExec`].
+    /// Predicate of a conditional action. `Some(predicate)` opens the `when` / `then` / `else` group;
+    /// the validator requires `then` alongside it. The predicate carries its own per-step `timeout`
+    /// inside the nested [`RawExec`].
     pub when: Option<RawExec>,
     /// Then-branch of a conditional action. Required alongside `when`; rejected when `when` is
     /// absent. The actuator runs the `then` body on predicate Ok; full `RawAction` grammar is
     /// recursive here (nested conditionals are allowed).
     pub then: Option<Vec<Self>>,
     /// Else-branch of a conditional action. Optional even when `when` is set: omitting `else` makes
-    /// the predicate's Failed outcome skip past the conditional with no propagation. TOML field
-    /// name is `else` (a Rust keyword); serde renames it to the Rust-side `otherwise` identifier.
+    /// the predicate's Failed outcome skip past the conditional with no propagation. TOML field name
+    /// is `else` (a Rust keyword); serde renames it to the Rust-side `otherwise` identifier.
     #[serde(default, rename = "else")]
     pub otherwise: Option<Vec<Self>>,
     /// Per-step deadline as a duration string (`"500ms"`, `"30s"`, `"5m"`). Valid only on
-    /// `exec`-bearing actions; validation rejects it on non-exec variants. Pipe stages each set
-    /// their own `timeout` on the nested [`RawExec`]; the conditional predicate sets it inside the
-    /// `when` table. `None` ⇒ no deadline. Threaded onto [`specter_core::ExecAction::timeout`] and
-    /// enforced by the actuator's per-step timer thread: SIGTERM at `now + timeout`, SIGKILL after
-    /// the actuator's `shutdown_grace`.
+    /// `exec`-bearing actions; validation rejects it on non-exec variants. Pipe stages each set their
+    /// own `timeout` on the nested [`RawExec`]; the conditional predicate sets it inside the `when`
+    /// table. `None` ⇒ no deadline. Threaded onto [`specter_core::ExecAction::timeout`] and enforced
+    /// by the actuator's per-step timer thread: SIGTERM at `now + timeout`, SIGKILL after the
+    /// actuator's `shutdown_grace`.
     #[serde(default, deserialize_with = "optional_duration")]
     pub timeout: Option<Duration>,
 }
 
-/// Nested-exec table used inside the predicate slot of a conditional action (`when = { exec =
-/// [...], timeout = "5s" }`) and inside each stage of a `pipe = [...]` action.
+/// Nested-exec table used inside the predicate slot of a conditional action (`when = { exec = [...],
+/// timeout = "5s" }`) and inside each stage of a `pipe = [...]` action.
 ///
 /// The shape is intentionally tighter than [`RawAction`]: only the `exec` and `timeout` fields are
-/// allowed, no variant tags. A predicate cannot itself be a pipe or a nested conditional, and a
-/// pipe stage cannot itself be a pipe or a conditional. A future relaxation would swap this for a
+/// allowed, no variant tags. A predicate cannot itself be a pipe or a nested conditional, and a pipe
+/// stage cannot itself be a pipe or a conditional. A future relaxation would swap this for a
 /// `Box<RawAction>` and let the validator recurse.
 ///
 /// `Deserialize` is hand-rolled (rather than derived with `deny_unknown_fields`) so the common
@@ -195,8 +195,8 @@ fn optional_duration<'de, D: serde::Deserializer<'de>>(
 
 /// One TOML duration string, parsed by [`crate::duration::parse`]. The derived fields (through
 /// [`optional_duration`]) and the hand-rolled [`RawExecVisitor`] (through `next_value`, which takes
-/// a `Deserialize` impl rather than a function) both deserialize through it, so every duration
-/// field accepts exactly one grammar.
+/// a `Deserialize` impl rather than a function) both deserialize through it, so every duration field
+/// accepts exactly one grammar.
 struct DurationToken(Duration);
 
 impl<'de> serde::Deserialize<'de> for DurationToken {

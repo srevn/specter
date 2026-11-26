@@ -8,10 +8,10 @@
 //! slow. Easier: lower the queue cap by writing to that sysctl. Both paths require some privilege
 //! (root can write `/proc/sys/...`; non-root just needs to be patient).
 //!
-//! This test attempts the **non-root patient** path: it generates a large burst of structural
-//! events on a Dir watch without intervening drains, expects the kernel to overflow, and asserts
-//! that [`WatcherEvent::Overflow`] is emitted. If the burst doesn't trigger overflow within
-//! reasonable bounds, we skip cleanly.
+//! This test attempts the **non-root patient** path: it generates a large burst of structural events
+//! on a Dir watch without intervening drains, expects the kernel to overflow, and asserts that
+//! [`WatcherEvent::Overflow`] is emitted. If the burst doesn't trigger overflow within reasonable
+//! bounds, we skip cleanly.
 //!
 //! Linux only.
 
@@ -73,8 +73,8 @@ fn massive_event_burst_emits_overflow() {
     // drops further events and emits the synthetic `IN_Q_OVERFLOW` record.
     let target = queue_cap + 2_000;
     for i in 0..target {
-        // `OpenOptions::create_new` minimizes per-file overhead vs `std::fs::write`. The kernel
-        // only sees `IN_CREATE`.
+        // `OpenOptions::create_new` minimizes per-file overhead vs `std::fs::write`. The kernel only
+        // sees `IN_CREATE`.
         if std::fs::OpenOptions::new()
             .create_new(true)
             .write(true)

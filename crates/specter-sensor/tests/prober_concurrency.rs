@@ -1,6 +1,6 @@
 //! Pool-size respect: with N workers, exactly N probes can be in flight simultaneously. We pin this
-//! through a `Barrier`-coordinated probe — but the prober is a black box, so we use a *real-fs*
-//! slow probe (a deeply-recursive walk) instead of a test seam.
+//! through a `Barrier`-coordinated probe — but the prober is a black box, so we use a *real-fs* slow
+//! probe (a deeply-recursive walk) instead of a test seam.
 
 #![cfg(unix)]
 

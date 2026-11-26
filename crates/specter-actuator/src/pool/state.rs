@@ -10,12 +10,12 @@
 //! # Programs, cursors, and accounting
 //!
 //! An [`Effect`] carries an [`specter_core::ActionProgram`]: a flat `Box<[ProgramOp]>` walked by a
-//! `u32` cursor. Each op carries a [`SpawnBody`] (single Exec or N-stage Pipe) plus explicit
-//! `on_ok` / `on_failed` branch targets — dispatch after a reap is a single
+//! `u32` cursor. Each op carries a [`SpawnBody`] (single Exec or N-stage Pipe) plus explicit `on_ok`
+//! / `on_failed` branch targets — dispatch after a reap is a single
 //! [`ProgramOp::target`](specter_core::program::ProgramOp::target) lookup on the outcome. The
-//! actuator walks the program with stop-on-failure semantics encoded by the lowering pass
-//! (Exec/Pipe `on_failed = Terminate`; predicate `on_failed` ≠ Terminate so the predicate outcome
-//! doesn't propagate).
+//! actuator walks the program with stop-on-failure semantics encoded by the lowering pass (Exec/Pipe
+//! `on_failed = Terminate`; predicate `on_failed` ≠ Terminate so the predicate outcome doesn't
+//! propagate).
 //!
 //! - **Per-Effect-stable** state (per-Sub set membership, diff tmp file) is owned by
 //!   [`ActuatorState::start_plan`]: insert on plan start, remove on plan terminus.
@@ -29,8 +29,8 @@
 //!
 //! Between two adjacent ops the slot may be in an intermediate state ([`Slot::plan_continue`]) when
 //! the wait-thread has reaped op N but no permit is available for op N+1. The pump's plan-continue
-//! arm has priority over fresh `pending`: continuation work bypasses the per-Sub gate (it's the
-//! same program, already admitted) but still respects the global permit cap.
+//! arm has priority over fresh `pending`: continuation work bypasses the per-Sub gate (it's the same
+//! program, already admitted) but still respects the global permit cap.
 
 use crate::EffectCompleteSender;
 use crate::env::EnvSnapshot;
@@ -52,9 +52,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// Policy for [`ActuatorState::terminate_plan`]: under `Pump` re-queue the slot's pending Effect
-/// (if any) for the next pump cycle; under `Drop` (shutdown drain) drop pending and remove the
-/// slot. Only [`ActuatorState::handle_reap_drop`] passes `Drop`; every other terminate site routes
-/// through the Pump-policy advance pipeline.
+/// (if any) for the next pump cycle; under `Drop` (shutdown drain) drop pending and remove the slot.
+/// Only [`ActuatorState::handle_reap_drop`] passes `Drop`; every other terminate site routes through
+/// the Pump-policy advance pipeline.
 #[derive(Copy, Clone)]
 enum ReapPolicy {
     Pump,
@@ -64,11 +64,11 @@ enum ReapPolicy {
 /// Outcome of an attempted instruction spawn. Returned by [`ActuatorState::try_spawn_step`] (which
 /// acquires a permit).
 ///
-/// The `Failed` variant carries a typed [`SpawnFailureCause`] discriminant: the synth-Failed
-/// dispatch sites log it alongside the synthesised `EffectOutcome::Failed(Termination::Internal)`
-/// so an operator triaging "this predicate took the else-branch unexpectedly" can match against the
-/// cause-side `error!` log line (resolver, OS spawn, wait-thread) and tell "predicate binary
-/// missing" from "predicate exited 1 cleanly".
+/// The `Failed` variant carries a typed [`SpawnFailureCause`] discriminant: the synth-Failed dispatch
+/// sites log it alongside the synthesised `EffectOutcome::Failed(Termination::Internal)` so an
+/// operator triaging "this predicate took the else-branch unexpectedly" can match against the
+/// cause-side `error!` log line (resolver, OS spawn, wait-thread) and tell "predicate binary missing"
+/// from "predicate exited 1 cleanly".
 ///
 /// The cause is **internal-only**: the engine never sees this type. The wire outcome is
 /// `EffectOutcome::Failed(Termination::Internal)` regardless of cause. Splitting cause from outcome
@@ -81,9 +81,9 @@ enum SpawnError {
     Deferred,
     /// Spawn (or pre-spawn) failure with a typed cause. The caller routes through
     /// [`ActuatorState::advance_or_terminate`] with a synthesised `EffectOutcome::Failed`; the
-    /// dispatch then decides terminate vs continue based on the op's `on_failed` edge at the
-    /// failing cursor — predicate spawn-failures still get their no-propagation semantics through
-    /// that dispatch.
+    /// dispatch then decides terminate vs continue based on the op's `on_failed` edge at the failing
+    /// cursor — predicate spawn-failures still get their no-propagation semantics through that
+    /// dispatch.
     Failed(SpawnFailureCause),
 }
 
@@ -94,9 +94,9 @@ enum SpawnError {
 /// log line.
 ///
 /// **Not part of the engine wire format.** `EffectOutcome::Failed` carries no cause discriminant;
-/// the engine's dispatch reads only the op's `on_failed` edge. Predicate spawn-failure and
-/// predicate non-zero-exit are observationally identical to the engine, by design (the op's edge
-/// decides routing without inspecting cause).
+/// the engine's dispatch reads only the op's `on_failed` edge. Predicate spawn-failure and predicate
+/// non-zero-exit are observationally identical to the engine, by design (the op's edge decides
+/// routing without inspecting cause).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum SpawnFailureCause {
     /// Argv / env substitution failed before any child or wait thread was spawned. Today the only
@@ -108,17 +108,17 @@ enum SpawnFailureCause {
     /// an error (ENOENT on the binary, EAGAIN, EMFILE, …). For pipes the spawner has already rolled
     /// back any partially-spawned stages before the error reaches this discriminant.
     OsSpawn,
-    /// `thread::Builder::spawn` for the wait thread failed. The spawned child is alive but its
-    /// paired [`crate::spawner::ChildWaiter`] was dropped; the recovery branch SIGKILLs and
-    /// synchronously reaps the orphan before this discriminant surfaces.
+    /// `thread::Builder::spawn` for the wait thread failed. The spawned child is alive but its paired
+    /// [`crate::spawner::ChildWaiter`] was dropped; the recovery branch SIGKILLs and synchronously
+    /// reaps the orphan before this discriminant surfaces.
     WaitThread,
 }
 
 /// Per-`DedupKey` actuator slot.
 ///
 /// At most one in-flight child (`running`) plus a single Latest-coalesce next-plan slot (`pending`)
-/// plus, between adjacent instructions of an in-flight plan when the global permit cap is
-/// exhausted, a `plan_continue` hand-off.
+/// plus, between adjacent instructions of an in-flight plan when the global permit cap is exhausted,
+/// a `plan_continue` hand-off.
 ///
 /// **Three slots, three roles:**
 ///
@@ -160,9 +160,9 @@ pub(crate) struct Slot {
 ///   [`SpawnBody::Pipe`], the *last* stage's pid (what `ps` would label "the pipe").
 ///   Intermediate-stage pids stay inside the per-stage signalers (used only for the per-stage timer
 ///   threads at install time, then dropped).
-/// - **`signaler`** — the signaler the controller uses for shutdown SIGTERM / SIGKILL. For Exec
-///   this is the single-child signaler; for Pipe this is the combined fan-out signaler that signals
-///   every stage. Per-stage signalers DO NOT live here: pipe install collects them as locals, arms
+/// - **`signaler`** — the signaler the controller uses for shutdown SIGTERM / SIGKILL. For Exec this
+///   is the single-child signaler; for Pipe this is the combined fan-out signaler that signals every
+///   stage. Per-stage signalers DO NOT live here: pipe install collects them as locals, arms
 ///   per-stage timer threads against each (cloning the Arc), then drops the locals when install
 ///   returns. The aggregating `PipeWaiter` owns its own per-stage signaler clones for the
 ///   SIGTERM-cascade-on-first-failure path, independent of this combined signaler.
@@ -170,11 +170,12 @@ pub(crate) struct Slot {
 ///   [`ActuatorState::advance_or_terminate`] re-resolves op N+1's argv + env from the same snapshot
 ///   without re-fetching.
 /// - **`cursor`** — `u32` index into `effect.program.ops`.
-/// - **`diff_tmp`** — `Some` iff `start_plan` materialised a diff tmp file. The handle is co-owned by
-///   `Slot::running` and `Slot::plan_continue` across the plan's steps via `Arc<DiffTmpFile>`, so
-///   every step reads the same `SPECTER_DIFF_PATH`. The Arc's `Drop` impl unlinks the file when the
-///   last co-owner is dropped — at plan terminus, after the final [`ActuatorState::terminate_plan`]
-///   has emitted `EffectComplete`. See [`crate::tmp`] for the lifecycle invariant.
+/// - **`diff_tmp`** — `Some` iff `start_plan` materialised a diff tmp file. The handle is co-owned
+///   by `Slot::running` and `Slot::plan_continue` across the plan's steps via `Arc<DiffTmpFile>`,
+///   so every step reads the same `SPECTER_DIFF_PATH`. The Arc's `Drop` impl unlinks the file when
+///   the last co-owner is dropped — at plan terminus, after the final
+///   [`ActuatorState::terminate_plan`] has emitted `EffectComplete`. See [`crate::tmp`] for the
+///   lifecycle invariant.
 ///
 /// `signaler` is `Arc<dyn>` so the controller's installed-side reference and the per-step timer
 /// thread's clone are independent co-owners; either may outlive the other.
@@ -198,13 +199,13 @@ impl std::fmt::Debug for RunningJob {
 }
 
 /// Hand-off slot between two adjacent instructions when no permit is available at advance time. The
-/// pump's plan-continue arm consumes this in priority over [`Slot::pending`] — same program,
-/// already admitted, just waiting on the global cap.
+/// pump's plan-continue arm consumes this in priority over [`Slot::pending`] — same program, already
+/// admitted, just waiting on the global cap.
 ///
-/// `diff_tmp` carries the plan-bound tmp handle across the permit-deferred boundary. On
-/// continuation, the next step's `RunningJob` clones the Arc into its own `diff_tmp` slot; the
-/// `PlanContinuation`'s Arc drops with the destructure that consumes it. The file persists because
-/// the new `RunningJob` holds a clone.
+/// `diff_tmp` carries the plan-bound tmp handle across the permit-deferred boundary. On continuation,
+/// the next step's `RunningJob` clones the Arc into its own `diff_tmp` slot; the `PlanContinuation`'s
+/// Arc drops with the destructure that consumes it. The file persists because the new `RunningJob`
+/// holds a clone.
 #[derive(Debug)]
 pub(crate) struct PlanContinuation {
     pub effect: Arc<Effect>,
@@ -233,12 +234,12 @@ pub(crate) struct ActuatorState {
     pub env_snapshot: Arc<EnvSnapshot>,
     /// Captured operator `$TMPDIR` (`std::env::temp_dir`) at actuator startup. Threaded into every
     /// [`DiffTmpFile::create`] call so the spawn path makes no `getenv(TMPDIR)` syscall per Effect.
-    /// Lives at the same lifetime tier as [`Self::env_snapshot`]; shared by `Arc<Path>` for the
-    /// same reason — immutable across the actuator's lifetime.
+    /// Lives at the same lifetime tier as [`Self::env_snapshot`]; shared by `Arc<Path>` for the same
+    /// reason — immutable across the actuator's lifetime.
     pub temp_dir: Arc<Path>,
     /// Captured `std::process::id()` at actuator startup. Used in the tmp diff filename
-    /// (`specter-{pid}-{corr:016x}.diff`) — the actuator's daemon pid, not the spawned child's
-    /// (which isn't known until after `Command::spawn` but the env var must be set *before* spawn).
+    /// (`specter-{pid}-{corr:016x}.diff`) — the actuator's daemon pid, not the spawned child's (which
+    /// isn't known until after `Command::spawn` but the env var must be set *before* spawn).
     pub actuator_pid: u32,
     /// SIGTERM → SIGKILL grace. Reads:
     /// - shutdown drain ([`super::SubprocessActuator::shutdown`]);
@@ -291,8 +292,8 @@ impl ActuatorState {
         tracing::trace!(?key, "submit");
         let slot = self.slots.entry(key).or_default();
         if slot.running.is_some() || slot.plan_continue.is_some() {
-            // Plan in flight; Latest-coalesce — drop old pending if present. Never touches
-            // `running` or `plan_continue`: the current plan runs to terminus before pending fires.
+            // Plan in flight; Latest-coalesce — drop old pending if present. Never touches `running`
+            // or `plan_continue`: the current plan runs to terminus before pending fires.
             slot.pending = Some(effect);
         } else {
             slot.pending = Some(effect);
@@ -326,12 +327,12 @@ impl ActuatorState {
     ///
     /// **Per matching slot** (slots whose [`DedupKey::profile`] equals `profile`):
     ///
-    /// 1. Drop `pending` and `plan_continue` — queued work the engine has already given up on;
-    ///    either becoming live would respawn work the engine doesn't track.
+    /// 1. Drop `pending` and `plan_continue` — queued work the engine has already given up on; either
+    ///    becoming live would respawn work the engine doesn't track.
     /// 2. Clear `in_ready_queue` — paired with the `ready_queue` `retain` below; together they
     ///    preserve the "in queue ⇔ flag set" invariant the pump's blocked-scratch drain pins.
-    /// 3. SIGTERM the running child if any. The signaler short-circuits on `is_dead`, so a race
-    ///    with a natural reap is benign (SIGTERM on a reaped pid is a documented no-op).
+    /// 3. SIGTERM the running child if any. The signaler short-circuits on `is_dead`, so a race with
+    ///    a natural reap is benign (SIGTERM on a reaped pid is a documented no-op).
     /// 4. Leave `slot.running` in place. The wait thread will deliver `Reaped` through the existing
     ///    pipeline; [`Self::handle_reap`] will run [`Self::terminate_plan`] and emit one completion
     ///    via [`EffectCompleteSender::send`], which the engine routes to
@@ -346,12 +347,12 @@ impl ActuatorState {
     ///
     /// **`running_subs` is NOT touched.** A SIGTERMed child still drives reap → [`Self::handle_reap`]
     /// → [`Self::terminate_plan`], which owns the `running_subs` removal. Removing here would race
-    /// with the concurrent reap and could clobber a same-Sub fresh plan at a different [`DedupKey`] —
-    /// the precise scenario `terminate_stale` guards against (see its rustdoc on why the per-Sub
+    /// with the concurrent reap and could clobber a same-Sub fresh plan at a different [`DedupKey`]
+    /// — the precise scenario `terminate_stale` guards against (see its rustdoc on why the per-Sub
     /// gate's bump pairs to a specific `(sub, key)` plan, not to `sub` alone).
     ///
-    /// **Idempotent.** Cancel for a profile with no in-flight effects is a no-op: the filter
-    /// produces an empty key set, the `retain` walks the queue with no removals, no signals fire.
+    /// **Idempotent.** Cancel for a profile with no in-flight effects is a no-op: the filter produces
+    /// an empty key set, the `retain` walks the queue with no removals, no signals fire.
     pub fn handle_cancel(&mut self, profile: ProfileId) {
         // Snapshot matching keys before mutation — iterating `self.slots` and mutating individual
         // slots in the same scope would alias. The collected `Vec` is bounded by the number of
@@ -385,9 +386,9 @@ impl ActuatorState {
             }
         }
 
-        // Drop every cancelled-profile key from the ready queue. O(N) where N = current queue
-        // length, bounded by concurrency plus queue headroom. Cancel is rare (gate-deadline only),
-        // so the walk is fine; `retain` preserves the FIFO order of the surviving keys.
+        // Drop every cancelled-profile key from the ready queue. O(N) where N = current queue length,
+        // bounded by concurrency plus queue headroom. Cancel is rare (gate-deadline only), so the
+        // walk is fine; `retain` preserves the FIFO order of the surviving keys.
         self.ready_queue.retain(|k| k.profile() != profile);
 
         tracing::debug!(
@@ -409,8 +410,8 @@ impl ActuatorState {
         engine_in: &dyn EffectCompleteSender,
     ) {
         tracing::trace!(?completion.key, ?completion.outcome, "reap drop");
-        // `key` is `Copy` (slotmap handle); read it off the envelope for the slot lookup, then
-        // thread the envelope through unchanged into the terminal arm — no destructure-and-rebuild.
+        // `key` is `Copy` (slotmap handle); read it off the envelope for the slot lookup, then thread
+        // the envelope through unchanged into the terminal arm — no destructure-and-rebuild.
         let key = completion.key;
         // Consume the running job (if present). The signaler / effect / waiter fields drop with the
         // job — phase 1 already SIGTERMed; this thread has already reaped the child kernel-side, so
@@ -422,26 +423,26 @@ impl ActuatorState {
         };
         self.terminate_plan(completion, ReapPolicy::Drop, engine_in);
         // `job` carries the live-plan's last `Arc<DiffTmpFile>` (the slot's `plan_continue` is
-        // structurally `None` while `running` is `Some`, so no second co-owner exists at this
-        // point). Dropping it explicitly after `terminate_plan` has emitted `EffectComplete` orders
-        // the on-disk unlink after the wire event — see [`DiffTmpFile::drop`].
+        // structurally `None` while `running` is `Some`, so no second co-owner exists at this point).
+        // Dropping it explicitly after `terminate_plan` has emitted `EffectComplete` orders the
+        // on-disk unlink after the wire event — see [`DiffTmpFile::drop`].
         drop(job);
     }
 
     /// The Pump-policy reap pipeline. Two main exits:
     ///
     /// 1. **Advance**: the op's [`ProgramOp::target`](specter_core::program::ProgramOp::target) for
-    ///    the reaped outcome is [`BranchTarget::Continue`], so the plan continues at the named
-    ///    slot. Handed to [`Self::try_spawn_step`]; a `SpawnError::Failed` here loops the dispatch
-    ///    with a synthesised `Failed` outcome for the new cursor — a predicate spawn-failure
-    ///    cascade naturally walks to its own [`BranchTarget::Continue`] (the else-branch's first
-    ///    op), an exec spawn-failure walks to its [`BranchTarget::Terminate`] and the plan
-    ///    terminates with the synth Failed.
+    ///    the reaped outcome is [`BranchTarget::Continue`], so the plan continues at the named slot.
+    ///    Handed to [`Self::try_spawn_step`]; a `SpawnError::Failed` here loops the dispatch with a
+    ///    synthesised `Failed` outcome for the new cursor — a predicate spawn-failure cascade
+    ///    naturally walks to its own [`BranchTarget::Continue`] (the else-branch's first op), an
+    ///    exec spawn-failure walks to its [`BranchTarget::Terminate`] and the plan terminates with
+    ///    the synth Failed.
     /// 2. **Terminate**: the op's edge target is [`BranchTarget::Terminate`] (carried outcome
     ///    propagates) or [`BranchTarget::Escape`] (terminate Ok regardless of carried outcome — the
-    ///    "branch, not guard" outcome elision). `terminate_plan` emits one `EffectComplete`,
-    ///    removes the Sub from the per-Sub gate, cleans the diff tmp file, and re-queues the slot's
-    ///    `pending` (if any) or removes the slot.
+    ///    "branch, not guard" outcome elision). `terminate_plan` emits one `EffectComplete`, removes
+    ///    the Sub from the per-Sub gate, cleans the diff tmp file, and re-queues the slot's `pending`
+    ///    (if any) or removes the slot.
     ///
     /// **Defensive no-job**: a stale completion after slot removal routes through
     /// [`Self::terminate_stale`] (not `terminate_plan`) — emits `EffectComplete` for engine
@@ -460,8 +461,8 @@ impl ActuatorState {
         let key = completion.key;
         let Some(job) = self.take_running(&key) else {
             // Stale completion: slot already removed (or running already taken).
-            // Engine-accounting-only — see `terminate_stale`'s contract for why this can't go
-            // through `terminate_plan` under the set-membership gate.
+            // Engine-accounting-only — see `terminate_stale`'s contract for why this can't go through
+            // `terminate_plan` under the set-membership gate.
             self.terminate_stale(completion, engine_in);
             return;
         };
@@ -481,8 +482,8 @@ impl ActuatorState {
     /// prior terminate before this Reaped landed) or if the slot is present but its `running` was
     /// already taken.
     ///
-    /// Callers own the rest of the slot's lifecycle: re-queue under Pump if pending is set,
-    /// otherwise remove via [`Self::terminate_plan`].
+    /// Callers own the rest of the slot's lifecycle: re-queue under Pump if pending is set, otherwise
+    /// remove via [`Self::terminate_plan`].
     fn take_running(&mut self, key: &DedupKey) -> Option<RunningJob> {
         self.slots.get_mut(key).and_then(|s| s.running.take())
     }
@@ -502,11 +503,11 @@ impl ActuatorState {
     ///     outcome at the new cursor.
     ///
     /// The loop is bounded: each [`BranchTarget::Continue`] edge points forward (builder invariant:
-    /// `target > origin`) and within bounds (`target < ops.len()`), so the cursor strictly
-    /// increases. A pathological program is impossible by construction.
+    /// `target > origin`) and within bounds (`target < ops.len()`), so the cursor strictly increases.
+    /// A pathological program is impossible by construction.
     ///
-    /// Called only by the Pump-policy reap pipeline ([`Self::reap_pump`]) and the spawn-failure
-    /// paths in [`Self::start_plan`] / [`Self::spawn_continuation`]. The shutdown drain
+    /// Called only by the Pump-policy reap pipeline ([`Self::reap_pump`]) and the spawn-failure paths
+    /// in [`Self::start_plan`] / [`Self::spawn_continuation`]. The shutdown drain
     /// ([`Self::handle_reap_drop`]) bypasses dispatch entirely.
     ///
     /// Takes the [`EffectCompletion`] envelope by value so the terminate arms thread it through
@@ -573,8 +574,8 @@ impl ActuatorState {
                         Err(SpawnError::Failed(cause)) => {
                             // Synthesise Failed for `next` and loop. The next iteration reads
                             // `next`'s `on_failed` edge — for a predicate-Failed synth this walks
-                            // to the else-branch (Continue) or to Escape (no-else); for an
-                            // Exec/Pipe synth it walks to Terminate (stop-on-failure propagation).
+                            // to the else-branch (Continue) or to Escape (no-else); for an Exec/Pipe
+                            // synth it walks to Terminate (stop-on-failure propagation).
                             //
                             // Log at warn with the typed cause so the operator can correlate this
                             // dispatch decision against the cause-side error log line emitted at
@@ -612,8 +613,8 @@ impl ActuatorState {
     /// Called from three sites, every one of which has a paired [`Self::start_plan`] bump for the
     /// same `(sub, key)`:
     ///
-    /// 1. [`Self::advance_or_terminate`] Terminate / Escape arms (the canonical live-plan exit
-    ///    after a real Reaped or a synth Failed).
+    /// 1. [`Self::advance_or_terminate`] Terminate / Escape arms (the canonical live-plan exit after
+    ///    a real Reaped or a synth Failed).
     /// 2. [`Self::handle_reap_drop`] shutdown-drain teardown when [`Self::take_running`] returns a
     ///    live job.
     /// 3. [`Self::start_plan`] / [`Self::spawn_continuation`] spawn-failure paths route through
@@ -627,8 +628,8 @@ impl ActuatorState {
     ///
     /// **Stale-Reaped arms do NOT call here**: a Reaped without a paired live `RunningJob` (slot
     /// absent or `slot.running` already taken) routes through [`Self::terminate_stale`]. That path's
-    /// `sub` is *not* guaranteed to hold the per-Sub gate (a live plan for the same Sub may own it on
-    /// a different key), so a blanket `running_subs.remove(&sub)` would silently clobber the live
+    /// `sub` is *not* guaranteed to hold the per-Sub gate (a live plan for the same Sub may own it
+    /// on a different key), so a blanket `running_subs.remove(&sub)` would silently clobber the live
     /// plan's hold. Splitting "live plan teardown" from "engine accounting only" lets the
     /// `running_subs.remove` here be total — guarded by an unconditional `debug_assert!(was_present)`
     /// — pinning the bump/remove pairing under the set-membership shape.
@@ -642,13 +643,13 @@ impl ActuatorState {
         // fields stay on the stack for the subsequent per-Sub gate remove + slot decision.
         let key = completion.key;
         let sub = completion.sub;
-        // `let _` deliberately drops the `SendError`: a closed `engine_in` means the engine has
-        // been torn down. The actuator's `run` loop observes that fact via one of its own exits
-        // (`effects_rx` Disconnected, `shutdown_actuator_rx`, `hard_shutdown_actuator_rx`) and
-        // breaks out — the swallow keeps per-step accounting consistent until then. Mirrors the
-        // engine driver's `effects_tx` degradable-on-disconnect policy in `specter-bin`'s
-        // `forward.rs`: both directions of the engine ↔ actuator channel degrade rather than
-        // escalate, and the actuator cannot persist with the engine dead.
+        // `let _` deliberately drops the `SendError`: a closed `engine_in` means the engine has been
+        // torn down. The actuator's `run` loop observes that fact via one of its own exits
+        // (`effects_rx` Disconnected, `shutdown_actuator_rx`, `hard_shutdown_actuator_rx`) and breaks
+        // out — the swallow keeps per-step accounting consistent until then. Mirrors the engine
+        // driver's `effects_tx` degradable-on-disconnect policy in `specter-bin`'s `forward.rs`:
+        // both directions of the engine ↔ actuator channel degrade rather than escalate, and the
+        // actuator cannot persist with the engine dead.
         let _ = engine_in.send(completion);
         // Live-plan teardown: every reachable call site has a paired `start_plan` insert for this
         // Sub. `BTreeSet::remove` returns `false` only on an unpaired remove — a controller
@@ -659,8 +660,8 @@ impl ActuatorState {
             was_present,
             "per-Sub gate underflow: terminate_plan for Sub not in running_subs (stale completion path must route to terminate_stale)",
         );
-        // The slot may still exist (the reap pipeline already took running; spawn-failure paths
-        // never installed it). Decide: re-queue if pending under Pump, otherwise remove.
+        // The slot may still exist (the reap pipeline already took running; spawn-failure paths never
+        // installed it). Decide: re-queue if pending under Pump, otherwise remove.
         let Some(slot) = self.slots.get_mut(&key) else {
             return;
         };
@@ -677,10 +678,10 @@ impl ActuatorState {
         }
     }
 
-    /// Engine-accounting-only terminal arm for an [`EffectCompletion`] envelope that arrives
-    /// without a paired live `RunningJob` ([`Self::take_running`] returned `None` — slot absent or
-    /// `slot.running` already taken). Emits one `EffectComplete` so the engine's outstanding
-    /// counter stays in lockstep, then removes the slot (idempotent).
+    /// Engine-accounting-only terminal arm for an [`EffectCompletion`] envelope that arrives without
+    /// a paired live `RunningJob` ([`Self::take_running`] returned `None` — slot absent or
+    /// `slot.running` already taken). Emits one `EffectComplete` so the engine's outstanding counter
+    /// stays in lockstep, then removes the slot (idempotent).
     ///
     /// Distinct from [`Self::terminate_plan`] in two ways:
     ///
@@ -695,12 +696,12 @@ impl ActuatorState {
     ///    from under a live reader.
     ///
     /// **Production reachability.** Defensive: every successful spawn installs `slot.running` and
-    /// every wait-thread send is paired with a `take_running` at the controller. The path fires
-    /// only against a manufactured `Slot::default` (no running) — see
-    /// `reap_pump_stale_for_unspawned_slot_clears_state` in the test module. Production callers
-    /// (real reap pipeline, [`Self::handle_reap_drop`]) reach this arm only if the same completion
-    /// would otherwise have been delivered twice — a controller invariant violation. The accounting
-    /// emit + slot remove keeps the engine in lockstep under that defensive case.
+    /// every wait-thread send is paired with a `take_running` at the controller. The path fires only
+    /// against a manufactured `Slot::default` (no running) — see
+    /// `reap_pump_stale_for_unspawned_slot_clears_state` in the test module. Production callers (real
+    /// reap pipeline, [`Self::handle_reap_drop`]) reach this arm only if the same completion would
+    /// otherwise have been delivered twice — a controller invariant violation. The accounting emit +
+    /// slot remove keeps the engine in lockstep under that defensive case.
     ///
     /// In production the slot is `Slot::default()` (or absent) — never carries pending — so the
     /// unconditional `slots.remove` here drops no live state. `pending` becomes reachable only via
@@ -724,12 +725,12 @@ impl ActuatorState {
     ///
     /// Two arms per slot:
     ///
-    /// - **Plan-continue** (`slot.plan_continue.is_some()`): the slot holds an in-flight plan's
-    ///   next step, deferred at reap time on permit unavailability. Bypasses the per-Sub gate
+    /// - **Plan-continue** (`slot.plan_continue.is_some()`): the slot holds an in-flight plan's next
+    ///   step, deferred at reap time on permit unavailability. Bypasses the per-Sub gate
     ///   (continuation of an admitted plan; never racing another plan for the Sub by construction).
     ///   Permit gate still applies.
-    /// - **Fresh plan** (`slot.pending.is_some()`, `plan_continue` empty): per-Sub gate, then
-    ///   permit gate, then [`Self::start_plan`].
+    /// - **Fresh plan** (`slot.pending.is_some()`, `plan_continue` empty): per-Sub gate, then permit
+    ///   gate, then [`Self::start_plan`].
     ///
     /// Items blocked by either gate are deferred to a transient buffer and restored at end so FIFO
     /// is preserved across pump invocations. The blocked-buffer logic is per-arm: a permit-blocked
@@ -811,8 +812,8 @@ impl ActuatorState {
         }
     }
 
-    /// Start a plan: materialise the diff tmp file (if needed), insert the Sub into the per-Sub
-    /// gate, spawn instruction 0 with the given permit.
+    /// Start a plan: materialise the diff tmp file (if needed), insert the Sub into the per-Sub gate,
+    /// spawn instruction 0 with the given permit.
     ///
     /// **The per-Sub gate is inserted unconditionally** before the spawn attempt — predicate
     /// spawn-failure semantics may continue the plan via [`Self::advance_or_terminate`], and any
@@ -823,9 +824,9 @@ impl ActuatorState {
     ///
     /// On spawn failure, routes through [`Self::advance_or_terminate`] with a synthesised
     /// `EffectOutcome::Failed`. The dispatcher reads op 0's `on_failed` edge — propagates the synth
-    /// Failed when the edge is `Terminate` (Exec/Pipe stop-on-failure), jumps to the named slot
-    /// when the edge is `Continue` (a predicate's else-branch), or terminates Ok when the edge is
-    /// `Escape` (a predicate with no else).
+    /// Failed when the edge is `Terminate` (Exec/Pipe stop-on-failure), jumps to the named slot when
+    /// the edge is `Continue` (a predicate's else-branch), or terminates Ok when the edge is `Escape`
+    /// (a predicate with no else).
     ///
     /// `effect` is taken by value so the caller (pump) hands off the freshly-constructed
     /// `Arc<Effect>` and forgets about it; on success the Arc is cloned into [`Slot::running`], on
@@ -886,8 +887,8 @@ impl ActuatorState {
                 // OS spawn / resolver / wait-thread failure at the first instruction. Hand off to
                 // the dispatch loop with synthesised Failed — a predicate at cursor 0 still jumps
                 // to its else-branch via this path. The typed `cause` discriminant accompanies the
-                // synth in the operator log so triage can correlate this decision with the
-                // cause-side error line above.
+                // synth in the operator log so triage can correlate this decision with the cause-side
+                // error line above.
                 tracing::warn!(
                     ?key,
                     cursor = 0,
@@ -917,8 +918,8 @@ impl ActuatorState {
     ///
     /// On spawn failure, routes through [`Self::advance_or_terminate`] — predicate spawn-failure at
     /// the continuation's cursor jumps to its else-branch, exec/pipe spawn-failure propagates to
-    /// plan terminus. Either way the per-Sub gate (held since the original `start_plan`) is
-    /// released at terminate, and any subsequent advance reuses the inherited tmp path.
+    /// plan terminus. Either way the per-Sub gate (held since the original `start_plan`) is released
+    /// at terminate, and any subsequent advance reuses the inherited tmp path.
     fn spawn_continuation(
         &mut self,
         key: DedupKey,
@@ -975,15 +976,15 @@ impl ActuatorState {
     /// - `Ok(())` — instruction is in flight (slot.running installed, wait thread alive).
     /// - `Err(SpawnError::Deferred)` — permit semaphore was at capacity; caller defers via
     ///   [`Slot::plan_continue`].
-    /// - `Err(SpawnError::Failed(cause))` — OS-level spawn, resolver, or wait-thread startup
-    ///   failed; caller terminates the plan with synthesised `EffectOutcome::Failed` and logs
-    ///   `cause` at the synth site.
+    /// - `Err(SpawnError::Failed(cause))` — OS-level spawn, resolver, or wait-thread startup failed;
+    ///   caller terminates the plan with synthesised `EffectOutcome::Failed` and logs `cause` at
+    ///   the synth site.
     ///
-    /// The Deferred branch returns before consuming any of the borrowed inputs — caller-owned
-    /// values stay live for the `PlanContinuation` hand-off. `SpawnFailureCause` is lifted into the
-    /// wider [`SpawnError::Failed`] variant via `map_err` — the inner
-    /// [`Self::spawn_step_with_permit`] cannot defer (its permit is already acquired), so its
-    /// return type is the tighter `Result<(), SpawnFailureCause>`.
+    /// The Deferred branch returns before consuming any of the borrowed inputs — caller-owned values
+    /// stay live for the `PlanContinuation` hand-off. `SpawnFailureCause` is lifted into the wider
+    /// [`SpawnError::Failed`] variant via `map_err` — the inner [`Self::spawn_step_with_permit`]
+    /// cannot defer (its permit is already acquired), so its return type is the tighter `Result<(),
+    /// SpawnFailureCause>`.
     fn try_spawn_step(
         &mut self,
         key: &DedupKey,
@@ -1012,8 +1013,8 @@ impl ActuatorState {
     ///   [`Spawner::spawn_pipe`], one [`RunningJob`] (with combined signaler for shutdown fan-out),
     ///   one aggregating wait thread, and per-stage timer threads for stages with a `timeout`.
     ///
-    /// At the IR level there is no predicate distinction — predicate behavior is the op's
-    /// `on_failed` edge, read by the reap-path.
+    /// At the IR level there is no predicate distinction — predicate behavior is the op's `on_failed`
+    /// edge, read by the reap-path.
     ///
     /// `now: SystemTime` is sampled at the dispatcher and threaded into every resolver call so a
     /// single pipe sees one shared `${specter.time}` across all stages — the documented contract
@@ -1070,9 +1071,9 @@ impl ActuatorState {
     /// can't send `Reaped` before the controller knows about it.
     ///
     /// On wait-thread spawn failure: the freshly-spawned child is alive but has no waiter (the
-    /// closure that owned it has been dropped by `Builder::spawn`'s `Err` path). The recovery
-    /// branch SIGKILLs the orphan via the signaler held in `slot.running`, then synchronously reaps
-    /// it via [`crate::spawner::ChildSignaler::reap_blocking`] so the OS doesn't leak a zombie.
+    /// closure that owned it has been dropped by `Builder::spawn`'s `Err` path). The recovery branch
+    /// SIGKILLs the orphan via the signaler held in `slot.running`, then synchronously reaps it via
+    /// [`crate::spawner::ChildSignaler::reap_blocking`] so the OS doesn't leak a zombie.
     /// `slot.running` is then cleared (the terminate_plan caller expects it to be `None`) and
     /// `SpawnError::Failed` returns.
     ///
@@ -1127,10 +1128,10 @@ impl ActuatorState {
         // (consumed by shutdown / recovery), the optional per-step timer thread (drops on natural
         // completion via the `is_dead` short-circuit), and the wait thread (publishes the
         // dead-ratchet backstop after `catch_unwind`). Clone the two extras here, then move the
-        // original into `RunningJob` — keeps the controller's install-side reference live
-        // regardless of whether either sibling spawn succeeds. The timer clone is conditional (only
-        // paid when `exec.timeout().is_some()`) and pairs the cloned Arc with its deadline so the
-        // two can't drift apart.
+        // original into `RunningJob` — keeps the controller's install-side reference live regardless
+        // of whether either sibling spawn succeeds. The timer clone is conditional (only paid when
+        // `exec.timeout().is_some()`) and pairs the cloned Arc with its deadline so the two can't
+        // drift apart.
         let timer_arm: Option<(Duration, Arc<dyn ChildSignaler>)> = exec
             .timeout()
             .map(|deadline| (deadline, Arc::clone(&signaler)));
@@ -1180,18 +1181,18 @@ impl ActuatorState {
 
     /// Multi-stage spawn path for [`SpawnBody::Pipe`].
     ///
-    /// `stages` is ≥2 by construction: `MultiStage::new` is the sole producer of
-    /// [`SpawnBody::Pipe`] and rejects fewer, and the lone caller passes `MultiStage::stages()`.
-    /// The stdout→stdin wiring and pipefail aggregation below assume that arity — it is sealed at
-    /// the type's constructor, not re-checked on this path.
+    /// `stages` is ≥2 by construction: `MultiStage::new` is the sole producer of [`SpawnBody::Pipe`]
+    /// and rejects fewer, and the lone caller passes `MultiStage::stages()`. The stdout→stdin wiring
+    /// and pipefail aggregation below assume that arity — it is sealed at the type's constructor,
+    /// not re-checked on this path.
     ///
     /// The shape mirrors [`Self::spawn_exec_with_permit`] at every step, scaled to N stages:
     ///
     /// 1. Resolve every stage's argv + env against the shared `now` (so `${specter.time}` agrees
     ///    across stages — see [`Self::spawn_step_with_permit`] for the contract).
     /// 2. Call [`Spawner::spawn_pipe`] which mints N processes, an aggregating
-    ///    [`crate::spawner::ChildWaiter`], a combined [`crate::spawner::ChildSignaler`] for
-    ///    shutdown fan-out, and per-stage signalers for per-stage timer threads.
+    ///    [`crate::spawner::ChildWaiter`], a combined [`crate::spawner::ChildSignaler`] for shutdown
+    ///    fan-out, and per-stage signalers for per-stage timer threads.
     /// 3. Install [`RunningJob`] BEFORE spawning the wait thread (slot.running invariant: the wait
     ///    thread must not be able to send `Reaped` before the controller has the job in hand). The
     ///    job carries the combined signaler only — the per-stage signalers are locals to this
@@ -1199,10 +1200,10 @@ impl ActuatorState {
     /// 4. Spawn one wait thread that drains the aggregating waiter and surfaces a single `Reaped`
     ///    event to the controller — the engine's accounting is "one EffectComplete per Effect" and
     ///    that holds regardless of pipe vs single-process.
-    /// 5. For each stage with a `timeout`, spawn one detached timer thread that observes the
-    ///    stage's `dead` flag and signals the stage individually. The aggregating waiter sees the
-    ///    resulting per-stage Failed and cascades SIGTERM to alive siblings; the engine receives
-    ///    one aggregated Failed outcome.
+    /// 5. For each stage with a `timeout`, spawn one detached timer thread that observes the stage's
+    ///    `dead` flag and signals the stage individually. The aggregating waiter sees the resulting
+    ///    per-stage Failed and cascades SIGTERM to alive siblings; the engine receives one aggregated
+    ///    Failed outcome.
     ///
     /// Resolver failure on **any** stage aborts the entire pipe (no processes have spawned yet at
     /// that point). Pipe-spawn failure (returned by [`Spawner::spawn_pipe`]) means the spawner has
@@ -1224,10 +1225,10 @@ impl ActuatorState {
     ) -> Result<(), SpawnFailureCause> {
         let diff_path: Option<&Path> = diff_tmp.map(|h| h.path());
         // Resolve every stage's argv + env. The result tuples own the argv `Vec<String>` and the
-        // env `Vec<EnvVar<'_>>`; the env's `Cow::Borrowed` slots borrow from `effect`, the
-        // resolver's owned per-stage `parent_str` / `time_str` (moved into the env Cow::Owned
-        // slots), and `diff_path` (if present). All borrowed sources outlive this function's body,
-        // so the resolved Vec is stable across the `spawn_pipe` call.
+        // env `Vec<EnvVar<'_>>`; the env's `Cow::Borrowed` slots borrow from `effect`, the resolver's
+        // owned per-stage `parent_str` / `time_str` (moved into the env Cow::Owned slots), and
+        // `diff_path` (if present). All borrowed sources outlive this function's body, so the
+        // resolved Vec is stable across the `spawn_pipe` call.
         let resolved: Vec<(CommandResolved, Vec<EnvVar<'_>>)> = match stages
             .iter()
             .map(|stage| resolve::resolve_step(effect, stage, now, diff_path, &self.env_snapshot))
@@ -1272,10 +1273,10 @@ impl ActuatorState {
         } = handles;
 
         // Clone the combined signaler for the wait-thread's dead-ratchet backstop before moving the
-        // original into `RunningJob`. `CombinedSignaler::mark_dead` fans out to every per-stage
-        // flag, so this single Arc covers the whole pipe at the outer `wait_loop` layer (per-stage
-        // closures inside `PipeWaiter::wait` additionally backstop their own `catch_unwind` sites
-        // with the per-stage signalers).
+        // original into `RunningJob`. `CombinedSignaler::mark_dead` fans out to every per-stage flag,
+        // so this single Arc covers the whole pipe at the outer `wait_loop` layer (per-stage closures
+        // inside `PipeWaiter::wait` additionally backstop their own `catch_unwind` sites with the
+        // per-stage signalers).
         let signaler_for_wait = Arc::clone(&combined_signaler);
         let slot = self
             .slots
@@ -1300,10 +1301,10 @@ impl ActuatorState {
             reap_tx,
         )?;
 
-        // Per-stage timers: arm AFTER the wait thread is alive so the wait thread's per-stage
-        // `dead` flags are the natural-completion signal each timer short-circuits on. The wait-
-        // thread `?` above also ensures we don't arm timers for a pipe with no waiter (would leave
-        // undrained orphans).
+        // Per-stage timers: arm AFTER the wait thread is alive so the wait thread's per-stage `dead`
+        // flags are the natural-completion signal each timer short-circuits on. The wait-thread `?`
+        // above also ensures we don't arm timers for a pipe with no waiter (would leave undrained
+        // orphans).
         //
         // Best-effort + log-and-proceed policy lives inside [`timer::arm_timer`]. The per-stage
         // `Arc::clone(sig)` is paid only on stages that carry a timeout — most pipes don't.
@@ -1338,27 +1339,27 @@ impl ActuatorState {
         Ok(())
     }
 
-    /// Spawn the wait thread for an already-installed [`Slot::running`]. On
-    /// `thread::Builder::spawn` failure, take the running job back via the slot, recover the orphan
-    /// child (SIGKILL + `reap_blocking`), and return [`SpawnFailureCause::WaitThread`] so the
-    /// caller routes through `advance_or_terminate` with a synthesised `EffectOutcome::Failed`.
+    /// Spawn the wait thread for an already-installed [`Slot::running`]. On `thread::Builder::spawn`
+    /// failure, take the running job back via the slot, recover the orphan child (SIGKILL +
+    /// `reap_blocking`), and return [`SpawnFailureCause::WaitThread`] so the caller routes through
+    /// `advance_or_terminate` with a synthesised `EffectOutcome::Failed`.
     ///
-    /// `pid` is used only for the wait-thread's OS name (`act-wait-{pid}`); for single-process
-    /// steps it's the spawned child's pid; for pipes it's the last stage's pid (the operator-facing
-    /// "the pid of this pipe"). The `key` is needed to look up the slot in the recovery branch.
+    /// `pid` is used only for the wait-thread's OS name (`act-wait-{pid}`); for single-process steps
+    /// it's the spawned child's pid; for pipes it's the last stage's pid (the operator-facing "the
+    /// pid of this pipe"). The `key` is needed to look up the slot in the recovery branch.
     ///
     /// `signaler` is a clone of the same [`Arc`] the controller installed on
-    /// [`RunningJob::signaler`]. The wait thread owns it solely to publish the dead-ratchet
-    /// backstop after the `catch_unwind` of [`ChildWaiter::wait`] — see [`wait_loop`] for the
-    /// protocol contract. Cloning at the call site (rather than at the
-    /// [`SpawnHandles`](crate::SpawnHandles) origin) keeps the controller's install-side reference
-    /// live regardless of whether the spawn-the-wait-thread step succeeds; on `Builder::spawn`
-    /// failure the closure-owned clone drops, the recovery branch drives the install-side clone
-    /// through SIGKILL + `reap_blocking`, and nothing leaks.
+    /// [`RunningJob::signaler`]. The wait thread owns it solely to publish the dead-ratchet backstop
+    /// after the `catch_unwind` of [`ChildWaiter::wait`] — see [`wait_loop`] for the protocol
+    /// contract. Cloning at the call site (rather than at the [`SpawnHandles`](crate::SpawnHandles)
+    /// origin) keeps the controller's install-side reference live regardless of whether the
+    /// spawn-the-wait-thread step succeeds; on `Builder::spawn` failure the closure-owned clone
+    /// drops, the recovery branch drives the install-side clone through SIGKILL + `reap_blocking`,
+    /// and nothing leaks.
     ///
     /// The function is `&mut self` because the recovery branch mutates `self.slots[key].running`.
-    /// The slot lookup is an `expect` for the same reason as `spawn_exec_with_permit`: the
-    /// controller is single-threaded and the caller has just installed `slot.running`.
+    /// The slot lookup is an `expect` for the same reason as `spawn_exec_with_permit`: the controller
+    /// is single-threaded and the caller has just installed `slot.running`.
     #[allow(clippy::needless_pass_by_value)]
     fn spawn_wait_thread_after_install(
         &mut self,
@@ -1374,8 +1375,8 @@ impl ActuatorState {
         let reap_tx_for_thread = reap_tx.clone();
         let wait_key = *key;
         if let Err(e) = std::thread::Builder::new()
-            // Linux pthread_setname_np truncates to 15 chars + null; `act-wait-` is 9 chars,
-            // leaving room for a 6-digit pid unscathed. macOS allows 64 bytes.
+            // Linux pthread_setname_np truncates to 15 chars + null; `act-wait-` is 9 chars, leaving
+            // room for a 6-digit pid unscathed. macOS allows 64 bytes.
             .name(format!("act-wait-{pid}"))
             .spawn(move || {
                 wait_loop(waiter, signaler, wait_key, sub, permit, reap_tx_for_thread);
@@ -1422,8 +1423,8 @@ impl ActuatorState {
 /// take-then-restore dance for no behavioural gain.
 ///
 /// Same recovery shape for Exec and Pipe: the [`RunningJob::signaler`] is either the single-child
-/// signaler or the combined fan-out signaler, and both implement SIGKILL + `reap_blocking`
-/// correctly for their underlying children.
+/// signaler or the combined fan-out signaler, and both implement SIGKILL + `reap_blocking` correctly
+/// for their underlying children.
 #[allow(clippy::needless_pass_by_value)]
 fn recover_orphan_after_wait_thread_failure(job: RunningJob) {
     let pid = job.pid;
@@ -1435,14 +1436,14 @@ fn recover_orphan_after_wait_thread_failure(job: RunningJob) {
     }
 }
 
-/// Wait-thread body. Block on `waiter.wait()`; on return, publish the dead-ratchet backstop,
-/// release the permit, and send a `Reaped` to the controller.
+/// Wait-thread body. Block on `waiter.wait()`; on return, publish the dead-ratchet backstop, release
+/// the permit, and send a `Reaped` to the controller.
 ///
 /// Three orderings are load-bearing:
 ///
-/// 1. The waiter sets `dead = true` (production impl) before returning, so a controller signal
-///    racing this thread observes `dead = true` and short-circuits — preventing a stale signal
-///    against a reaped (and possibly pid-reused) child. This is the canonical *early* publish.
+/// 1. The waiter sets `dead = true` (production impl) before returning, so a controller signal racing
+///    this thread observes `dead = true` and short-circuits — preventing a stale signal against a
+///    reaped (and possibly pid-reused) child. This is the canonical *early* publish.
 ///
 /// 2. [`ChildSignaler::mark_dead`] runs after the `catch_unwind` *unconditionally*, regardless of
 ///    the wait outcome. This is the additive wrapper-layer backstop: a panicking `wait` impl never
@@ -1454,16 +1455,16 @@ fn recover_orphan_after_wait_thread_failure(job: RunningJob) {
 ///    [`crate::pipe::PipeWaiter::wait`] aggregated correctly; the per-stage closures inside
 ///    `PipeWaiter` additionally backstop their own catch_unwind sites.
 ///
-/// 3. Permit release precedes reap notification. Spawns for *other* Subs can dispatch immediately on
-///    the freed permit even if the reap channel is briefly saturated. Spawns for the *same* Sub still
-///    wait for the controller to drop `sub` from `running_subs` when it processes the `Reaped` — by
-///    design (per-Sub serialization). The brief stale-membership window between `drop(permit)` and
-///    `handle_reap` is benign: same-Sub items defer one extra pump cycle, no over-spawning.
+/// 3. Permit release precedes reap notification. Spawns for *other* Subs can dispatch immediately
+///    on the freed permit even if the reap channel is briefly saturated. Spawns for the *same* Sub
+///    still wait for the controller to drop `sub` from `running_subs` when it processes the `Reaped`
+///    — by design (per-Sub serialization). The brief stale-membership window between `drop(permit)`
+///    and `handle_reap` is benign: same-Sub items defer one extra pump cycle, no over-spawning.
 ///
 /// **Tmp-file cleanup is NOT this thread's responsibility.** The diff tmp file lives for the whole
 /// plan (multiple steps may read it) — the wait thread carries no `Arc<DiffTmpFile>` co-owner. The
-/// controller's `Slot::running` / `Slot::plan_continue` are the canonical co-owners; on plan
-/// terminus the last Arc drops at [`ActuatorState::advance_or_terminate`] /
+/// controller's `Slot::running` / `Slot::plan_continue` are the canonical co-owners; on plan terminus
+/// the last Arc drops at [`ActuatorState::advance_or_terminate`] /
 /// [`ActuatorState::handle_reap_drop`] function exit and [`crate::tmp::DiffTmpFile::drop`] unlinks.
 /// A wait-thread panic-unwind caught here cannot trigger an early unlink because no Arc lives on
 /// this side of the channel.
@@ -1494,9 +1495,9 @@ fn wait_loop(
     drop(permit);
     if let Err(e) = reap_tx.send(EffectCompletion { sub, key, outcome }) {
         // The controller has shut down ahead of us (post-shutdown orphan: shutdown's drain closed
-        // `reap_rx`; the wait thread is the only `Reaped` writer). The reap is no longer
-        // interesting — emit at `debug!` so a future refactor that splits the controller /
-        // reap-channel lifetime is observable in operator logs instead of silently swallowed.
+        // `reap_rx`; the wait thread is the only `Reaped` writer). The reap is no longer interesting
+        // — emit at `debug!` so a future refactor that splits the controller / reap-channel lifetime
+        // is observable in operator logs instead of silently swallowed.
         tracing::debug!(?key, ?e, "reap_tx send after controller exit");
     }
 }
@@ -1591,8 +1592,8 @@ mod tests {
         }
     }
 
-    /// Program with `n` literal `/bin/true` Exec ops chained on `on_ok = Continue` (final op `on_ok
-    /// = Escape`); every `on_failed = Terminate`. Used by tests that exercise multi-op advance /
+    /// Program with `n` literal `/bin/true` Exec ops chained on `on_ok = Continue` (final op `on_ok =
+    /// Escape`); every `on_failed = Terminate`. Used by tests that exercise multi-op advance /
     /// terminate.
     fn n_step_program(n: usize) -> Arc<ActionProgram> {
         assert!(n >= 1, "n_step_program requires at least one step");
@@ -1673,8 +1674,8 @@ mod tests {
     }
 
     /// Spawner stub that records every spawn and returns handles whose waiter is driven via
-    /// `complete(pid, outcome)`. Used by the multi-step advance tests where `try_spawn_step`
-    /// actually runs.
+    /// `complete(pid, outcome)`. Used by the multi-step advance tests where `try_spawn_step` actually
+    /// runs.
     struct ScriptedSpawner {
         next_pid: std::sync::atomic::AtomicU32,
         spawns: std::sync::Mutex<Vec<u32>>,
@@ -1813,10 +1814,10 @@ mod tests {
             Ok(())
         }
         fn is_dead(&self) -> bool {
-            // The counted fixture has no `dead` flag: tests using it never exercise paths that
-            // probe completion. Returning `false` keeps the per-step timer's `is_dead` short-
-            // circuit inert under these tests — the timer's signal path is what's being asserted,
-            // not the short-circuit.
+            // The counted fixture has no `dead` flag: tests using it never exercise paths that probe
+            // completion. Returning `false` keeps the per-step timer's `is_dead` short-circuit inert
+            // under these tests — the timer's signal path is what's being asserted, not the
+            // short-circuit.
             false
         }
         fn mark_dead(&self) {
@@ -1856,10 +1857,10 @@ mod tests {
     /// the controller harness, so we exercise the recovery helper in isolation against a stub
     /// [`RunningJob`].
     ///
-    /// The bug the helper closes: pre-fix, the recovery branch only called `signal_kill`. The
-    /// waiter (the sole reap path) was dropped along with the failed thread closure, so the
-    /// SIGKILL'd orphan was never `waitpid`-ed — leaking a zombie until process exit. The helper
-    /// now drives both `signal_kill` and `reap_blocking` through the controller-held signaler.
+    /// The bug the helper closes: pre-fix, the recovery branch only called `signal_kill`. The waiter
+    /// (the sole reap path) was dropped along with the failed thread closure, so the SIGKILL'd orphan
+    /// was never `waitpid`-ed — leaking a zombie until process exit. The helper now drives both
+    /// `signal_kill` and `reap_blocking` through the controller-held signaler.
     #[test]
     fn recover_orphan_after_wait_thread_failure_kills_and_reaps() {
         let key = perfile_key(50, 50, 50);
@@ -1924,9 +1925,9 @@ mod tests {
         );
     }
 
-    /// Stale-Reaped shape: slot exists with no running job and no paired per-Sub gate hold. The
-    /// stale arm routes through `terminate_stale` — emits EffectComplete with the reaped outcome,
-    /// removes the slot, and does not touch `running_subs` (no bump to undo).
+    /// Stale-Reaped shape: slot exists with no running job and no paired per-Sub gate hold. The stale
+    /// arm routes through `terminate_stale` — emits EffectComplete with the reaped outcome, removes
+    /// the slot, and does not touch `running_subs` (no bump to undo).
     #[test]
     fn reap_pump_stale_for_unspawned_slot_clears_state() {
         let mut state = test_state(nz(2));
@@ -1969,8 +1970,8 @@ mod tests {
     }
 
     /// Stale-completion against an empty slot for `Sub A`, while a live plan for the *same* `Sub A`
-    /// holds `running_subs` at a different (here unrelated) `DedupKey`. The stale arm must NOT
-    /// touch `running_subs` — clobbering the live plan's hold here would release the per-Sub gate
+    /// holds `running_subs` at a different (here unrelated) `DedupKey`. The stale arm must NOT touch
+    /// `running_subs` — clobbering the live plan's hold here would release the per-Sub gate
     /// prematurely, letting a fresh same-Sub plan dispatch alongside the live one (violates the
     /// per-Sub serialization invariant).
     ///
@@ -2153,9 +2154,9 @@ mod tests {
     // ---------- multi-step advance / terminate ----------
 
     /// Step Ok and not last: `reap_pump` takes the running, calls try_spawn_step which acquires a
-    /// fresh permit and spawns instruction N+1. Slot.running is reinstalled with cursor
-    /// incremented; per-Sub gate stays held (one insert per program, not per instruction); no
-    /// EffectComplete is emitted.
+    /// fresh permit and spawns instruction N+1. Slot.running is reinstalled with cursor incremented;
+    /// per-Sub gate stays held (one insert per program, not per instruction); no EffectComplete is
+    /// emitted.
     #[test]
     fn step_ok_not_last_advances_to_next_step() {
         let mut state = test_state(nz(2));
@@ -2208,8 +2209,8 @@ mod tests {
         spawner.complete(running.pid, EffectOutcome::Ok);
     }
 
-    /// Step Failed mid-plan: terminal arm runs with the reaped Failed outcome — no advance
-    /// attempted. Counter decrements; EffectComplete emitted; slot removed.
+    /// Step Failed mid-plan: terminal arm runs with the reaped Failed outcome — no advance attempted.
+    /// Counter decrements; EffectComplete emitted; slot removed.
     #[test]
     fn step_failed_mid_plan_terminates_without_advance() {
         let mut state = test_state(nz(2));
@@ -2306,8 +2307,8 @@ mod tests {
     }
 
     /// Permit unavailable mid-program: try_spawn_step returns Deferred, the slot's plan_continue is
-    /// set to (effect, cursor+1, diff), the slot is queued for the next pump cycle, no
-    /// EffectComplete is emitted, the per-Sub gate stays held.
+    /// set to (effect, cursor+1, diff), the slot is queued for the next pump cycle, no EffectComplete
+    /// is emitted, the per-Sub gate stays held.
     #[test]
     fn step_ok_not_last_with_no_permit_defers_via_plan_continue() {
         // cap=1 with another job already holding the only permit.
@@ -2521,9 +2522,9 @@ mod tests {
     fn handle_cancel_sigterms_matching_profile_cleans_queue_preserves_running_subs() {
         let mut state = test_state(nz(4));
 
-        // Profile P: two distinct DedupKeys at the same profile — K1: running (will receive
-        // SIGTERM) K2: pending only, in ready_queue (will be queue-cleaned) Profile Q: one running
-        // key (untouched — different profile)
+        // Profile P: two distinct DedupKeys at the same profile — K1: running (will receive SIGTERM)
+        // K2: pending only, in ready_queue (will be queue-cleaned) Profile Q: one running key
+        // (untouched — different profile)
         let p_sub = unique_sub_id(100);
         let p_profile = unique_profile_id(100);
         let p_k1 = DedupKey::PerFile {
@@ -2569,8 +2570,8 @@ mod tests {
         );
         state.ready_queue.push_back(p_k2);
 
-        // Q's running slot — different profile, must not receive a signal. Distinct counting
-        // signaler so cross-profile bleed would show up as a non-zero `term` count.
+        // Q's running slot — different profile, must not receive a signal. Distinct counting signaler
+        // so cross-profile bleed would show up as a non-zero `term` count.
         let q_signaler = Arc::new(CountingSignaler::default());
         let q_effect = Arc::new(dummy_effect(q_key, unique_resource_id(3), 3));
         state.slots.insert(

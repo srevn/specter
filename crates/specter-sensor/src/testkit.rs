@@ -3,14 +3,14 @@
 //! Records every mutator call into a `Vec<WatcherCall>`; tests inject events for `drain_ready` to
 //! deliver synchronously. The mock owns a `UnixStream::pair()` readiness substrate: every `inject`
 //! / `inject_overflow` writes one byte to the write side, making the read side (the `AsFd` surface)
-//! readable; `drain_ready` reads the substrate to empty before draining the queued events. This
-//! pins the edge-triggered readiness contract `FsWatcher` requires — a reactor (mio::Poll,
-//! libc::poll, etc.) registering [`AsFd::as_fd`] observes the same drain-or-stall semantics as a
-//! real kqueue / inotify fd.
+//! readable; `drain_ready` reads the substrate to empty before draining the queued events. This pins
+//! the edge-triggered readiness contract `FsWatcher` requires — a reactor (mio::Poll, libc::poll,
+//! etc.) registering [`AsFd::as_fd`] observes the same drain-or-stall semantics as a real kqueue /
+//! inotify fd.
 //!
-//! No FFI, no kqueue, no platform gates — compiles on every Unix target (Linux CI, macOS dev,
-//! FreeBSD prod). Production builds opt out via the `testkit` Cargo feature; consumers attach it
-//! under `[dev-dependencies]`.
+//! No FFI, no kqueue, no platform gates — compiles on every Unix target (Linux CI, macOS dev, FreeBSD
+//! prod). Production builds opt out via the `testkit` Cargo feature; consumers attach it under
+//! `[dev-dependencies]`.
 
 use crate::{FsWatcher, OverflowScope, Prober, WatchFailure, WatcherEvent};
 use slotmap::SecondaryMap;
@@ -117,8 +117,8 @@ impl MockFsWatcher {
     /// overflow marker; `Overflow` once the kernel signals the queue ran dry). Bumps the readiness
     /// substrate so a reactor on [`AsFd::as_fd`] sees the fd transition to readable.
     ///
-    /// Useful for engine / bin tests that need to assert the `Overflow` routing path without
-    /// spinning up a real inotify instance and stressing it past `max_queued_events`.
+    /// Useful for engine / bin tests that need to assert the `Overflow` routing path without spinning
+    /// up a real inotify instance and stressing it past `max_queued_events`.
     pub fn inject_overflow(&mut self, scope: OverflowScope) {
         self.queued_overflow.push(scope);
         self.bump_fd();
@@ -137,8 +137,8 @@ impl MockFsWatcher {
     /// - Returns `None` if the most recent op is `Unwatch` or if `r` has no lifecycle ops in the
     ///   call log.
     ///
-    /// The engine emits a fresh `WatchOp::Watch` whenever `Resource.events_union` widens or
-    /// narrows, so the latest `Watch` reflects the engine's current per-Resource union.
+    /// The engine emits a fresh `WatchOp::Watch` whenever `Resource.events_union` widens or narrows,
+    /// so the latest `Watch` reflects the engine's current per-Resource union.
     #[must_use]
     pub fn registered_events(&self, r: ResourceId) -> Option<ClassSet> {
         for c in self.calls.iter().rev() {
@@ -158,8 +158,8 @@ impl MockFsWatcher {
     /// Write one byte to `write_fd` to drive a readability edge on `read_fd`. Best-effort: a
     /// saturated socket buffer would surface as `WouldBlock`, but at test scale (single-digit bytes
     /// between drains, socket buffer ≥ 4 KiB) the path is unreachable. Failure is silently ignored
-    /// — the test would then never see a readiness edge and watchdog out, which is the right
-    /// failure mode.
+    /// — the test would then never see a readiness edge and watchdog out, which is the right failure
+    /// mode.
     fn bump_fd(&self) {
         let _ = (&self.write_fd).write(&[0x01]);
     }
@@ -424,10 +424,10 @@ mod tests {
 
     #[test]
     fn drain_ready_drains_queued_overflow_after_fs_events() {
-        // Ordering invariant: any per-resource events queued before the drain surface as `Fs`
-        // records first, then the queued overflow scopes as `Overflow` records. This mirrors the
-        // inotify backend's natural drain order — events for records preceding the overflow marker
-        // come first, then `IN_Q_OVERFLOW`.
+        // Ordering invariant: any per-resource events queued before the drain surface as `Fs` records
+        // first, then the queued overflow scopes as `Overflow` records. This mirrors the inotify
+        // backend's natural drain order — events for records preceding the overflow marker come
+        // first, then `IN_Q_OVERFLOW`.
         let ids = fresh_resource_ids(1);
         let mut w = MockFsWatcher::new();
 
@@ -479,8 +479,8 @@ mod tests {
     /// `as_fd()` is the edge-triggered readiness contract the bin's mio reactor relies on: the fd
     /// is not readable on a fresh mock, becomes readable after `inject` / `inject_overflow`, and is
     /// drained back to "not readable" by `drain_ready`. Pins the substrate so the bin's
-    /// mio-registered drain loop sees the same readiness transitions a real kqueue / inotify fd
-    /// would produce.
+    /// mio-registered drain loop sees the same readiness transitions a real kqueue / inotify fd would
+    /// produce.
     ///
     /// Event-count assertions live in the `drain_ready_*` tests; this test asserts only on the fd's
     /// readability state.
@@ -503,8 +503,8 @@ mod tests {
             .expect("read side must be readable after inject");
         assert!(n >= 1, "inject must push at least one byte");
 
-        // After drain_ready: substrate is drained even when the inject re-armed the readability
-        // after the previous read.
+        // After drain_ready: substrate is drained even when the inject re-armed the readability after
+        // the previous read.
         w.inject(ids[0], FsEvent::ContentChanged);
         let mut out = Vec::new();
         w.drain_ready(&mut out).unwrap();

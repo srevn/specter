@@ -6,8 +6,8 @@
 //!
 //! POSIX guarantees: `(inode, device)` uniquely identifies an inode *within one filesystem at one
 //! point in time*. It is **not** a stable cross-time identifier — after `unlink`, the kernel may
-//! reuse the inode number on a subsequent `creat` under the same `device`. Snapshot atoms carry
-//! this pair to detect:
+//! reuse the inode number on a subsequent `creat` under the same `device`. Snapshot atoms carry this
+//! pair to detect:
 //!
 //! - **Delete-and-recreate-at-same-path:** prior and fresh have the same segment but different
 //!   `fs_id`, so `diff_same_name` emits Deleted + Created (not Modified).
@@ -18,13 +18,13 @@
 //!
 //! ## Atomicity invariant
 //!
-//! `inode` and `device` are meaningful only as a pair read from a *single* `stat`: across two
-//! `stat`s the kernel may recycle an inode number under the same device, so a torn `(inode,
-//! device)` assembled from independent observations names nothing. The fields are private and the
-//! sole production constructor, [`FsIdentity::from_metadata`], reads *both* halves from one
-//! `&Metadata`. No API assembles an identity from two independent observations, so every consumer
-//! of an `FsIdentity` knows the two halves agree *by construction* — the invariant is discharged by
-//! the type, not by caller convention.
+//! `inode` and `device` are meaningful only as a pair read from a *single* `stat`: across two `stat`s
+//! the kernel may recycle an inode number under the same device, so a torn `(inode, device)`
+//! assembled from independent observations names nothing. The fields are private and the sole
+//! production constructor, [`FsIdentity::from_metadata`], reads *both* halves from one `&Metadata`.
+//! No API assembles an identity from two independent observations, so every consumer of an
+//! `FsIdentity` knows the two halves agree *by construction* — the invariant is discharged by the
+//! type, not by caller convention.
 //!
 //! The test-only `FsIdentity::synthetic` constructor is the single, explicitly named exception:
 //! fixtures need identities the kernel would never co-locate (commonly `device: 0`). It is compiled
@@ -46,14 +46,14 @@ use std::hash::Hasher;
 ///
 /// ## Digest encoding
 ///
-/// Snapshot digests fold `FsIdentity` **exclusively** through `encode_into` — `inode` then
-/// `device`, each as a little-endian `u64`, in declaration order, with no discriminator or length
-/// prefix. That order is byte-identical to the historical `inode` then `device` `u64` fold; the
+/// Snapshot digests fold `FsIdentity` **exclusively** through `encode_into` — `inode` then `device`,
+/// each as a little-endian `u64`, in declaration order, with no discriminator or length prefix. That
+/// order is byte-identical to the historical `inode` then `device` `u64` fold; the
 /// `encode_into_matches_inode_then_device` regression pins the equivalence and the snapshot goldens
 /// (`compute_leaf_hash` / `compute_dir_hash`) pin it end-to-end, so a future field reorder fires at
-/// `cargo nextest` time. `FsIdentity` deliberately has **no** `Hash` impl: the only route to a
-/// digest is `encode_into`, mirroring the [`StableHasher`] "own the bytes" discipline — a
-/// blanket-`Hash` digest path is unconstructable.
+/// `cargo nextest` time. `FsIdentity` deliberately has **no** `Hash` impl: the only route to a digest
+/// is `encode_into`, mirroring the [`StableHasher`] "own the bytes" discipline — a blanket-`Hash`
+/// digest path is unconstructable.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct FsIdentity {
     inode: u64,
@@ -63,10 +63,10 @@ pub struct FsIdentity {
 impl FsIdentity {
     /// Construct from a single freshly-`stat`ed `Metadata`.
     ///
-    /// Both halves are read here, inside the constructor, from the *same* `&Metadata` — this is
-    /// what discharges the atomicity invariant at the type boundary. A value constructor taking
-    /// `(inode, device)` would be no stronger than public fields: the caller could still pass
-    /// halves sourced from two independent `stat`s.
+    /// Both halves are read here, inside the constructor, from the *same* `&Metadata` — this is what
+    /// discharges the atomicity invariant at the type boundary. A value constructor taking `(inode,
+    /// device)` would be no stronger than public fields: the caller could still pass halves sourced
+    /// from two independent `stat`s.
     ///
     /// `MetadataExt::ino`/`dev` read fields already populated by the `stat` the sensor performed;
     /// they are *not* syscalls, so this is consistent with `core`'s no-I/O discipline (I1).
@@ -106,9 +106,10 @@ impl FsIdentity {
 
 /// Fold a [`FsIdentity`] into a stable digest: `inode` then `device`, each as a little-endian `u64`.
 ///
-/// The single named route for committing `FsIdentity` to a digest — the seam analogue beside the type
-/// (the kernel identity is the domain knowledge the primitive-only [`StableHasher`] deliberately does
-/// not carry). Byte-identical to the historical `inode` then `device` `u64` fold on every target.
+/// The single named route for committing `FsIdentity` to a digest — the seam analogue beside the
+/// type (the kernel identity is the domain knowledge the primitive-only [`StableHasher`] deliberately
+/// does not carry). Byte-identical to the historical `inode` then `device` `u64` fold on every
+/// target.
 pub fn encode_into<H: Hasher>(id: FsIdentity, h: &mut StableHasher<H>) {
     h.put_u64(id.inode);
     h.put_u64(id.device);

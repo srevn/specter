@@ -3,28 +3,29 @@
 //!
 //! A discovery Profile's Subs are templates, each carrying a [`specter_core::MintSpec`]. It fires
 //! attachments and detachments, never Effects, so nothing here writes burst state or meets the
-//! Draining gate: the burst leaves through the ordinary silent seal. A template's lifecycle is
-//! here: what it mints comes and goes through [`Engine::reconcile_matches`] as the tree moves and
+//! Draining gate: the burst leaves through the ordinary silent seal. A template's lifecycle is here:
+//! what it mints comes and goes through [`Engine::reconcile_matches`] as the tree moves and
 //! [`Engine::reap_orphans`] when it leaves, and [`Engine::prefix_appeared`] closes its enumeration
 //! when its prefix was seen absent.
 //!
-//! A pass reads the post-graft `current` once, beside the Tree and the baseline, into a
-//! [`MatchSet`] — the matches `T`, each at its slot — and holds it against each template's minted
-//! set `M` ([`specter_core::SubRegistry::minted`]): it mints `T ∖ M`, reaps `M ∖ T` where a listing
-//! answers for it, and closes. It reads the whole set, not the graft's diff, which names only what
-//! the tree did — a template that joins over an unchanged tree owes mints no diff carries — so a
-//! cold Seed's first enumeration, a Standard burst, a recovery and a forced ceiling are one
-//! idempotent reconciliation.
+//! A pass reads the post-graft `current` once, beside the Tree and the baseline, into a [`MatchSet`]
+//! — the matches `T`, each at its slot — and holds it against each template's minted set `M`
+//! ([`specter_core::SubRegistry::minted`]): it mints `T ∖ M`, reaps `M ∖ T` where a listing answers
+//! for it, and closes. It reads the whole set, not the graft's diff, which names only what the tree
+//! did — a template that joins over an unchanged tree owes mints no diff carries — so a cold Seed's
+//! first enumeration, a Standard burst, a recovery and a forced ceiling are one idempotent
+//! reconciliation.
 //!
 //! A miss enters as its template's miss ([`specter_core::MintState::miss`]) in a [`Branch`] that
 //! stood, and as an enumeration in one that opened. The rule reads the template and the baseline,
-//! never the burst's intent, so a reseed after an overflow or a recovery still fires for a match that
-//! appeared in the blind window: `M` outlives anchor loss, overflow and baseline clears. The baseline
-//! does not outlive an anchor loss, so a branch that opened across one enters by the template's miss.
+//! never the burst's intent, so a reseed after an overflow or a recovery still fires for a match
+//! that appeared in the blind window: `M` outlives anchor loss, overflow and baseline clears. The
+//! baseline does not outlive an anchor loss, so a branch that opened across one enters by the
+//! template's miss.
 //!
-//! Membership is slot identity: `(parent, segment)` survives delete-and-recreate, so a match
-//! replaced in place stays in `M ∩ T` and keeps its Sub — id, fire history, dedup identity — while
-//! its own anchor loss drives the recovery fire.
+//! Membership is slot identity: `(parent, segment)` survives delete-and-recreate, so a match replaced
+//! in place stays in `M ∩ T` and keeps its Sub — id, fire history, dedup identity — while its own
+//! anchor loss drives the recovery fire.
 
 use crate::Engine;
 use compact_str::CompactString;
@@ -87,9 +88,9 @@ struct MatchSet {
 impl MatchSet {
     /// Walk `now`, the Tree under its slot `anchor` and `before` — what the baseline holds for
     /// `now`'s root — in lockstep, down to the terminus `terminus_depth` levels below the anchor
-    /// (at least one, by the pattern's parser). Each chain directory resolves to its slot once:
-    /// found where the graft made it, made where a reap took it since. The walk writes no kind; a
-    /// mint kinds its own terminus.
+    /// (at least one, by the pattern's parser). Each chain directory resolves to its slot once: found
+    /// where the graft made it, made where a reap took it since. The walk writes no kind; a mint
+    /// kinds its own terminus.
     fn resolve(
         tree: &mut Tree,
         anchor: ResourceId,
@@ -158,11 +159,11 @@ impl MatchSet {
         }
     }
 
-    /// True iff a listing answers for `slot` and does not hold it: its directory lists no such
-    /// name, or one no watch can anchor, or a directory above it is itself absent. Beneath a
-    /// directory the snapshot holds denied nothing is certified, present or absent; a slot there
-    /// has that directory's slot for an ancestor, since identity is `(parent, segment)`, and where
-    /// the Tree holds none for it, no minted Sub lies beneath it.
+    /// True iff a listing answers for `slot` and does not hold it: its directory lists no such name,
+    /// or one no watch can anchor, or a directory above it is itself absent. Beneath a directory
+    /// the snapshot holds denied nothing is certified, present or absent; a slot there has that
+    /// directory's slot for an ancestor, since identity is `(parent, segment)`, and where the Tree
+    /// holds none for it, no minted Sub lies beneath it.
     fn certifies_absent(&self, tree: &Tree, slot: ResourceId) -> bool {
         !self.slots.contains(&slot)
             && !tree
@@ -213,10 +214,10 @@ impl Engine {
         }
     }
 
-    /// Reconcile the match set of the discovery Profile `discovery` against its post-graft
-    /// `current` — the [`Consequence::Reconcile`](crate::transitions) body: one read of the
-    /// snapshot ([`MatchSet::resolve`]), then each template's [`Self::mint_missing`],
-    /// [`Self::reap_vanished`] and [`Self::close_pass`].
+    /// Reconcile the match set of the discovery Profile `discovery` against its post-graft `current`
+    /// — the [`Consequence::Reconcile`](crate::transitions) body: one read of the snapshot
+    /// ([`MatchSet::resolve`]), then each template's [`Self::mint_missing`], [`Self::reap_vanished`]
+    /// and [`Self::close_pass`].
     ///
     /// Matches go in path order, templates in id order. Diagnostics are not resealed, so this is
     /// the `StepOutput`'s order, and identically driven engines mint identical ids. Every mint
@@ -353,8 +354,8 @@ impl Engine {
     }
 
     /// A template left the registry: what it minted follows, whatever removed it, each under
-    /// [`DetachReason::TemplateDetached`]. Depth one — a minted Sub mints nothing, so no detach
-    /// here hands back orphans of its own.
+    /// [`DetachReason::TemplateDetached`]. Depth one — a minted Sub mints nothing, so no detach here
+    /// hands back orphans of its own.
     pub(crate) fn reap_orphans(&mut self, orphans: BTreeSet<SubId>, out: &mut StepOutput) {
         for orphan in orphans {
             self.detach_sub_inner(orphan, DetachReason::TemplateDetached, out);
@@ -542,9 +543,9 @@ mod tests {
 
     /// The reconcile's non-Dir-anchor totality arm: with no Dir `current` (the cold probe hasn't
     /// answered yet — the same shape as an anchor replaced by a file), reconcile walks no termini
-    /// and mints nothing; the recovery machinery owns whatever replaced the anchor. An
-    /// early-returned pass is **not** an enumeration — the template's enumeration stays open, so
-    /// its first real walk still mints enumerations, not a storm of appearances.
+    /// and mints nothing; the recovery machinery owns whatever replaced the anchor. An early-returned
+    /// pass is **not** an enumeration — the template's enumeration stays open, so its first real
+    /// walk still mints enumerations, not a storm of appearances.
     #[test]
     fn reconcile_without_dir_current_mints_nothing() {
         let mut e = Engine::new();

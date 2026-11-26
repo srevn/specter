@@ -9,13 +9,13 @@
 //!
 //! The PID-reuse race during shutdown signaling is *narrowed* — not eliminated — by two layers.
 //! [`OsChildWaiter::wait`] marks a shared [`crate::lifecycle::DeadFlag`] immediately after
-//! `child.wait()` returns; a controller signal observing `is_dead == true` short-circuits and
-//! never issues a `kill(2)`. The kernel reaps the zombie inside `child.wait()`, so the pid is
-//! eligible for reuse the moment `wait()` returns; a small window remains before the flag store is
-//! visible to the controller. In that window ESRCH-collapse does *not* save us: the (reused) pid
-//! points at a real, unrelated process and `kill(2)` returns success against it. On busy systems
-//! with high pid pressure (CI runners, build servers) the race is small but live; v2 may switch to
-//! process descriptors (Linux pidfd, FreeBSD pdfork) to eliminate it entirely.
+//! `child.wait()` returns; a controller signal observing `is_dead == true` short-circuits and never
+//! issues a `kill(2)`. The kernel reaps the zombie inside `child.wait()`, so the pid is eligible
+//! for reuse the moment `wait()` returns; a small window remains before the flag store is visible
+//! to the controller. In that window ESRCH-collapse does *not* save us: the (reused) pid points at
+//! a real, unrelated process and `kill(2)` returns success against it. On busy systems with high
+//! pid pressure (CI runners, build servers) the race is small but live; v2 may switch to process
+//! descriptors (Linux pidfd, FreeBSD pdfork) to eliminate it entirely.
 
 use crate::lifecycle::DeadFlag;
 use crate::pipe::{CombinedSignaler, PipeWaiter};
@@ -32,8 +32,8 @@ use std::sync::Arc;
 
 /// Production `Spawner`.
 ///
-/// cwd is passed to `Command::current_dir` and validated at spawn time: a cwd the child cannot
-/// enter fails the spawn with an `io::Error`.
+/// cwd is passed to `Command::current_dir` and validated at spawn time: a cwd the child cannot enter
+/// fails the spawn with an `io::Error`.
 #[derive(Debug, Default)]
 pub struct OsSpawner;
 
@@ -79,19 +79,19 @@ impl Spawner for OsSpawner {
         // parent-side fd footprint at ~3 fds even for deep pipes — relevant on hosts under fd
         // pressure (kqueue watchers already consume one O_EVTONLY fd per watched directory).
         //
-        // `prev_read` carries pipe K-1's read end (whose write end was moved into stage K-1's
-        // stdout on the prior iter) into iter K as stage K's stdin. Each non-last iter sets it; the
-        // next iter consumes it via `take()`. The OwnedFds are *moved* (not cloned) into `cmd`,
-        // which consumes them — parent's copy closes as soon as `cmd` is dropped at end of iter.
-        // The child's dup'd fd (stdin fd 0 / stdout fd 1) carries forward the pipe through
-        // fork+exec; CLOEXEC on the OwnedFd is cleared by dup2 on the dup target only (the source
-        // keeps CLOEXEC and closes anyway when the parent drops it).
+        // `prev_read` carries pipe K-1's read end (whose write end was moved into stage K-1's stdout
+        // on the prior iter) into iter K as stage K's stdin. Each non-last iter sets it; the next
+        // iter consumes it via `take()`. The OwnedFds are *moved* (not cloned) into `cmd`, which
+        // consumes them — parent's copy closes as soon as `cmd` is dropped at end of iter. The
+        // child's dup'd fd (stdin fd 0 / stdout fd 1) carries forward the pipe through fork+exec;
+        // CLOEXEC on the OwnedFd is cleared by dup2 on the dup target only (the source keeps CLOEXEC
+        // and closes anyway when the parent drops it).
         //
         // Producer write-end timing: by moving pipe K-1's write end into stage K-1's stdout (rather
-        // than holding a parent copy until end of function), the kernel sees zero parent-side
-        // writers from the moment iter K-1 returns. When stage K-1 exits, its dup of pipe K-1's
-        // write end is the only remaining writer; closing it gives stage K a prompt EOF rather than
-        // hanging until the function returns.
+        // than holding a parent copy until end of function), the kernel sees zero parent-side writers
+        // from the moment iter K-1 returns. When stage K-1 exits, its dup of pipe K-1's write end
+        // is the only remaining writer; closing it gives stage K a prompt EOF rather than hanging
+        // until the function returns.
         let mut prev_read: Option<OwnedFd> = None;
         let mut stage_waiters: Vec<Box<dyn ChildWaiter>> = Vec::with_capacity(n);
         let mut stage_signalers: Vec<Arc<dyn ChildSignaler>> = Vec::with_capacity(n);
@@ -117,9 +117,9 @@ impl Spawner for OsSpawner {
             let child = match cmd.spawn() {
                 Ok(c) => c,
                 Err(e) => {
-                    // `cmd` drops on the early return, closing the pipe ends it holds in the
-                    // parent; `prev_read` (if Some — this iter parked the new pipe's read end
-                    // before calling spawn) drops at function exit.
+                    // `cmd` drops on the early return, closing the pipe ends it holds in the parent;
+                    // `prev_read` (if Some — this iter parked the new pipe's read end before calling
+                    // spawn) drops at function exit.
                     rollback_partial_pipe(&stage_signalers);
                     return Err(e);
                 }
@@ -137,8 +137,8 @@ impl Spawner for OsSpawner {
         // Collapse the per-stage signaler `Vec` into a single `Arc<[...]>` heap allocation backing
         // all three downstream co-owners: the aggregating waiter, the combined signaler, and the
         // controller's local handle that rides out on `PipeSpawnHandles`. Each consumer takes its
-        // share via `Arc::clone` — one refcount bump per consumer instead of re-allocating the
-        // slice three times.
+        // share via `Arc::clone` — one refcount bump per consumer instead of re-allocating the slice
+        // three times.
         let stage_signalers: Arc<[Arc<dyn ChildSignaler>]> = Arc::from(stage_signalers);
         let combined: Arc<dyn ChildSignaler> =
             Arc::new(CombinedSignaler::new(Arc::clone(&stage_signalers)));
@@ -155,22 +155,22 @@ impl Spawner for OsSpawner {
 }
 
 /// The [`Command`] every child is spawned from, with stdin, stdout and stderr on `/dev/null`. Specter
-/// keeps nothing a command prints — an inherited fd would interleave its bytes with the daemon's own
-/// lines and with every other command's — so a command that keeps its output routes it itself.
+/// keeps nothing a command prints — an inherited fd would interleave its bytes with the daemon's
+/// own lines and with every other command's — so a command that keeps its output routes it itself.
 /// [`OsSpawner::spawn_pipe`] rewires only a pipe's interior links. `Command` inherits all three by
 /// default: a line dropped here hands the child the daemon's own fd, its terminal or its log.
 ///
 /// # Env-handling contract: **additive**
 ///
-/// `.envs(...)` adds the resolver-emitted `SPECTER_*` vars **on top of** the parent (specter
-/// daemon) process's environment. The child sees `parent_env ∪ resolver_env`, with resolver entries
-/// shadowing any parent-env collisions on the same key.
+/// `.envs(...)` adds the resolver-emitted `SPECTER_*` vars **on top of** the parent (specter daemon)
+/// process's environment. The child sees `parent_env ∪ resolver_env`, with resolver entries shadowing
+/// any parent-env collisions on the same key.
 ///
 /// **Why not `env_clear()` + additive?** Without per-action env spec (v1 [`crate::spawner::EnvVar`]
-/// only carries the resolver's `SPECTER_*` set; the action grammar has no operator-side `env`
-/// field), `env_clear()` would strip `PATH`, `HOME`, `LANG`, etc., breaking the common case of
-/// `["/bin/sh", "-c", "..."]` whose body invokes other binaries by name. The operator can already
-/// pin specific parent-env values into argv at resolve time via `${env.NAME}` (snapshot-backed; see
+/// only carries the resolver's `SPECTER_*` set; the action grammar has no operator-side `env` field),
+/// `env_clear()` would strip `PATH`, `HOME`, `LANG`, etc., breaking the common case of `["/bin/sh",
+/// "-c", "..."]` whose body invokes other binaries by name. The operator can already pin specific
+/// parent-env values into argv at resolve time via `${env.NAME}` (snapshot-backed; see
 /// [`crate::env::EnvSnapshot`]) when determinism matters per-placeholder.
 ///
 /// **Determinism boundary.** [`crate::env::EnvSnapshot`] freezes `${env.NAME}` resolves at actuator
@@ -268,10 +268,10 @@ fn create_cloexec_pipe() -> io::Result<(OwnedFd, OwnedFd)> {
 }
 
 /// Best-effort rollback for [`OsSpawner::spawn_pipe`]: SIGKILL + `reap_blocking` each
-/// previously-spawned stage so the partial chain leaves no zombies. Errors are logged (via
-/// `tracing` from `signal_kill`/`reap_blocking` implementations) and swallowed — the caller is
-/// already returning an `io::Error` to its own caller, and a second-order failure here doesn't
-/// change the outcome.
+/// previously-spawned stage so the partial chain leaves no zombies. Errors are logged (via `tracing`
+/// from `signal_kill`/`reap_blocking` implementations) and swallowed — the caller is already
+/// returning an `io::Error` to its own caller, and a second-order failure here doesn't change the
+/// outcome.
 ///
 /// Safe to call with an empty slice: the loop is a no-op. The function takes a slice rather than
 /// consuming the Vec so the caller retains the per-stage signalers across the rollback (they're not
@@ -342,9 +342,9 @@ impl ChildSignaler for OsChildSignaler {
             return Ok(());
         }
         // Mirror OsChildWaiter::wait: mark dead unconditionally after waitpid returns (success OR
-        // failure) so any subsequent signaler call short-circuits at the protocol layer. The
-        // previous shape only stored on the Ok branch, leaving the Err branch racing PID-reuse
-        // against the underlying syscall.
+        // failure) so any subsequent signaler call short-circuits at the protocol layer. The previous
+        // shape only stored on the Ok branch, leaving the Err branch racing PID-reuse against the
+        // underlying syscall.
         let result = reap_pid(self.pid);
         self.dead.mark_dead();
         result
@@ -354,18 +354,18 @@ impl ChildSignaler for OsChildSignaler {
     }
     fn mark_dead(&self) {
         // Trait-level publish — delegates to the shared DeadFlag that OsChildWaiter::wait and
-        // Self::reap_blocking also write. All three writers are idempotent against the same
-        // one-shot ratchet.
+        // Self::reap_blocking also write. All three writers are idempotent against the same one-shot
+        // ratchet.
         self.dead.mark_dead();
     }
 }
 
 /// `std::process::Child::id()` returns a `u32` to surface the kernel's unsigned PID-slot encoding
 /// faithfully; POSIX `pid_t` and `nix::unistd::Pid` are signed 32-bit. The conversion is total in
-/// practice — Linux's `pid_max` defaults to 4 M (configurable to a kernel-side cap below
-/// `i32::MAX`); macOS caps lower still — so a `pid > i32::MAX` would indicate kernel state
-/// corruption rather than a representable value. `try_from(...).expect(...)` makes that invariant a
-/// load-bearing assertion instead of a silent wrap.
+/// practice — Linux's `pid_max` defaults to 4 M (configurable to a kernel-side cap below `i32::MAX`);
+/// macOS caps lower still — so a `pid > i32::MAX` would indicate kernel state corruption rather than
+/// a representable value. `try_from(...).expect(...)` makes that invariant a load-bearing assertion
+/// instead of a silent wrap.
 fn pid_from_u32(pid: u32) -> nix::unistd::Pid {
     nix::unistd::Pid::from_raw(i32::try_from(pid).expect("kernel pid_max is well below i32::MAX"))
 }
@@ -400,8 +400,8 @@ fn reap_pid(pid: u32) -> io::Result<()> {
 mod recovery_tests {
     //! Real fork+exec exercise for the wait-thread-spawn-failure recovery path.
     //! `OsChildSignaler::reap_blocking` is the load-bearing syscall: without it, a child spawned
-    //! via [`OsSpawner::spawn`] whose paired [`OsChildWaiter`] was dropped before `wait()` ran
-    //! would linger as a zombie until Specter itself exits.
+    //! via [`OsSpawner::spawn`] whose paired [`OsChildWaiter`] was dropped before `wait()` ran would
+    //! linger as a zombie until Specter itself exits.
     //!
     //! The test drops the waiter explicitly to simulate the `thread::Builder::spawn` failure path
     //! (where the closure that owned the waiter was dropped on `Err`), then drives `signal_kill +
@@ -443,20 +443,20 @@ mod recovery_tests {
         // `Ok(())` by our signaler at the protocol layer because `reap_blocking` set the `dead` flag
         // — so we check the underlying `signal_pid` directly to observe the kernel-level state).
         let kernel_state = signal_pid(pid, nix::sys::signal::Signal::SIGCONT);
-        // ESRCH-collapse means `signal_pid` returns Ok on a vanished pid; what we're really
-        // asserting is that no zombie remains bound to the pid — once `waitpid` returns, the kernel
-        // releases the slot. The successful return of `reap_blocking` above is the load-bearing
-        // assertion; this is the defense-in-depth follow-up.
+        // ESRCH-collapse means `signal_pid` returns Ok on a vanished pid; what we're really asserting
+        // is that no zombie remains bound to the pid — once `waitpid` returns, the kernel releases
+        // the slot. The successful return of `reap_blocking` above is the load-bearing assertion;
+        // this is the defense-in-depth follow-up.
         assert!(
             kernel_state.is_ok(),
             "post-reap signal must collapse cleanly (got {kernel_state:?})",
         );
     }
 
-    /// `reap_blocking` is idempotent: a second call after the child has been reaped returns
-    /// `Ok(())` without blocking. The `dead`-flag short-circuit drives this. `/bin/sleep 0` is the
-    /// portable "exit immediately" child — `/bin/true` is at `/usr/bin/true` on macOS, so we stick
-    /// with `/bin/sleep`.
+    /// `reap_blocking` is idempotent: a second call after the child has been reaped returns `Ok(())`
+    /// without blocking. The `dead`-flag short-circuit drives this. `/bin/sleep 0` is the portable
+    /// "exit immediately" child — `/bin/true` is at `/usr/bin/true` on macOS, so we stick with
+    /// `/bin/sleep`.
     #[test]
     fn signaler_reap_blocking_is_idempotent_after_first_reap() {
         let spawner = OsSpawner::new();
@@ -469,8 +469,8 @@ mod recovery_tests {
         drop(handles.waiter);
 
         signaler.reap_blocking().expect("first reap");
-        // Second call must short-circuit at the `dead`-flag check — the kernel slot is already
-        // gone, so a real waitpid would ECHILD; our fast-path returns Ok without syscall.
+        // Second call must short-circuit at the `dead`-flag check — the kernel slot is already gone,
+        // so a real waitpid would ECHILD; our fast-path returns Ok without syscall.
         signaler
             .reap_blocking()
             .expect("second reap must be a no-op (idempotent)");
@@ -482,18 +482,18 @@ mod pipe_tests {
     //! Real fork+exec exercise for [`OsSpawner::spawn_pipe`]. The aggregating waiter and combined
     //! signaler are unit-tested in `crate::pipe::tests` against synthetic per-stage stubs; this
     //! module pins the load-bearing pieces only `OsSpawner` can exercise: the `pipe(2)` + CLOEXEC
-    //! fd plumbing, the SIGPIPE chain across real children, and the partial-spawn rollback that
-    //! reaps stages 0..K when stage K's exec fails.
+    //! fd plumbing, the SIGPIPE chain across real children, and the partial-spawn rollback that reaps
+    //! stages 0..K when stage K's exec fails.
 
     use super::*;
     use crate::spawner::{EnvVar, Spawner, StageSpec};
     use std::path::Path;
     use std::time::{Duration, Instant};
 
-    /// Two real stages wired stdout→stdin: `echo hello | cat`. Both stages run to natural
-    /// completion; the aggregated outcome is `Ok`. Asserts that:
-    /// - Both `pipe(2)` ends route correctly (stage 0 writes; stage 1 reads + EOFs when stage 0
-    ///   exits and the parent drops its copy of the write end).
+    /// Two real stages wired stdout→stdin: `echo hello | cat`. Both stages run to natural completion;
+    /// the aggregated outcome is `Ok`. Asserts that:
+    /// - Both `pipe(2)` ends route correctly (stage 0 writes; stage 1 reads + EOFs when stage 0 exits
+    ///   and the parent drops its copy of the write end).
     /// - `last_pid` is the second stage's pid (operator-facing).
     #[test]
     fn pipe_echo_then_cat_completes_ok() {
@@ -542,8 +542,8 @@ mod pipe_tests {
     }
 
     /// Partial-spawn rollback: stage 0 spawns a long-running `/bin/sleep 30`; stage 1's argv points
-    /// at a nonexistent binary so `Command::spawn` returns ENOENT. The pipe must roll back: SIGKILL
-    /// + `reap_blocking` against stage 0 so no zombie remains.
+    /// at a nonexistent binary so `Command::spawn` returns ENOENT. The pipe must roll back: SIGKILL +
+    /// `reap_blocking` against stage 0 so no zombie remains.
     ///
     /// **Timing assertion.** The test verifies the call returns in well under the 30-second sleep
     /// window — the only way is if the rollback's SIGKILL took effect before returning. We don't
@@ -576,9 +576,9 @@ mod pipe_tests {
         let elapsed = start.elapsed();
 
         assert!(result.is_err(), "stage-1 spawn must fail and propagate");
-        // ENOENT manifests as io::ErrorKind::NotFound from std's spawn (or kind Other on older
-        // Rust). We don't pin the exact kind — what matters is that the call returns an Err and
-        // that the rollback completed inside it.
+        // ENOENT manifests as io::ErrorKind::NotFound from std's spawn (or kind Other on older Rust).
+        // We don't pin the exact kind — what matters is that the call returns an Err and that the
+        // rollback completed inside it.
         assert!(
             elapsed < Duration::from_secs(5),
             "rollback must complete inside the call, not wait for sleep to exit naturally \
@@ -591,8 +591,8 @@ mod pipe_tests {
 mod stdio_tests {
     //! What a child finds on stdin, stdout and stderr: `/dev/null`, save where a pipe links two
     //! stages. `[ /dev/stdout -ef /dev/null ]` holds where the child's fd 1 is `/dev/null` itself.
-    //! Each test first points its own fd 0 at a pipe: nextest hands every test `/dev/null` as
-    //! stdin, where a child that inherited fd 0 would pass for one handed `/dev/null`. The dup2 is
+    //! Each test first points its own fd 0 at a pipe: nextest hands every test `/dev/null` as stdin,
+    //! where a child that inherited fd 0 would pass for one handed `/dev/null`. The dup2 is
     //! process-wide, and no other test in this binary reads stdin.
 
     use super::*;
@@ -654,22 +654,22 @@ mod tests {
     use std::os::fd::OwnedFd;
     use std::path::Path;
 
-    /// macOS `posix_spawn` returns `EBADF` once the parent process holds more than ~10,200 open
-    /// file descriptors (the kernel's `OPEN_MAX = 10240`). Specter's kqueue watcher opens one
-    /// `O_EVTONLY` fd per watched directory, so trees with ~10k+ directories trip this limit on the
-    /// first Effect spawn — the user-visible symptom is "deep tree, file changed, command silently
-    /// never runs". The fix routes spawn through fork+exec via a no-op `pre_exec` hook.
+    /// macOS `posix_spawn` returns `EBADF` once the parent process holds more than ~10,200 open file
+    /// descriptors (the kernel's `OPEN_MAX = 10240`). Specter's kqueue watcher opens one `O_EVTONLY`
+    /// fd per watched directory, so trees with ~10k+ directories trip this limit on the first Effect
+    /// spawn — the user-visible symptom is "deep tree, file changed, command silently never runs".
+    /// The fix routes spawn through fork+exec via a no-op `pre_exec` hook.
     ///
-    /// This test pre-opens enough `O_EVTONLY` fds to push the process across the `OPEN_MAX`
-    /// boundary, then asserts that `OsSpawner::spawn` succeeds. macOS-only: Linux/glibc
-    /// `posix_spawn` is implemented as fork+exec under the hood and has no equivalent cap, so the
-    /// test would be a no-op there (and would simply burn ~10k fds).
+    /// This test pre-opens enough `O_EVTONLY` fds to push the process across the `OPEN_MAX` boundary,
+    /// then asserts that `OsSpawner::spawn` succeeds. macOS-only: Linux/glibc `posix_spawn` is
+    /// implemented as fork+exec under the hood and has no equivalent cap, so the test would be a
+    /// no-op there (and would simply burn ~10k fds).
     #[test]
     fn spawn_succeeds_above_macos_posix_spawn_open_max() {
         // The kernel's `OPEN_MAX` is 10240 on every supported macOS version. Open `OPEN_MAX +
-        // headroom` fds so we are unambiguously past the failure threshold for the posix_spawn
-        // path; even if a future macOS update raises the limit, this test still exercises the
-        // fork+exec route at scale.
+        // headroom` fds so we are unambiguously past the failure threshold for the posix_spawn path;
+        // even if a future macOS update raises the limit, this test still exercises the fork+exec
+        // route at scale.
         const FDS_TO_OPEN: usize = 10_500;
 
         // The process's `RLIMIT_NOFILE` may be lower than what we need; skip cleanly if so rather

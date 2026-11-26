@@ -28,10 +28,10 @@
 //! The field-less projection enums (every `Wire*` carrying a snake_case `as_str` — [`WireFsEvent`],
 //! [`WireBurstHelper`], …) each declare a fixed-size `ALL` array of their variants, and the
 //! round-trip tests iterate `ALL` rather than a hand-written variant slice. An adjacent `const`
-//! tripwire keeps `ALL` exhaustive: its match gains one arm per variant, and a newly added
-//! variant's arm indexes one slot past the fixed-size array — a hard `unconditional_panic` compile
-//! error — until `ALL` grows to list it. Coverage therefore cannot silently drop a variant, which a
-//! distant hand-written slice once did.
+//! tripwire keeps `ALL` exhaustive: its match gains one arm per variant, and a newly added variant's
+//! arm indexes one slot past the fixed-size array — a hard `unconditional_panic` compile error —
+//! until `ALL` grows to list it. Coverage therefore cannot silently drop a variant, which a distant
+//! hand-written slice once did.
 //!
 //! `WireTime` owns one second-resolution RFC 3339 UTC renderer: the outgoing path renders through
 //! it and the incoming path admits only a token it reproduces byte-for-byte, so every wire value
@@ -79,10 +79,10 @@ use super::protocol::WireId;
 
 /// RFC 3339 wall-clock projection at second resolution.
 ///
-/// Second precision matches the `SPECTER_TIME` subprocess env ([`specter_actuator`]'s
-/// `format_now`) so operators see one timestamp shape across both surfaces. Sub-second digits would
-/// be unread by every current consumer and precise-but-NTP-inaccurate on the synthesized
-/// `last_fired_at` projection (`project::project_wall`), so the wire disclaims them.
+/// Second precision matches the `SPECTER_TIME` subprocess env ([`specter_actuator`]'s `format_now`)
+/// so operators see one timestamp shape across both surfaces. Sub-second digits would be unread by
+/// every current consumer and precise-but-NTP-inaccurate on the synthesized `last_fired_at`
+/// projection (`project::project_wall`), so the wire disclaims them.
 ///
 /// The projection clamps into the renderable range. A pre-epoch `SystemTime` clamps to
 /// [`UNIX_EPOCH`]: a Unix wall clock before 1970 is a wedged clock, and years below 0000 have no
@@ -93,13 +93,12 @@ use super::protocol::WireId;
 ///
 /// # Symmetric validation
 ///
-/// Both [`Serialize`] and [`Deserialize`] are manual and both gate the same vocabulary: the one
-/// shape [`render`] produces. Serialize writes the inner `&str` verbatim (it is canonical by
-/// construction thanks to its `From<SystemTime>` impl). Deserialize takes any JSON string, parses it
-/// as a timestamp, and stores the bytes only if [`render`] reproduces them exactly. A token that is
-/// not a timestamp — or another spelling of one (fractional seconds, a numeric offset, lowercase
-/// `t` / `z`) — fails the boundary: the wire layer cannot accept opaque text masquerading as a
-/// timestamp.
+/// Both [`Serialize`] and [`Deserialize`] are manual and both gate the same vocabulary: the one shape
+/// [`render`] produces. Serialize writes the inner `&str` verbatim (it is canonical by construction
+/// thanks to its `From<SystemTime>` impl). Deserialize takes any JSON string, parses it as a
+/// timestamp, and stores the bytes only if [`render`] reproduces them exactly. A token that is not
+/// a timestamp — or another spelling of one (fractional seconds, a numeric offset, lowercase `t` /
+/// `z`) — fails the boundary: the wire layer cannot accept opaque text masquerading as a timestamp.
 ///
 /// JSON form is a bare quoted string (`"2026-05-23T15:30:00Z"`), not a wrapped object.
 ///
@@ -193,13 +192,13 @@ impl std::fmt::Display for WireTime {
 /// wrapped object. The shape is symmetric across Serialize and Deserialize: server emits a
 /// lossy-projected UTF-8 token, client parses the same bytes back into the inner [`String`].
 ///
-/// `Deserialize` accepts any UTF-8 string (the server-side projection is the gating shape; the
-/// client treats the inner bytes as opaque path-display text). The renderer reproduces the value
-/// verbatim through [`Display`](std::fmt::Display).
+/// `Deserialize` accepts any UTF-8 string (the server-side projection is the gating shape; the client
+/// treats the inner bytes as opaque path-display text). The renderer reproduces the value verbatim
+/// through [`Display`](std::fmt::Display).
 ///
 /// Construction is one-way: every [`From`] impl projects *into* `WirePath`. There is no
-/// `From<String>` — a `WirePath` is built from a path-typed source, not from an unconstrained
-/// string. The discipline mirrors [`WireId`]'s "no `From<u64>` from clients" rule.
+/// `From<String>` — a `WirePath` is built from a path-typed source, not from an unconstrained string.
+/// The discipline mirrors [`WireId`]'s "no `From<u64>` from clients" rule.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(transparent)]
 pub(crate) struct WirePath(String);
@@ -236,8 +235,8 @@ impl std::fmt::Display for WirePath {
     }
 }
 
-/// JSON-line projection of `specter_core::Diagnostic` plus the fan-out path's `_missed`
-/// back-pressure marker.
+/// JSON-line projection of `specter_core::Diagnostic` plus the fan-out path's `_missed` back-pressure
+/// marker.
 ///
 /// Internally tagged on `diag`; every variant's `at` field serializes immediately after the tag.
 ///
@@ -248,8 +247,8 @@ impl std::fmt::Display for WirePath {
 /// collision-protection token reserved for the fan-out back-pressure marker, never a Rust identifier
 /// and so unreachable from a future `specter_core::Diagnostic` variant.
 ///
-/// Two-way derive (server serializes for fan-out, client deserializes for tail/wait) — see the
-/// module rustdoc's `Deserialize policy` section for the structural invariants the paired edit must
+/// Two-way derive (server serializes for fan-out, client deserializes for tail/wait) — see the module
+/// rustdoc's `Deserialize policy` section for the structural invariants the paired edit must
 /// preserve.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "diag", rename_all = "snake_case")]
@@ -362,8 +361,8 @@ pub(crate) enum WireDiagnostic {
     ProfileParked {
         at: WireTime,
         profile: WireId,
-        /// The cached recovery channel (`watch_root_parent`), if any — `None` is a channel-less
-        /// park whose recovery waits on an overflow, a re-attach, or detach.
+        /// The cached recovery channel (`watch_root_parent`), if any — `None` is a channel-less park
+        /// whose recovery waits on an overflow, a re-attach, or detach.
         recovery: Option<WireId>,
     },
     ProfileClaimPurged {
@@ -534,10 +533,10 @@ pub(crate) enum WireDiagnostic {
     /// Fan-out back-pressure marker — not derived from any `specter_core::Diagnostic`. Emitted by
     /// [`crate::driver::Hub::dispatch_to_subscribers`] when a wedged subscriber's queue overflowed
     /// and the dispatch loop had to drop diag lines; the marker tells the operator how many were
-    /// skipped before the next reachable line. The underscore-prefix protects against collision
-    /// with any future core variant named `Missed`; `#[serde(rename = "_missed")]` overrides the
-    /// enum's `rename_all = "snake_case"` default (which would otherwise emit the bare `missed`
-    /// token a core variant could legitimately occupy).
+    /// skipped before the next reachable line. The underscore-prefix protects against collision with
+    /// any future core variant named `Missed`; `#[serde(rename = "_missed")]` overrides the enum's
+    /// `rename_all = "snake_case"` default (which would otherwise emit the bare `missed` token a
+    /// core variant could legitimately occupy).
     #[serde(rename = "_missed")]
     Missed {
         at: WireTime,
@@ -953,9 +952,9 @@ impl WireDiagnostic {
     /// Exhaustive `match` — a new variant without a paired arm fails to compile, keeping the tag
     /// vocabulary single-source against [`KNOWN_WIRE_VARIANTS`].
     ///
-    /// Used by `specter tail --filter <variant>` to dispatch lines client-side without
-    /// re-serializing through `serde_json::Value`, and by per-event renderers that want the variant
-    /// tag as a column without re-walking the JSON.
+    /// Used by `specter tail --filter <variant>` to dispatch lines client-side without re-serializing
+    /// through `serde_json::Value`, and by per-event renderers that want the variant tag as a column
+    /// without re-walking the JSON.
     pub(crate) const fn variant_name(&self) -> &'static str {
         match self {
             Self::StaleProbeResponse { .. } => "stale_probe_response",
@@ -1023,17 +1022,17 @@ impl WireDiagnostic {
 /// primitives). No field uses a `serialize_with` adapter that could return `Err`. Marks the
 /// diag-fan-out path ([`crate::driver::Hub::dispatch_to_subscribers`]), the back-pressure `_missed`
 /// marker emit (`crate::driver::ipc::conns::ConnState::try_dispatch_diag`), and the client `tail -o
-/// json` re-emit ([`crate::ipc::client::tail`]) safe for [`crate::ipc::framing::encode_line`]
-/// without an `.expect`-at-a-distance.
+/// json` re-emit ([`crate::ipc::client::tail`]) safe for [`crate::ipc::framing::encode_line`] without
+/// an `.expect`-at-a-distance.
 impl InfallibleSerialize for WireDiagnostic {}
 
-/// Operator-visible tag for every [`WireDiagnostic`] variant — the vocabulary `specter tail
-/// --filter` validates against and the suggestion list the handler prints on a rejected token.
+/// Operator-visible tag for every [`WireDiagnostic`] variant — the vocabulary `specter tail --filter`
+/// validates against and the suggestion list the handler prints on a rejected token.
 ///
 /// Hand-maintained alongside [`WireDiagnostic::variant_name`]; the
-/// `known_wire_variants_matches_variant_name` drift test fails if either side adds or drops an
-/// entry. Iteration order is the variant declaration order on [`WireDiagnostic`] so operators
-/// reading the "Known filters: ..." list see the same order the source declares them in.
+/// `known_wire_variants_matches_variant_name` drift test fails if either side adds or drops an entry.
+/// Iteration order is the variant declaration order on [`WireDiagnostic`] so operators reading the
+/// "Known filters: ..." list see the same order the source declares them in.
 pub(crate) const KNOWN_WIRE_VARIANTS: &[&str] = &[
     "stale_probe_response",
     "stale_timer",
@@ -1362,10 +1361,10 @@ const _: () = {
     const _: fn(WireResourceKind) -> WireResourceKind = all_complete;
 };
 
-/// Mirror of [`specter_core::EntryKind`] — the snapshot-side kind, distinct from
-/// [`WireResourceKind`] (the Tree-slot kind) because the Tree projection folds `Symlink`/`Other`
-/// into `File`. `DiscoveryUnsupportedAnchorKind` exists precisely to name those folded-away kinds,
-/// so its wire field must carry the un-projected vocabulary.
+/// Mirror of [`specter_core::EntryKind`] — the snapshot-side kind, distinct from [`WireResourceKind`]
+/// (the Tree-slot kind) because the Tree projection folds `Symlink`/`Other` into `File`.
+/// `DiscoveryUnsupportedAnchorKind` exists precisely to name those folded-away kinds, so its wire
+/// field must carry the un-projected vocabulary.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum WireEntryKind {
@@ -1886,8 +1885,8 @@ impl std::fmt::Display for WireStateLabel {
     }
 }
 
-/// Sub effect-scope projection. Mirrors `specter_core::EffectScope` verbatim; surfaces in the
-/// `show` reaction payload (`crate::ipc::protocol::WireReaction` — `Spawn`'s `scope`, `Mint`'s
+/// Sub effect-scope projection. Mirrors `specter_core::EffectScope` verbatim; surfaces in the `show`
+/// reaction payload (`crate::ipc::protocol::WireReaction` — `Spawn`'s `scope`, `Mint`'s
 /// `minted_scope`).
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -1909,10 +1908,10 @@ impl WireEffectScope {
     /// Every variant — the round-trip witness source; the tripwire below keeps it exhaustive.
     const ALL: [Self; 2] = [Self::SubtreeRoot, Self::PerStableFile];
 
-    /// Wire-form token — snake_case, mirroring the serde rename. The `show -o human` renderer
-    /// carries its own hyphenated label table (`subtree-root` / `per-stable-file`) for the detail
-    /// block; that view-local divergence stays in `show.rs`. This `as_str` is the uniform wire
-    /// vocabulary for diag / JSON / future consumers.
+    /// Wire-form token — snake_case, mirroring the serde rename. The `show -o human` renderer carries
+    /// its own hyphenated label table (`subtree-root` / `per-stable-file`) for the detail block;
+    /// that view-local divergence stays in `show.rs`. This `as_str` is the uniform wire vocabulary
+    /// for diag / JSON / future consumers.
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::SubtreeRoot => "subtree_root",
@@ -1940,11 +1939,11 @@ impl std::fmt::Display for WireEffectScope {
 }
 
 /// Reaction-discriminant projection of [`specter_core::Reaction`] — which kind of Sub a row
-/// describes, without the variant payload. Surfaces in `ListRow.reaction` so the table can
-/// attribute its n/a fire-stat cells (a `mint` row never fires) instead of leaving a bare `-`
-/// mysterious; the `show` detail block carries the full per-variant payload
-/// (`crate::ipc::protocol::WireReaction`) whose serde tag emits these same tokens — the lockstep is
-/// pinned by `protocol::tests::sub_details_flattens_reaction_variants`.
+/// describes, without the variant payload. Surfaces in `ListRow.reaction` so the table can attribute
+/// its n/a fire-stat cells (a `mint` row never fires) instead of leaving a bare `-` mysterious; the
+/// `show` detail block carries the full per-variant payload (`crate::ipc::protocol::WireReaction`)
+/// whose serde tag emits these same tokens — the lockstep is pinned by
+/// `protocol::tests::sub_details_flattens_reaction_variants`.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum WireReactionKind {
@@ -1965,8 +1964,8 @@ impl WireReactionKind {
     /// Every variant — the round-trip witness source; the tripwire below keeps it exhaustive.
     const ALL: [Self; 2] = [Self::Spawn, Self::Mint];
 
-    /// Wire-form token — snake_case, mirroring the serde rename. The `list -o human` REACTION
-    /// column renders it verbatim through `Display`.
+    /// Wire-form token — snake_case, mirroring the serde rename. The `list -o human` REACTION column
+    /// renders it verbatim through `Display`.
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Spawn => "spawn",
@@ -2017,8 +2016,8 @@ impl WireAbsorbMode {
     /// Every variant — the round-trip witness source; the tripwire below keeps it exhaustive.
     const ALL: [Self; 2] = [Self::ConsumeOnFirst, Self::PersistUntil];
 
-    /// Wire-form token — snake_case, mirroring the serde rename. The `show -o human` renderer
-    /// carries its own table for the `absorbing until …` line (hyphenated `consume-on-first` / bare
+    /// Wire-form token — snake_case, mirroring the serde rename. The `show -o human` renderer carries
+    /// its own table for the `absorbing until …` line (hyphenated `consume-on-first` / bare
     /// `persist`); that view-local divergence stays in `show.rs`. This `as_str` is the uniform wire
     /// vocabulary for diag / JSON / future consumers.
     pub(crate) const fn as_str(self) -> &'static str {
@@ -2052,10 +2051,10 @@ impl std::fmt::Display for WireAbsorbMode {
 /// Constructed field-by-field in the `show` projection (`crate::driver::ipc::project`) rather than
 /// through a `From`: the window's expiry is an engine-monotonic [`std::time::Instant`] with no
 /// wall-clock of its own, so the projection threads it through the driver's startup-anchor pair
-/// (`project_wall`) to reach a [`WireTime`]. The projection is live-gated at the call site — an
-/// inert window (`expiry <= now`) projects to `None`, never a stale `Some`. Surfaces as a spawn
-/// row's `absorb` ([`crate::ipc::protocol::WireReaction::Spawn`]) and, as the window that lapses
-/// last, in [`WireMintedAbsorbing`].
+/// (`project_wall`) to reach a [`WireTime`]. The projection is live-gated at the call site — an inert
+/// window (`expiry <= now`) projects to `None`, never a stale `Some`. Surfaces as a spawn row's
+/// `absorb` ([`crate::ipc::protocol::WireReaction::Spawn`]) and, as the window that lapses last, in
+/// [`WireMintedAbsorbing`].
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct WireAbsorbWindow {
     /// Wall-clock projection of the window's expiry instant.
@@ -2169,11 +2168,11 @@ mod tests {
         );
     }
 
-    /// `Deserialize` for [`WireTime`] is the symmetric gate — a token that is not a timestamp, or
-    /// a non-canonical spelling of one, is rejected at the boundary rather than stored as opaque
-    /// text. Pins that the wire layer validates *both* directions of the round-trip. One witness
-    /// per rejection branch (parse failure, canonical-form mismatch); the parser's internal failure
-    /// modes are jiff's contract, not ours.
+    /// `Deserialize` for [`WireTime`] is the symmetric gate — a token that is not a timestamp, or a
+    /// non-canonical spelling of one, is rejected at the boundary rather than stored as opaque text.
+    /// Pins that the wire layer validates *both* directions of the round-trip. One witness per
+    /// rejection branch (parse failure, canonical-form mismatch); the parser's internal failure modes
+    /// are jiff's contract, not ours.
     #[test]
     fn wire_time_rejects_malformed_and_non_canonical() {
         for (token, branch) in [
@@ -2194,8 +2193,8 @@ mod tests {
 
     /// A well-formed RFC 3339 token round-trips through serde with byte-identical output — the
     /// deserialize gate accepts valid input and the Serialize impl preserves the bytes verbatim.
-    /// The server-emit shape is pinned separately by [`wire_time_clamps_to_renderable_range`];
-    /// this test pins the complementary half (Deserialize ↔ Serialize byte stability).
+    /// The server-emit shape is pinned separately by [`wire_time_clamps_to_renderable_range`]; this
+    /// test pins the complementary half (Deserialize ↔ Serialize byte stability).
     #[test]
     fn wire_time_round_trips_rfc3339() {
         let bytes = r#""2026-05-23T15:30:00Z""#;
@@ -2236,8 +2235,8 @@ mod tests {
             "non-UTF-8 path projects through U+FFFD; got {projected:?}",
         );
 
-        // Construct-time validity ⇒ JSON-serialize cannot panic; the bytes survive a full
-        // round-trip (structural equality on WirePath is via the inner String).
+        // Construct-time validity ⇒ JSON-serialize cannot panic; the bytes survive a full round-trip
+        // (structural equality on WirePath is via the inner String).
         let json = serde_json::to_string(&wire).expect("WirePath serialization is infallible");
         let back: WirePath = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back, wire);
@@ -2260,8 +2259,8 @@ mod tests {
     }
 
     /// [`WireWatchFailure`]'s `Display` carries `(errno=<n>)` for every arm — the raw kernel errno
-    /// is the operator's index into `errno.h` and stays paired with the failure class in the
-    /// rendered `failure=` field.
+    /// is the operator's index into `errno.h` and stays paired with the failure class in the rendered
+    /// `failure=` field.
     #[test]
     fn wire_watch_failure_display_includes_errno() {
         assert_eq!(
@@ -2283,8 +2282,8 @@ mod tests {
     /// Two cross-cutting pins read this list:
     ///
     /// 1. [`wire_diagnostic_round_trips_via_serde`] — serialize each witness, deserialize,
-    ///    re-serialize, assert byte equality. Catches a serde derive macro regression on either
-    ///    half of the round-trip.
+    ///    re-serialize, assert byte equality. Catches a serde derive macro regression on either half
+    ///    of the round-trip.
     /// 2. [`known_wire_variants_matches_variant_name`] — every tag here matches its variant's
     ///    [`WireDiagnostic::variant_name`] and appears in [`KNOWN_WIRE_VARIANTS`] (and vice versa).
     ///
@@ -2571,9 +2570,9 @@ mod tests {
     /// → deserialize → re-serialize → same bytes.
     ///
     /// Identity check is via re-serialization because [`WireDiagnostic`] is intentionally not
-    /// `PartialEq` — adding the derive would propagate the bound to every transitively-reached
-    /// enum and the canonical wire bytes already are the identity. A serde derive macro regression
-    /// on either half of the round-trip fails this test.
+    /// `PartialEq` — adding the derive would propagate the bound to every transitively-reached enum
+    /// and the canonical wire bytes already are the identity. A serde derive macro regression on
+    /// either half of the round-trip fails this test.
     #[test]
     fn wire_diagnostic_round_trips_via_serde() {
         for w in variant_witnesses() {

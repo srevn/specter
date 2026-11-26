@@ -1,5 +1,5 @@
-//! One pass through the driver's drain order — the load-bearing single-iteration body, and the
-//! module new inbound-path work lands in.
+//! One pass through the driver's drain order — the load-bearing single-iteration body, and the module
+//! new inbound-path work lands in.
 //!
 //! [`EngineDriver::tick`] consults the [`super::Reactor`] for the multi-source mio poll, then drains
 //! the partitioned [`super::reactor::DrainedTick`] in canonical order: deferred-replay → listener
@@ -13,8 +13,8 @@
 //! IPC verb dispatch sits LAST in the engine-input drain order (immediately before the writable
 //! drain). Every read verb projects engine state, so draining IPC after sensor / timers / signals /
 //! reload / effects guarantees each projection observes the freshest engine state for this tick —
-//! `status.profile_active` reflects every in-flight burst, including those that transitioned
-//! to/from Idle in this same tick's drains.
+//! `status.profile_active` reflects every in-flight burst, including those that transitioned to/from
+//! Idle in this same tick's drains.
 //!
 //! # Drain order rationale
 //!
@@ -24,11 +24,11 @@
 //!   [`Duration::ZERO`] when the queue is non-empty so replay isn't deferred behind a long wait.
 //! - **Sensor inputs BEFORE effect completions.** The fire-cycle's post-fire tail
 //!   (`PostFirePhase::Awaiting` / `Rebasing`) absorbs `FsEvent`s and folds their disk state into
-//!   the rebase, while `EffectComplete` arrivals transition `Awaiting → Rebasing`. If the order
-//!   were inverted, an `EffectComplete` could move the burst into Rebasing before the engine had
-//!   seen `FsEvent`s queued in the same tick — those events would then route to the wrong burst (or
-//!   kick off a fresh burst against an in-flight rebase). Sensor-first preserves the "fire-tail
-//!   absorbs concurrent edits" contract documented on `PostFirePhase::Awaiting`.
+//!   the rebase, while `EffectComplete` arrivals transition `Awaiting → Rebasing`. If the order were
+//!   inverted, an `EffectComplete` could move the burst into Rebasing before the engine had seen
+//!   `FsEvent`s queued in the same tick — those events would then route to the wrong burst (or kick
+//!   off a fresh burst against an in-flight rebase). Sensor-first preserves the "fire-tail absorbs
+//!   concurrent edits" contract documented on `PostFirePhase::Awaiting`.
 //! - **Signal dispatch AFTER timers.** A SIGHUP arriving during a timer-driven burst should reload
 //!   after the burst's timer takes effect — the reload's apply runs on the same tick but *after*
 //!   the timer's emission. Timer drains are bounded (the heap has finitely many expired entries); a
@@ -52,9 +52,9 @@
 //!
 //! # Disconnect policy
 //!
-//! The kernel-side inputs (watcher, config-watcher, signal pipe, waker, channel receivers) are
-//! owned directly by the Reactor; the listener and per-conn streams are owned by the Hub. Both live
-//! on this thread — there is no upstream sender that can disconnect. The two wake'd channels
+//! The kernel-side inputs (watcher, config-watcher, signal pipe, waker, channel receivers) are owned
+//! directly by the Reactor; the listener and per-conn streams are owned by the Hub. Both live on
+//! this thread — there is no upstream sender that can disconnect. The two wake'd channels
 //! (`prober_response_rx`, `effect_complete_rx`) and the outbound `effects_tx` are the only
 //! producer-driven seams.
 //!
@@ -63,16 +63,16 @@
 //!   closes the `Sender<Input>` clone BEFORE pulsing the wake edge (the close-then-wake symmetry of
 //!   the send-then-wake protocol). The Reactor's drain surfaces the Disconnected as
 //!   [`super::reactor::DrainedTick::actuator_gone`]; the tick body routes through
-//!   [`super::EngineDriver::begin_shutdown`]. This is how a clean actuator exit (its `run`
-//!   returned) AND a crash (panic unwound the closure) converge on one shutdown path.
+//!   [`super::EngineDriver::begin_shutdown`]. This is how a clean actuator exit (its `run` returned)
+//!   AND a crash (panic unwound the closure) converge on one shutdown path.
 //! - **`prober_response_rx` Disconnected** is benign — the prober pool's workers disconnect only at
 //!   pool shutdown, which happens during App teardown *after* the driver is gone. The drain absorbs
 //!   the variant silently.
 //! - **`effects_tx` `try_send(Disconnected)`** in [`super::EngineDriver::forward`] is the
 //!   producer-side mirror: the actuator's `effects_rx` is gone, so the driver can't ship work.
 //!   Propagates `ControlFlow::Break` upward and the tick routes through
-//!   [`super::EngineDriver::begin_shutdown`] — the redundant-but-idempotent path that converges
-//!   with the actuator_gone arm above.
+//!   [`super::EngineDriver::begin_shutdown`] — the redundant-but-idempotent path that converges with
+//!   the actuator_gone arm above.
 
 use super::ipc::hub;
 use super::{EngineDriver, TickOutcome};
@@ -88,8 +88,8 @@ use std::time::{Duration, Instant};
 /// `dispatch_reload`).
 ///
 /// `100ms` covers common editor patterns — atomic save (vim, Helix: write-tmp → rename → fsync;
-/// ~10–30ms wall) and in-place modify (`echo > file`; ~1–5ms per syscall, sustained bursts well
-/// under 100ms). Fixed, not operator-tunable, under the "minimal config surface" rule.
+/// ~10–30ms wall) and in-place modify (`echo > file`; ~1–5ms per syscall, sustained bursts well under
+/// 100ms). Fixed, not operator-tunable, under the "minimal config surface" rule.
 const CONFIG_SETTLE: Duration = Duration::from_millis(100);
 
 /// Soft cap on the [`super::EngineDriver::deferred_inputs`] queue. The queue is unbounded by type;
@@ -107,10 +107,10 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// runs [`Self::begin_shutdown`] before returning [`TickOutcome::Shutdown`], so the engine is
     /// probe-drained whether the daemon ([`Self::run`]) or a test drove the tick.
     ///
-    /// MUST NOT be wrapped in `catch_unwind`: `ProbeSlot`'s in-unwind silence
-    /// (`specter_core::probe`) depends on a mid-`step` panic being fatal — the graceful drain above
-    /// is the *only* sanctioned path to a probe-free engine; catching a `step` panic would bypass
-    /// it and resume on torn-down probe state.
+    /// MUST NOT be wrapped in `catch_unwind`: `ProbeSlot`'s in-unwind silence (`specter_core::probe`)
+    /// depends on a mid-`step` panic being fatal — the graceful drain above is the *only* sanctioned
+    /// path to a probe-free engine; catching a `step` panic would bypass it and resume on torn-down
+    /// probe state.
     #[must_use]
     pub fn tick(&mut self) -> TickOutcome {
         let now = Instant::now();
@@ -126,9 +126,9 @@ impl<W: FsWatcher> EngineDriver<W> {
         // spurious wait.
         let timeout = self.compute_block_timeout(now);
 
-        // Block on mio + drain every ready static Source non-blockingly. `poll_and_drain`
-        // partitions the ready set into per-source buckets on [`super::reactor::DrainedTick`]; the
-        // listener's readiness surfaces as a bool flag (the accept itself runs through
+        // Block on mio + drain every ready static Source non-blockingly. `poll_and_drain` partitions
+        // the ready set into per-source buckets on [`super::reactor::DrainedTick`]; the listener's
+        // readiness surfaces as a bool flag (the accept itself runs through
         // [`super::Hub::drain_accept`] below).
         let mut drained = match self.reactor.poll_and_drain(timeout) {
             Ok(d) => d,
@@ -176,8 +176,8 @@ impl<W: FsWatcher> EngineDriver<W> {
         }
 
         // 3. Signals — iterate the batch; short-circuit on first Break (SIGINT/SIGTERM observed).
-        //    SIGHUP routes through `dispatch_reload` and continues; the second SIGINT/SIGTERM
-        //    within `HARD_EXIT_WINDOW` escalates inside `dispatch_signal_with_exit_fn`.
+        //    SIGHUP routes through `dispatch_reload` and continues; the second SIGINT/SIGTERM within
+        //    `HARD_EXIT_WINDOW` escalates inside `dispatch_signal_with_exit_fn`.
         for sig in drained.signals.iter().copied() {
             if self.dispatch_signal(sig, now).is_break() {
                 return self.begin_shutdown();
@@ -207,8 +207,8 @@ impl<W: FsWatcher> EngineDriver<W> {
         // 5b. Actuator-gone signal. The drain above set `drained.actuator_gone` iff
         // `effect_complete_rx` observed Disconnected (the actuator thread's `Box<dyn
         // EffectCompleteSender>` dropped, closing its `Sender<Input>` clone via `WakingSink::Drop`).
-        // The check sits AFTER the completion drain so any in-flight completions queued ahead of the
-        // disconnect still flow through `engine.step` — losing those would orphan post-fire
+        // The check sits AFTER the completion drain so any in-flight completions queued ahead of
+        // the disconnect still flow through `engine.step` — losing those would orphan post-fire
         // transitions on the way out. `begin_shutdown` is idempotent over an empty in-flight probe
         // set; the same path covers both the clean exit (actuator finished shutdown phases naturally)
         // and the crash exit (actuator panic). The hard-exit handshake stays installed up to and
@@ -227,8 +227,8 @@ impl<W: FsWatcher> EngineDriver<W> {
 
         // 7. WRITABLE drain — flush write_queue residue for conns whose WRITABLE fired this tick. A
         //    conn whose drain reaches `Terminate` (close-after-flush or peer-gone) is closed
-        //    immediately so the next tick's poll has no stale registration. `ConnGone` is the
-        //    benign "read drain earlier this tick already terminated this conn" arm.
+        //    immediately so the next tick's poll has no stale registration. `ConnGone` is the benign
+        //    "read drain earlier this tick already terminated this conn" arm.
         for &token in &drained.ready_writes {
             match self.ipc.drain_writable(token) {
                 hub::DrainWritableOutcome::Continue => {}
@@ -239,8 +239,8 @@ impl<W: FsWatcher> EngineDriver<W> {
         // 8. Arm WRITABLE interest on any conn whose queue gained bytes this tick (via forward()'s
         //    fan-out or the IPC handler's response enqueue). One re-register pass at end-of-tick
         //    amortizes a per-conn syscall across the whole tick. Per-conn rearm failures terminate
-        //    the failing conn in place ([`Hub::arm_writable_interests`] defer-terminates); the
-        //    daemon stays alive.
+        //    the failing conn in place ([`Hub::arm_writable_interests`] defer-terminates); the daemon
+        //    stays alive.
         self.ipc.arm_writable_interests();
 
         TickOutcome::Continue
@@ -253,8 +253,8 @@ impl<W: FsWatcher> EngineDriver<W> {
     ///   runs the replay before re-blocking.
     /// - **No deadline armed**: `None` — mio blocks forever until any Source readies. No
     ///   `FOREVER_TIMEOUT` workaround is needed; the previous epoch's crossbeam
-    ///   `Select::ready_timeout` required a finite `Duration` (1 day fallback) because the API
-    ///   didn't accept "wait indefinitely."
+    ///   `Select::ready_timeout` required a finite `Duration` (1 day fallback) because the API didn't
+    ///   accept "wait indefinitely."
     /// - **Deadline armed (engine timer or settle expiry)**: the `min` of the active deadlines,
     ///   clamped to a non-negative duration from `now`. `saturating_duration_since` returns `ZERO`
     ///   if the deadline already elapsed — the next poll is non-blocking, and the body's drain pass
@@ -276,8 +276,8 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// `forward` cycle dispatches the claim-purge.
     ///
     /// The debug-only soft cap catches a hypothetical future engine emission shape that produces
-    /// unbounded same-tick rejections — the queue is unbounded by type, but a runaway producer
-    /// would degrade tick latency unbounded.
+    /// unbounded same-tick rejections — the queue is unbounded by type, but a runaway producer would
+    /// degrade tick latency unbounded.
     pub(super) fn replay_deferred_inputs(&mut self, now: Instant) -> ControlFlow<()> {
         while let Some(input) = self.deferred_inputs.pop_front() {
             let out = self.engine.step(input, now);
@@ -299,17 +299,17 @@ impl<W: FsWatcher> EngineDriver<W> {
     ///
     /// The drain visits three [`super::reactor::DrainedTick`] fields:
     /// 1. `fs_events` — per-resource recency hints + identity-class edges from the watcher fd.
-    /// 2. `sensor_overflows` — kernel-level overflow markers (inotify's `IN_Q_OVERFLOW`; kqueue
-    ///    never emits).
+    /// 2. `sensor_overflows` — kernel-level overflow markers (inotify's `IN_Q_OVERFLOW`; kqueue never
+    ///    emits).
     /// 3. `probe_responses` — already-lifted `Input::ProbeResponse(_)` envelopes from the wake'd
     ///    channel.
     ///
     /// Recency-class [`FsEvent`]s (`ContentChanged` / `MetadataChanged` / `StructureChanged`) are
-    /// lossy hints whose sole truth is the next probe — same-tick duplicates collapse via a
-    /// per-tick `BTreeSet<(ResourceId, FsEvent)>` horizon. Every other input is a barrier
-    /// (identity-class lifecycle facts, probe responses, overflow markers) — barriers clear the
-    /// horizon and step verbatim. The split is exhaustive over the [`FsEvent`] enum, so any future
-    /// variant defaults to the safe (barrier) side via the `is_recency()` projection.
+    /// lossy hints whose sole truth is the next probe — same-tick duplicates collapse via a per-tick
+    /// `BTreeSet<(ResourceId, FsEvent)>` horizon. Every other input is a barrier (identity-class
+    /// lifecycle facts, probe responses, overflow markers) — barriers clear the horizon and step
+    /// verbatim. The split is exhaustive over the [`FsEvent`] enum, so any future variant defaults
+    /// to the safe (barrier) side via the `is_recency()` projection.
     ///
     /// Soundness rests on the engine's lossy-hint contract, not a fragile bit-for-bit `StepOutput`
     /// identity. A dropped same-tick duplicate, had it been delivered, would have either no-op'd an
@@ -339,9 +339,9 @@ impl<W: FsWatcher> EngineDriver<W> {
                 return ControlFlow::Break(());
             }
         }
-        // Overflows AFTER fs events: an `IN_Q_OVERFLOW` reseed covers the kernel-lost edges;
-        // running it after the visible-edge drain means the reseed sees the freshest engine state
-        // for the in-scope Profiles.
+        // Overflows AFTER fs events: an `IN_Q_OVERFLOW` reseed covers the kernel-lost edges; running
+        // it after the visible-edge drain means the reseed sees the freshest engine state for the
+        // in-scope Profiles.
         for scope in drained.sensor_overflows.drain(..) {
             seen.clear();
             let out = self.engine.step(Input::SensorOverflow { scope }, now);

@@ -14,8 +14,8 @@
 //!
 //! # Visibility
 //!
-//! Every export is `pub(crate)`. `App::run` wires every one (parent pre-check, stale-or-remove
-//! check, atomic bind, disarm at graceful shutdown). The committed path itself comes from
+//! Every export is `pub(crate)`. `App::run` wires every one (parent pre-check, stale-or-remove check,
+//! atomic bind, disarm at graceful shutdown). The committed path itself comes from
 //! [`super::resolve`].
 
 use std::fmt;
@@ -31,13 +31,13 @@ use super::resolve::{SocketCandidate, SocketSource};
 /// on every supported deployment.
 const SOCKET_MODE: u32 = 0o600;
 
-/// Bind a [`UnixListener`] at `path` with `0o600` permissions using atomic-rename: bind to a
-/// private staging name, chmod, then POSIX-`rename(2)` onto the well-known path.
+/// Bind a [`UnixListener`] at `path` with `0o600` permissions using atomic-rename: bind to a private
+/// staging name, chmod, then POSIX-`rename(2)` onto the well-known path.
 ///
 /// The well-known name is never observable at a more-permissive mode — the operator-facing path
-/// appears only after the chmod has already run on the staging entry. A guard wraps the staging
-/// file so any post-bind failure (chmod, rename) cleans up the leaked entry rather than leaving it
-/// behind for the next boot to inherit.
+/// appears only after the chmod has already run on the staging entry. A guard wraps the staging file
+/// so any post-bind failure (chmod, rename) cleans up the leaked entry rather than leaving it behind
+/// for the next boot to inherit.
 ///
 /// On success, the returned [`UnlinkGuard`] removes the bound socket from disk when dropped (panic)
 /// or when [`UnlinkGuard::unlink_now`] is called as part of graceful shutdown.
@@ -96,8 +96,8 @@ pub(crate) const STAGING_SUFFIX_MAX: usize = STAGING_PREFIX.len() + 10;
 
 /// Construct the staging sibling name for `path`, suffixed with the current PID. Built by appending
 /// to the path's `OsString` (not `Path::with_extension`, which would strip the `.sock` segment and
-/// produce `specter.tmp.NNN` — losing the kind hint operators rely on when inspecting
-/// `lsof`/`fuser` output during incident triage).
+/// produce `specter.tmp.NNN` — losing the kind hint operators rely on when inspecting `lsof`/`fuser`
+/// output during incident triage).
 ///
 /// The PID suffix is a noise reducer, not a uniqueness guarantee: the pre-bind `fs::remove_file` is
 /// the idempotency floor.
@@ -183,8 +183,8 @@ impl std::error::Error for BindFailure {}
 /// TOCTOU is **error-quality only**: a parent that vanishes between this check and the bind still
 /// fails safely at `bind`, only without the tailored advice. Any stat error other than `NotFound`
 /// (e.g. `EACCES` on an ancestor) is left for the real `bind` to surface — pre-classifying every
-/// errno here would duplicate the kernel's reporting. A path with no parent component (the
-/// filesystem root) has nothing to pre-check and passes through.
+/// errno here would duplicate the kernel's reporting. A path with no parent component (the filesystem
+/// root) has nothing to pre-check and passes through.
 pub(crate) fn precheck_bind_parent(candidate: &SocketCandidate) -> Result<(), BindFailure> {
     let Some(parent) = candidate.path.parent() else {
         return Ok(());
@@ -212,8 +212,8 @@ pub(crate) fn precheck_bind_parent(candidate: &SocketCandidate) -> Result<(), Bi
 ///    Checking the inode type up front keeps the behaviour uniform without a `cfg`-gated errno table.
 /// 2. **Connect.** Only reached when the inode is in fact a socket. `Ok` ⇒ live peer; abort boot
 ///    with [`ErrorKind::AddrInUse`]. Any connect error funnels into a final unlink attempt; the
-///    unlink propagates its own error, so a permission-denied unlink surfaces with the precise
-///    reason an operator needs to triage.
+///    unlink propagates its own error, so a permission-denied unlink surfaces with the precise reason
+///    an operator needs to triage.
 ///
 /// **No connect timeout.** `UnixStream::connect_timeout` does not exist in stable `std`; adding
 /// `socket2` / `nix` purely to set `SO_SNDTIMEO` before a single-shot probe over-engineers a path
@@ -245,9 +245,9 @@ pub(crate) fn check_stale_or_remove(path: &Path) -> io::Result<()> {
     }
 }
 
-/// Drop-guard for the bound socket file. Removes the socket from disk both on graceful shutdown
-/// (via [`Self::unlink_now`]) and on panic (via [`Drop`]). The guard owns the unlink responsibility
-/// for the full lifetime of the bound listener.
+/// Drop-guard for the bound socket file. Removes the socket from disk both on graceful shutdown (via
+/// [`Self::unlink_now`]) and on panic (via [`Drop`]). The guard owns the unlink responsibility for
+/// the full lifetime of the bound listener.
 ///
 /// Two states:
 ///
@@ -258,8 +258,8 @@ pub(crate) fn check_stale_or_remove(path: &Path) -> io::Result<()> {
 ///   synchronously, and then drops the internal `path` to suppress a second unlink in `Drop`.
 ///
 /// `#[must_use]` lints away the common mistake of constructing and immediately dropping the guard
-/// at a site that didn't intend shutdown ordering, which would silently move the unlink earlier
-/// than the IPC server thread's join.
+/// at a site that didn't intend shutdown ordering, which would silently move the unlink earlier than
+/// the IPC server thread's join.
 #[derive(Debug)]
 #[must_use = "UnlinkGuard removes the socket on drop; bind it to the IPC server's lifetime"]
 pub(crate) struct UnlinkGuard {
@@ -268,8 +268,8 @@ pub(crate) struct UnlinkGuard {
 
 impl UnlinkGuard {
     /// Wrap `path` in a fresh armed guard. Private to this module — the only producer is
-    /// [`bind_socket_atomic`], so the guard's path is always one this crate has already
-    /// successfully rename'd to.
+    /// [`bind_socket_atomic`], so the guard's path is always one this crate has already successfully
+    /// rename'd to.
     const fn new(path: PathBuf) -> Self {
         Self { path }
     }
@@ -279,11 +279,11 @@ impl UnlinkGuard {
     ///
     /// Sole call site is [`crate::app::run`]'s shutdown sequence, after the IPC server thread has
     /// been joined — no surviving thread holds the listener fd, so removing the socket file will
-    /// not break in-flight per-conn streams (each carries its own fd referring to the existing
-    /// inode; the inode persists until every fd closes).
+    /// not break in-flight per-conn streams (each carries its own fd referring to the existing inode;
+    /// the inode persists until every fd closes).
     pub(crate) fn unlink_now(mut self) {
-        // Take the path out so `Drop` (still scheduled on this by-value `self`) sees an empty
-        // string and skips its own remove_file call.
+        // Take the path out so `Drop` (still scheduled on this by-value `self`) sees an empty string
+        // and skips its own remove_file call.
         let path = std::mem::take(&mut self.path);
         Self::remove_quietly(&path);
     }
@@ -379,9 +379,9 @@ mod tests {
 
     /// `check_stale_or_remove` removes an orphan file at the socket path (the easier-to-construct
     /// stand-in for a stale unix socket — both surface as `ConnectionRefused` on connect), and the
-    /// second call returns `Ok` even though the file is already gone. Idempotency is the
-    /// load-bearing property: a daemon restarting against a path it just cleaned cannot fail on the
-    /// stale check just because the recovery worked.
+    /// second call returns `Ok` even though the file is already gone. Idempotency is the load-bearing
+    /// property: a daemon restarting against a path it just cleaned cannot fail on the stale check
+    /// just because the recovery worked.
     #[test]
     fn check_stale_or_remove_unlinks_orphan_file() {
         let tmp = tempfile::TempDir::new().unwrap();

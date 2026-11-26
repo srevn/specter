@@ -1,13 +1,13 @@
 //! Path-pattern parsing for dynamic watches.
 //!
-//! `PatternSpec` carries the canonical source string alongside its decomposed
-//! `Vec<PatternComponent>` and the `literal_prefix_len` — the number of leading consecutive
-//! `Literal` segments (root included). For a parsed spec these two fields are a deterministic
-//! function of `source`, so equality routes through `source` alone. [`PatternSpec::reanchor`]
-//! re-sites the literal prefix onto a filesystem-resolved path and rebuilds `source` from the
-//! splice; the equality/identity contract survives (the decomposition stays consistent with the
-//! rebuilt `source`), but the round-trip does not — a re-anchored `source` is display / identity
-//! only and must never be fed back to [`PatternSpec::parse`].
+//! `PatternSpec` carries the canonical source string alongside its decomposed `Vec<PatternComponent>`
+//! and the `literal_prefix_len` — the number of leading consecutive `Literal` segments (root
+//! included). For a parsed spec these two fields are a deterministic function of `source`, so
+//! equality routes through `source` alone. [`PatternSpec::reanchor`] re-sites the literal prefix
+//! onto a filesystem-resolved path and rebuilds `source` from the splice; the equality/identity
+//! contract survives (the decomposition stays consistent with the rebuilt `source`), but the
+//! round-trip does not — a re-anchored `source` is display / identity only and must never be fed
+//! back to [`PatternSpec::parse`].
 //!
 //! The parser screens a few invariants beyond glob compilation:
 //! - **Absolute only.** Patterns must begin with `/`.
@@ -29,19 +29,19 @@ use std::path::{Component, Path, PathBuf};
 /// Equality is over `source` only, and `source` is the sole axis the Profile-identity hash folds
 /// (`compute_config_hash`'s `MatchChain` arm). For a parsed spec the `components` and
 /// `literal_prefix_len` fields are a deterministic function of `source` (the parser is pure), so
-/// two `PatternSpec`s with equal `source` have byte-equal decompositions. [`Self::reanchor`]
-/// rebuilds `source` from a resolved prefix while keeping the decomposition consistent with it, so
-/// the equality/identity contract holds across the whole (uniformly re-anchored) production
-/// population; what it gives up is the round-trip — a re-anchored `source` is display / identity
-/// only and must never be fed back through [`Self::parse`] (see the method's contract).
+/// two `PatternSpec`s with equal `source` have byte-equal decompositions. [`Self::reanchor`] rebuilds
+/// `source` from a resolved prefix while keeping the decomposition consistent with it, so the
+/// equality/identity contract holds across the whole (uniformly re-anchored) production population;
+/// what it gives up is the round-trip — a re-anchored `source` is display / identity only and must
+/// never be fed back through [`Self::parse`] (see the method's contract).
 #[derive(Clone, Debug)]
 pub struct PatternSpec {
     source: CompactString,
     components: Vec<PatternComponent>,
-    /// Count of leading consecutive `Literal` components, root included. Always `>= 1` (the
-    /// synthetic root `/` is `Literal`) and strictly `<` the total component count: [`Self::parse`]
-    /// rejects pure-literal sources with [`PatternError::NotDynamic`], so every constructed
-    /// `PatternSpec` has at least one non-`Literal` component.
+    /// Count of leading consecutive `Literal` components, root included. Always `>= 1` (the synthetic
+    /// root `/` is `Literal`) and strictly `<` the total component count: [`Self::parse`] rejects
+    /// pure-literal sources with [`PatternError::NotDynamic`], so every constructed `PatternSpec`
+    /// has at least one non-`Literal` component.
     literal_prefix_len: usize,
 }
 
@@ -76,8 +76,8 @@ pub enum PatternError {
     WindowsPrefix,
     /// Source is pure-literal — none of the `*`, `?`, `[`, `{` discriminators — so it is a static
     /// anchor, not a dynamic pattern. Callers route the static/dynamic split on
-    /// [`PatternSpec::is_dynamic`] upstream, so this is a defense-in-depth signal for direct
-    /// callers that bypass that dispatch; production never reaches it.
+    /// [`PatternSpec::is_dynamic`] upstream, so this is a defense-in-depth signal for direct callers
+    /// that bypass that dispatch; production never reaches it.
     NotDynamic,
 }
 
@@ -132,10 +132,10 @@ impl From<ConfigError> for PatternError {
 impl PatternSpec {
     /// The canonical source string — the sole identity key (equality, and the `MatchChain` arm of
     /// `compute_config_hash`). Display / identity only: never feed it back to [`Self::parse`]. A
-    /// [`Self::reanchor`]ed source can carry a glob metacharacter inside a now-literal prefix
-    /// segment (a symlink target named `weird[x]`), which `parse` would misclassify as a `Glob` and
-    /// so corrupt `literal_prefix_len`. The one production `parse` caller is the config validator
-    /// on raw user input — keep it the only one.
+    /// [`Self::reanchor`]ed source can carry a glob metacharacter inside a now-literal prefix segment
+    /// (a symlink target named `weird[x]`), which `parse` would misclassify as a `Glob` and so
+    /// corrupt `literal_prefix_len`. The one production `parse` caller is the config validator on
+    /// raw user input — keep it the only one.
     #[must_use]
     pub fn source(&self) -> &str {
         &self.source
@@ -149,9 +149,9 @@ impl PatternSpec {
     /// the literal prefix through `canonicalize_lenient` — the same symlink resolution every static
     /// path gets — and hands the resolved path here, where each prefix component is replaced by its
     /// canonical segment. Matching is positional and consults only the tail ([`Self::matches_at`]
-    /// indexes `literal_prefix_len + depth − 1`), so re-siting the anchor cannot change which
-    /// termini match; [`Self::literal_prefix_path`] on the result reconstructs `canonical_prefix`
-    /// exactly, so the discovery anchor *is* the resolved path with no second source.
+    /// indexes `literal_prefix_len + depth − 1`), so re-siting the anchor cannot change which termini
+    /// match; [`Self::literal_prefix_path`] on the result reconstructs `canonical_prefix` exactly,
+    /// so the discovery anchor *is* the resolved path with no second source.
     ///
     /// Each canonical segment is spliced as a [`PatternComponent::Literal`] **unconditionally**,
     /// never re-classified through [`Self::is_dynamic`]: a symlink target may legitimately contain
@@ -222,9 +222,9 @@ impl PatternSpec {
 
     /// The literal-prefix anchor path: `/` plus the leading consecutive `Literal` segments — where
     /// a template for this pattern attaches. Total by the parse invariant
-    /// (`components[0..literal_prefix_len]` are all `Literal`, root included), so the fold is
-    /// always absolute; a `Glob` inside the prefix is an invariant breach (`debug_assert!`),
-    /// skipped rather than rendered in release.
+    /// (`components[0..literal_prefix_len]` are all `Literal`, root included), so the fold is always
+    /// absolute; a `Glob` inside the prefix is an invariant breach (`debug_assert!`), skipped rather
+    /// than rendered in release.
     #[must_use]
     pub fn literal_prefix_path(&self) -> PathBuf {
         let mut p = PathBuf::new();
@@ -362,8 +362,8 @@ impl Eq for PatternSpec {}
 mod tests {
     use super::{PatternComponent, PatternError, PatternSpec};
 
-    /// `is_dynamic` flips `true` for each of the four discriminator chars and stays `false` for
-    /// plain absolute paths.
+    /// `is_dynamic` flips `true` for each of the four discriminator chars and stays `false` for plain
+    /// absolute paths.
     #[test]
     fn is_dynamic_flips_on_each_glob_discriminator() {
         assert!(PatternSpec::is_dynamic("/srv/*/data"));
@@ -560,9 +560,9 @@ mod tests {
         assert_eq!(root.literal_prefix_path(), std::path::PathBuf::from("/"));
     }
 
-    /// `terminus_depth` is the chain length below the literal-prefix anchor — pinned across the
-    /// three prefix shapes (mixed literal/glob, root-anchored `/*`, consecutive globs) so the `len
-    /// − lpl` arithmetic can't silently drift against the parser's decomposition.
+    /// `terminus_depth` is the chain length below the literal-prefix anchor — pinned across the three
+    /// prefix shapes (mixed literal/glob, root-anchored `/*`, consecutive globs) so the `len − lpl`
+    /// arithmetic can't silently drift against the parser's decomposition.
     #[test]
     fn terminus_depth_measures_chain_below_literal_prefix() {
         let mixed = PatternSpec::parse("/srv/staging/*/data/*/log").expect("valid pattern");
@@ -592,8 +592,8 @@ mod tests {
         assert!(!plain.matches_at(2, "database"));
     }
 
-    /// The `Glob` arm runs the compiled matcher against the bare segment — one pin per
-    /// discriminator (`*`, `?`, `[a-z]`, `{a,b}`; the brace alternation stays one component).
+    /// The `Glob` arm runs the compiled matcher against the bare segment — one pin per discriminator
+    /// (`*`, `?`, `[a-z]`, `{a,b}`; the brace alternation stays one component).
     #[test]
     fn matches_at_glob_matches_per_discriminator() {
         let star = PatternSpec::parse("/srv/app*").expect("valid pattern");
@@ -614,8 +614,8 @@ mod tests {
         assert!(!brace.matches_at(1, "db"));
     }
 
-    /// `matches_at` is total over depth: `0` (the anchor — not a chain position) and anything
-    /// beyond the terminus return `false` rather than panicking on index arithmetic.
+    /// `matches_at` is total over depth: `0` (the anchor — not a chain position) and anything beyond
+    /// the terminus return `false` rather than panicking on index arithmetic.
     #[test]
     fn matches_at_out_of_range_depths_are_false() {
         let spec = PatternSpec::parse("/srv/*/log").expect("valid pattern");
@@ -626,8 +626,8 @@ mod tests {
     }
 
     /// `Display` produces human-readable, operator-friendly messages. The config validator routes
-    /// parse errors through `IssueKind:: InvalidPattern`; the rendered detail surfaces these
-    /// strings, so a regression in wording would silently degrade error UX.
+    /// parse errors through `IssueKind:: InvalidPattern`; the rendered detail surfaces these strings,
+    /// so a regression in wording would silently degrade error UX.
     #[test]
     fn pattern_error_display_is_human_readable() {
         for (err, needle) in [
@@ -672,8 +672,8 @@ mod tests {
         assert!(re.matches_at(1, "anything")); // depth-1 glob still matches any segment
         assert!(re.matches_at(2, "log"));
         assert!(!re.matches_at(2, "other"));
-        // The decomposition is consistent with the rebuilt source: prefix all-`Literal`, tail
-        // starts at the glob.
+        // The decomposition is consistent with the rebuilt source: prefix all-`Literal`, tail starts
+        // at the glob.
         assert!(matches!(
             re.components[1],
             PatternComponent::Literal(ref s) if s == "private",

@@ -24,8 +24,8 @@
 //!     - `on_ok` → then-branch's first op when non-empty; otherwise the post-conditional slot
 //!       (`after`).
 //!     - `on_failed` → else-branch's first op when non-empty; otherwise `after`. When `after`
-//!       resolves to [`BranchTarget::Escape`], the "branch, not guard" outcome elision is
-//!       preserved: a Failed predicate with no else terminates Ok rather than propagating Failed.
+//!       resolves to [`BranchTarget::Escape`], the "branch, not guard" outcome elision is preserved:
+//!       a Failed predicate with no else terminates Ok rather than propagating Failed.
 //!
 //!   Then-body and else-body tails are patched with the post-conditional `after` slot the same way
 //!   sequence tails are.
@@ -55,8 +55,8 @@ pub(crate) enum Action {
     ///
     /// `stages: Arc<[ExecAction]>` (not `Box<[…]>`) so lowering can `Arc::clone` it into
     /// [`MultiStage::new`], which reifies the validated `stages.len() >= 2` guarantee into
-    /// [`SpawnBody::Pipe`] without re-allocating the leaf vector (`MultiStage` is a zero-cost
-    /// wrapper over the shared `Arc`). Validation rejects 0/1-stage pipes upstream as
+    /// [`SpawnBody::Pipe`] without re-allocating the leaf vector (`MultiStage` is a zero-cost wrapper
+    /// over the shared `Arc`). Validation rejects 0/1-stage pipes upstream as
     /// [`crate::error::IssueKind::EmptyPipe`] / [`crate::error::IssueKind::SingleStagePipe`] — one
     /// command uses top-level `exec`.
     Pipe { stages: Arc<[ExecAction]> },
@@ -81,8 +81,8 @@ pub(crate) enum Action {
 }
 
 /// One unpatched edge from a lowered op. Returned by [`lower_action`] and propagated up to the
-/// enclosing block, which patches each tail with the slot where execution should continue after
-/// this body.
+/// enclosing block, which patches each tail with the slot where execution should continue after this
+/// body.
 ///
 /// The `edge` discriminates the two flavours: a no-else conditional's pred carries its tail on
 /// `on_failed` (Failed predicate falls through); every other case has its tail on `on_ok`.
@@ -112,9 +112,9 @@ impl Tail {
 /// same allocation that the engine's `Sub.program` and every emitted `Effect.program` references —
 /// one shared CFG-shaped op program per validated Sub.
 ///
-/// Returns [`ProgramError`] on builder-hygiene violations (unreachable from a correct lowering
-/// pass); the caller maps these to validation issues so an internal bug surfaces as a config-load
-/// error rather than a panic.
+/// Returns [`ProgramError`] on builder-hygiene violations (unreachable from a correct lowering pass);
+/// the caller maps these to validation issues so an internal bug surfaces as a config-load error
+/// rather than a panic.
 pub(crate) fn lower_to_program(tree: &[Action]) -> Result<Arc<ActionProgram>, ProgramError> {
     let mut b = ProgramBuilder::new();
     let top_tails = lower_block(tree, &mut b)?;
@@ -129,8 +129,8 @@ pub(crate) fn lower_to_program(tree: &[Action]) -> Result<Arc<ActionProgram>, Pr
 /// last action that need to be patched with "where execution continues after this block."
 ///
 /// For each non-last action, the tails are patched inline to point at the next action's first op
-/// slot — known at iteration end via [`ProgramBuilder::continue_to_next`] (the next iteration's
-/// first emit fills the deferred slot).
+/// slot — known at iteration end via [`ProgramBuilder::continue_to_next`] (the next iteration's first
+/// emit fills the deferred slot).
 fn lower_block(actions: &[Action], b: &mut ProgramBuilder) -> Result<Vec<Tail>, ProgramError> {
     let n = actions.len();
     let mut returned_tails: Vec<Tail> = Vec::new();
@@ -178,8 +178,8 @@ fn lower_action(action: &Action, b: &mut ProgramBuilder) -> Result<Vec<Tail>, Pr
             let pred = b.emit(SpawnBody::Exec(when.clone()));
             let mut tails: Vec<Tail> = Vec::new();
 
-            // pred.on_ok: chain to then's first slot, or surface as a tail for empty-then (the
-            // caller patches it with `after`).
+            // pred.on_ok: chain to then's first slot, or surface as a tail for empty-then (the caller
+            // patches it with `after`).
             if then.is_empty() {
                 tails.push(Tail::on_ok(pred));
             } else {
@@ -189,8 +189,8 @@ fn lower_action(action: &Action, b: &mut ProgramBuilder) -> Result<Vec<Tail>, Pr
             }
 
             // pred.on_failed: chain to else's first slot when present and non-empty; otherwise
-            // surface as a tail (no-else fall-through → `after`, which preserves "branch, not
-            // guard" outcome elision when `after` resolves to `Escape`).
+            // surface as a tail (no-else fall-through → `after`, which preserves "branch, not guard"
+            // outcome elision when `after` resolves to `Escape`).
             match otherwise {
                 Some(body) if !body.is_empty() => {
                     let else_first = b.continue_to_next();
@@ -228,8 +228,8 @@ mod tests {
         ExecAction::new([ArgTemplate::new([ArgPart::literal(literal)])], None)
     }
 
-    /// Build a `Continue(idx)` for assertion ergonomics. The `BranchIndex::new` constructor is
-    /// sealed to `program::*`, so test assertions reach for the [`ProgramOp`]'s actual edge enum.
+    /// Build a `Continue(idx)` for assertion ergonomics. The `BranchIndex::new` constructor is sealed
+    /// to `program::*`, so test assertions reach for the [`ProgramOp`]'s actual edge enum.
     fn ops(program: &Arc<ActionProgram>) -> &[ProgramOp] {
         program.ops()
     }
@@ -329,8 +329,8 @@ mod tests {
     }
 
     /// Conditional with no else: predicate's on_failed = Escape ("branch, not guard" outcome
-    /// elision); on_ok chains into then-body, whose tail escapes. At top level there's no
-    /// propagation of predicate Failed.
+    /// elision); on_ok chains into then-body, whose tail escapes. At top level there's no propagation
+    /// of predicate Failed.
     #[test]
     fn conditional_no_else_predicate_failed_escapes() {
         let tree = [Action::Conditional {
@@ -396,9 +396,9 @@ mod tests {
         assert_eq!(ops(&program)[1].on_failed(), BranchTarget::Terminate);
     }
 
-    /// `Some(empty)` else is shape-equivalent to `None`: lowering emits pred.on_failed = Escape
-    /// (the no-else fall-through). Validation rejects this shape upstream (EmptyConditional fires
-    /// for then=[]+else=[]); pinning the lowering's response keeps the IR well-formed even if the
+    /// `Some(empty)` else is shape-equivalent to `None`: lowering emits pred.on_failed = Escape (the
+    /// no-else fall-through). Validation rejects this shape upstream (EmptyConditional fires for
+    /// then=[]+else=[]); pinning the lowering's response keeps the IR well-formed even if the
     /// validator's check is bypassed.
     #[test]
     fn conditional_some_empty_else_falls_through_like_none() {
@@ -414,8 +414,8 @@ mod tests {
     }
 
     /// Nested conditional in the then-branch produces 5 ops with the CFG-shaped IR (no intermediate
-    /// Jump opcodes needed). Outer predicate routes Ok→inner-pred, Failed→outer-else. Inner
-    /// predicate routes Ok→inner-then, Failed→inner-else. All body tails escape at the top level.
+    /// Jump opcodes needed). Outer predicate routes Ok→inner-pred, Failed→outer-else. Inner predicate
+    /// routes Ok→inner-then, Failed→inner-else. All body tails escape at the top level.
     #[test]
     fn nested_conditional_in_then_lowers_to_five_ops() {
         let tree = [Action::Conditional {
@@ -479,8 +479,8 @@ mod tests {
     }
 
     /// Empty surface trees lower to a [`ProgramError::EmptyProgram`]. The `validate_actions` entry
-    /// point rejects the empty case before calling `lower_to_program`, so this is purely a
-    /// defensive contract test for the lowering primitive.
+    /// point rejects the empty case before calling `lower_to_program`, so this is purely a defensive
+    /// contract test for the lowering primitive.
     #[test]
     fn empty_tree_returns_empty_program_error() {
         let err = lower_to_program(&[]).expect_err("empty tree must error");

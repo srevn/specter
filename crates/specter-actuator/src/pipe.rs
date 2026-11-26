@@ -1,12 +1,12 @@
-//! Shared pipe-spawn helpers used by both the production [`OsSpawner`] and the `MockSpawner`
-//! testkit. The two types here are the "aggregating" side of the pipe machinery — they coordinate
-//! per-stage outcomes (waiter) and per-stage shutdown signals (signaler) into a single
-//! `ChildWaiter` / `ChildSignaler` pair the controller can reason about uniformly.
+//! Shared pipe-spawn helpers used by both the production [`OsSpawner`] and the `MockSpawner` testkit.
+//! The two types here are the "aggregating" side of the pipe machinery — they coordinate per-stage
+//! outcomes (waiter) and per-stage shutdown signals (signaler) into a single `ChildWaiter` /
+//! `ChildSignaler` pair the controller can reason about uniformly.
 //!
 //! Lives outside of `os.rs` so `MockSpawner` can construct pipe handles against its own per-stage
-//! mock signalers/waiters without re-implementing the aggregation rules. The shapes ARE the
-//! contract — `Spawner::spawn_pipe`'s pipefail-on semantics and shutdown-fan-out behaviour both
-//! live in this module.
+//! mock signalers/waiters without re-implementing the aggregation rules. The shapes ARE the contract
+//! — `Spawner::spawn_pipe`'s pipefail-on semantics and shutdown-fan-out behaviour both live in this
+//! module.
 //!
 //! [`OsSpawner`]: crate::OsSpawner
 
@@ -43,9 +43,9 @@ impl CombinedSignaler {
 }
 
 /// Fan a single signal call out to every stage, log every error, and return the first non-`Ok` (if
-/// any) as the aggregated result. Used by [`CombinedSignaler`]'s three methods — the only thing
-/// that varies is the per-stage method invoked, so the fan-out + log-then-retain-first shape lives
-/// in one place.
+/// any) as the aggregated result. Used by [`CombinedSignaler`]'s three methods — the only thing that
+/// varies is the per-stage method invoked, so the fan-out + log-then-retain-first shape lives in
+/// one place.
 fn fan_out<F>(
     stages: &[Arc<dyn ChildSignaler>],
     call_kind: &'static str,
@@ -86,17 +86,17 @@ impl ChildSignaler for CombinedSignaler {
 
     fn is_dead(&self) -> bool {
         // The combined signaler is "dead" iff every stage is dead. Per-step timer threads address
-        // individual stages via `Arc<dyn>` handles; this aggregate predicate is for shutdown
-        // plumbing that wants a one-shot "is this pipe done" probe.
+        // individual stages via `Arc<dyn>` handles; this aggregate predicate is for shutdown plumbing
+        // that wants a one-shot "is this pipe done" probe.
         self.stages.iter().all(|s| s.is_dead())
     }
 
     fn mark_dead(&self) {
         // Symmetric with `is_dead`: a pipe-level `mark_dead` publishes into every per-stage
-        // signaler's ratchet so the wrapper-layer backstop (`PipeWaiter::wait`'s outer
-        // `catch_unwind` in `wait_loop`) closes the PID-reuse window for the whole pipe with one
-        // call, even when no per-stage closure ran (i.e. the aggregating waiter itself panicked
-        // before spawning the per-stage threads). Idempotent against every per-stage writer.
+        // signaler's ratchet so the wrapper-layer backstop (`PipeWaiter::wait`'s outer `catch_unwind`
+        // in `wait_loop`) closes the PID-reuse window for the whole pipe with one call, even when
+        // no per-stage closure ran (i.e. the aggregating waiter itself panicked before spawning the
+        // per-stage threads). Idempotent against every per-stage writer.
         for s in self.stages.iter() {
             s.mark_dead();
         }
@@ -105,17 +105,17 @@ impl ChildSignaler for CombinedSignaler {
 
 /// Aggregating waiter for a pipe.
 ///
-/// On `wait`, spawns one OS thread per stage and watches every stage's waiter concurrently. The
-/// first stage that reports `Failed` triggers a SIGTERM cascade to every other still-alive stage,
-/// so a hung stage doesn't keep the pipe alive after another stage fails — the kernel's SIGPIPE
-/// chain handles the happy case, but a stage that's not reading from stdin (or that's blocked on
-/// something else) needs an explicit signal.
+/// On `wait`, spawns one OS thread per stage and watches every stage's waiter concurrently. The first
+/// stage that reports `Failed` triggers a SIGTERM cascade to every other still-alive stage, so a
+/// hung stage doesn't keep the pipe alive after another stage fails — the kernel's SIGPIPE chain
+/// handles the happy case, but a stage that's not reading from stdin (or that's blocked on something
+/// else) needs an explicit signal.
 ///
 /// **Why parallel.** A sequential drain of N stage waiters head-of-lines on stage 0: if stage 0
-/// blocks indefinitely (infinite sleep, blocked read), the cascade can't fire until stage 0
-/// returns, and a downstream stage's per-step timeout can never propagate back. The parallel shape
-/// eliminates that hazard at the cost of one OS thread per stage; the per-stage timer threads (one
-/// per stage with a `timeout`) already grow O(N), so the thread budget is the same order.
+/// blocks indefinitely (infinite sleep, blocked read), the cascade can't fire until stage 0 returns,
+/// and a downstream stage's per-step timeout can never propagate back. The parallel shape eliminates
+/// that hazard at the cost of one OS thread per stage; the per-stage timer threads (one per stage
+/// with a `timeout`) already grow O(N), so the thread budget is the same order.
 ///
 /// Aggregated outcome:
 /// - **all Ok** ⇒ [`EffectOutcome::Ok`].
@@ -163,9 +163,9 @@ impl ChildWaiter for PipeWaiter {
         let n = signalers.len();
         debug_assert_eq!(waiters.len(), n);
 
-        // Empty pipes are rejected by the builder/lowering; guard anyway so a degenerate value
-        // (e.g. tests constructing `PipeWaiter::new` with zero stages) collapses to Ok rather than
-        // blocking on an empty channel below.
+        // Empty pipes are rejected by the builder/lowering; guard anyway so a degenerate value (e.g.
+        // tests constructing `PipeWaiter::new` with zero stages) collapses to Ok rather than blocking
+        // on an empty channel below.
         if n == 0 {
             return Ok(EffectOutcome::Ok);
         }
@@ -177,15 +177,15 @@ impl ChildWaiter for PipeWaiter {
 
         for (idx, w) in waiters.into_iter().enumerate() {
             if spawn_failed.is_some() {
-                // After the first spawn failure we keep collecting remaining waiters so the
-                // recovery path can drain them synchronously (SIGKILL above makes wait fast).
+                // After the first spawn failure we keep collecting remaining waiters so the recovery
+                // path can drain them synchronously (SIGKILL above makes wait fast).
                 leftover.push(w);
                 continue;
             }
             let tx_stage = tx.clone();
             // Per-stage dead-ratchet backstop: pair the closure with its own stage signaler so the
-            // post-`catch_unwind` publish covers a panicking per-stage waiter impl that didn't
-            // reach its own write site. Idempotent against the production happy-path mark inside
+            // post-`catch_unwind` publish covers a panicking per-stage waiter impl that didn't reach
+            // its own write site. Idempotent against the production happy-path mark inside
             // `OsChildWaiter::wait` and against the outer `wait_loop` backstop (which fans out via
             // `CombinedSignaler::mark_dead`).
             let signaler_stage = Arc::clone(&signalers[idx]);
@@ -251,10 +251,10 @@ impl ChildWaiter for PipeWaiter {
 }
 
 /// Fan SIGTERM out to every stage other than `failed_idx` whose paired waiter hasn't yet returned.
-/// `is_dead` short-circuits already-reaped stages — without it we'd queue stale signals against
-/// pids that have already been recycled by the kernel. Per-stage failures are logged at
-/// `tracing::debug!` and otherwise collapsed — the cascade is best-effort and one stage's ESRCH
-/// should not stop the next stage from receiving its signal.
+/// `is_dead` short-circuits already-reaped stages — without it we'd queue stale signals against pids
+/// that have already been recycled by the kernel. Per-stage failures are logged at `tracing::debug!`
+/// and otherwise collapsed — the cascade is best-effort and one stage's ESRCH should not stop the
+/// next stage from receiving its signal.
 fn cascade_sigterm(signalers: &[Arc<dyn ChildSignaler>], failed_idx: usize) {
     for (s_idx, s) in signalers.iter().enumerate() {
         if s_idx == failed_idx {
@@ -271,9 +271,9 @@ fn cascade_sigterm(signalers: &[Arc<dyn ChildSignaler>], failed_idx: usize) {
 
 /// Aggregate stage-indexed reports into the pipe's [`EffectOutcome`].
 ///
-/// Iterates `0..n` (spawn order) so the outcome is independent of completion order: the last
-/// non-zero exit wins (pipefail-on) and the first observed signal wins. A missing report (`None` —
-/// the wait-thread panicked before send) folds as [`Termination::Internal`]. Total: every stage
+/// Iterates `0..n` (spawn order) so the outcome is independent of completion order: the last non-zero
+/// exit wins (pipefail-on) and the first observed signal wins. A missing report (`None` — the
+/// wait-thread panicked before send) folds as [`Termination::Internal`]. Total: every stage
 /// `Termination` projects to an `(exit, signal)` pair, and the aggregate recomposes from that pair
 /// with no unreachable arm.
 fn fold_reports(reports: Vec<Option<EffectOutcome>>) -> EffectOutcome {
@@ -342,8 +342,8 @@ fn recover_from_spawn_failure(
         "pipe stage wait-thread spawn failed; SIGKILL + sync reap orphan",
     );
 
-    // SIGKILL every stage that's still alive. Already-reaped stages (their waiter set the dead
-    // flag) short-circuit. Errors are logged inside the signaler impls.
+    // SIGKILL every stage that's still alive. Already-reaped stages (their waiter set the dead flag)
+    // short-circuit. Errors are logged inside the signaler impls.
     for (s_idx, s) in signalers.iter().enumerate() {
         if s.is_dead() {
             continue;
@@ -353,8 +353,8 @@ fn recover_from_spawn_failure(
         }
     }
 
-    // Reap the orphan whose waiter was lost — without this the kernel keeps the zombie until
-    // process exit.
+    // Reap the orphan whose waiter was lost — without this the kernel keeps the zombie until process
+    // exit.
     if let Err(e) = signalers[failed_idx].reap_blocking() {
         tracing::warn!(
             stage = failed_idx,
@@ -397,8 +397,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     /// Per-stage probe: counts every signal call so the cascade assertions can pin which stages
-    /// received SIGTERM. Holds a [`DeadFlag`] paired with a [`StaticWaiter`] (or
-    /// [`BlockingWaiter`]) so the test fixture mirrors the production pairing shape exactly.
+    /// received SIGTERM. Holds a [`DeadFlag`] paired with a [`StaticWaiter`] (or [`BlockingWaiter`])
+    /// so the test fixture mirrors the production pairing shape exactly.
     struct Probe {
         dead: DeadFlag,
         term: AtomicU32,
@@ -476,9 +476,9 @@ mod tests {
     }
 
     impl BlockingProbe {
-        /// Build a (probe, waiter) pair. The waiter consumes the receiver; the probe owns the
-        /// sender so signal methods can unblock the paired waiter. The waiter returns
-        /// `return_outcome` after unblock.
+        /// Build a (probe, waiter) pair. The waiter consumes the receiver; the probe owns the sender
+        /// so signal methods can unblock the paired waiter. The waiter returns `return_outcome` after
+        /// unblock.
         fn new(return_outcome: EffectOutcome) -> (Arc<Self>, BlockingWaiter) {
             // bounded(1) + try_send: the unblock is one-shot. If multiple signal calls land before
             // the waiter consumes, the second send drops silently — the receiver only needs one.
@@ -616,8 +616,8 @@ mod tests {
             }
             other => panic!("expected Failed(PipeMixed); got {other:?}"),
         }
-        // Stage 0 does NOT receive a cascade SIGTERM (it's the failing stage, already reaped).
-        // Stages 1 and 2 do.
+        // Stage 0 does NOT receive a cascade SIGTERM (it's the failing stage, already reaped). Stages
+        // 1 and 2 do.
         assert_eq!(p0.term.load(Ordering::SeqCst), 0, "stage 0 not cascaded");
         assert_eq!(p1.term.load(Ordering::SeqCst), 1, "stage 1 cascaded");
         assert_eq!(p2.term.load(Ordering::SeqCst), 1, "stage 2 cascaded");
@@ -677,10 +677,10 @@ mod tests {
         );
     }
 
-    /// Stage 0's waiter blocks indefinitely (modelled as [`BlockingWaiter`]); stage 1 reports
-    /// Failed promptly. The parallel waiter design must let stage 1's report fire the cascade
-    /// SIGTERM, which unblocks stage 0's waiter via its [`BlockingProbe`]'s `signal_term`. A
-    /// sequential waiter would head-of-line block on stage 0 and never see stage 1's report.
+    /// Stage 0's waiter blocks indefinitely (modelled as [`BlockingWaiter`]); stage 1 reports Failed
+    /// promptly. The parallel waiter design must let stage 1's report fire the cascade SIGTERM, which
+    /// unblocks stage 0's waiter via its [`BlockingProbe`]'s `signal_term`. A sequential waiter would
+    /// head-of-line block on stage 0 and never see stage 1's report.
     ///
     /// The timing bound (under 5 seconds) is a generous proxy: a deadlock manifests as the test
     /// hanging until nextest's per-test timeout fires.
@@ -847,9 +847,9 @@ mod tests {
         assert!(p2.is_dead());
     }
 
-    /// Single-use waiter that panics inside `wait()`. Models a custom [`ChildWaiter`] impl that
-    /// never reaches its own happy-path `mark_dead` write — the per-stage `catch_unwind` backstop
-    /// inside [`PipeWaiter::wait`] is the only writer that can flip the paired signaler's flag.
+    /// Single-use waiter that panics inside `wait()`. Models a custom [`ChildWaiter`] impl that never
+    /// reaches its own happy-path `mark_dead` write — the per-stage `catch_unwind` backstop inside
+    /// [`PipeWaiter::wait`] is the only writer that can flip the paired signaler's flag.
     struct PanickingWaiter;
 
     impl ChildWaiter for PanickingWaiter {
@@ -859,9 +859,9 @@ mod tests {
     }
 
     /// N=3 pipe with stage 1's waiter panicking. The per-stage `catch_unwind` inside
-    /// [`PipeWaiter::wait`] must publish `mark_dead` on stage 1's signaler even though the
-    /// panicking waiter never reached its own self-mark. Without the backstop a racing controller
-    /// signal could land on a recycled PID.
+    /// [`PipeWaiter::wait`] must publish `mark_dead` on stage 1's signaler even though the panicking
+    /// waiter never reached its own self-mark. Without the backstop a racing controller signal could
+    /// land on a recycled PID.
     #[test]
     fn pipe_per_stage_marks_dead_on_panicking_stage_waiter() {
         let p0 = Arc::new(Probe::new());

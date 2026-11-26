@@ -19,8 +19,8 @@
 //!    per-step resolves would re-pay that cost. The snapshot is read with a `BTreeMap::get` plus a
 //!    string borrow — no allocation on the lookup path.
 //!
-//! Specter never `setenv`s internally, so the snapshot doesn't go stale under our own code. A
-//! future SIGHUP-reload pipeline would capture a fresh `EnvSnapshot` and replace
+//! Specter never `setenv`s internally, so the snapshot doesn't go stale under our own code. A future
+//! SIGHUP-reload pipeline would capture a fresh `EnvSnapshot` and replace
 //! `ActuatorState.env_snapshot` from the controller thread; no swap point exists today, reload is
 //! v2 work.
 //!
@@ -69,8 +69,8 @@ impl EnvSnapshot {
     {
         let mut map = BTreeMap::new();
         for (k, v) in vars {
-            // Consume the key first; on success keep the owned `String` alive across the value
-            // check so a value-side drop still names the key.
+            // Consume the key first; on success keep the owned `String` alive across the value check
+            // so a value-side drop still names the key.
             let k_str = match k.into_string() {
                 Ok(s) => s,
                 Err(bad_key) => {

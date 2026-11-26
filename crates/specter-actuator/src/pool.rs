@@ -31,9 +31,9 @@ use std::time::{Duration, Instant};
 /// Production default for [`SubprocessActuator::new`] when the bin's `--concurrency` flag is unset:
 /// `2 × available_parallelism()`.
 ///
-/// Falls back to `4` if either query fails. The bin calls this and passes the [`NonZeroUsize`]
-/// result into [`SubprocessActuator::new`] directly — the `0`-as-sentinel pattern is typed away;
-/// everything below the constructor receives a [`NonZeroUsize`] and trusts it.
+/// Falls back to `4` if either query fails. The bin calls this and passes the [`NonZeroUsize`] result
+/// into [`SubprocessActuator::new`] directly — the `0`-as-sentinel pattern is typed away; everything
+/// below the constructor receives a [`NonZeroUsize`] and trusts it.
 #[must_use]
 pub fn default_concurrency() -> NonZeroUsize {
     let fallback = NonZeroUsize::new(4).expect("4 is non-zero");
@@ -70,8 +70,8 @@ pub struct RunWiring {
     /// Soft-shutdown pulse. Drained once at the start of the graceful stop arm (SIGTERM-then-wait
     /// fanout with the grace window).
     pub shutdown_rx: Receiver<()>,
-    /// Hard-shutdown pulse. Operator double-Ctrl-C: pre-empts the grace window and proceeds
-    /// directly to phase 3's SIGKILL fanout.
+    /// Hard-shutdown pulse. Operator double-Ctrl-C: pre-empts the grace window and proceeds directly
+    /// to phase 3's SIGKILL fanout.
     pub hard_shutdown_rx: Receiver<()>,
     /// Phase-3 fanout confirmation. The controller pulses once after SIGKILL fanout completes; the
     /// bin's hard-exit path waits on the paired receiver before `process::exit(130)` so the parent
@@ -84,10 +84,10 @@ pub struct RunWiring {
 /// One slot per in-flight `pool::state::RunningJob`: every wait thread sends exactly one
 /// [`EffectCompletion`] in its lifetime (`state::wait_loop` after `drop(permit)`), and the live
 /// wait-thread count is bounded by the permit cap. So a fully-saturated pool draining in lock-step
-/// never blocks a permit-released wait thread on `reap_tx.send` waiting for the controller to
-/// consume — backpressure becomes a single-slot blip only when the controller has fallen behind the
-/// spawn rate, and the bin's bounded(1024) `effects_rx` upstream sets the operator-visible
-/// backpressure ceiling anyway.
+/// never blocks a permit-released wait thread on `reap_tx.send` waiting for the controller to consume
+/// — backpressure becomes a single-slot blip only when the controller has fallen behind the spawn
+/// rate, and the bin's bounded(1024) `effects_rx` upstream sets the operator-visible backpressure
+/// ceiling anyway.
 ///
 /// Shared between [`SubprocessActuator::new`] and the test constructors so the cap stays
 /// single-source — the upper bound is a property of the wait-thread protocol, not the entry point.
@@ -113,8 +113,8 @@ impl SubprocessActuator {
     /// Captures three pieces of startup-immutable process state — the env snapshot, the temp
     /// directory, and the actuator pid — once here so the spawn path makes no `getenv` / `getpid`
     /// syscall per Effect. All three live on `ActuatorState` for the actuator's lifetime; the env
-    /// snapshot is shared by `Arc` across resolver calls, `temp_dir` is shared by `Arc<Path>`
-    /// across `DiffTmpFile::create` calls, and `actuator_pid` is a copy.
+    /// snapshot is shared by `Arc` across resolver calls, `temp_dir` is shared by `Arc<Path>` across
+    /// `DiffTmpFile::create` calls, and `actuator_pid` is a copy.
     #[must_use]
     pub fn new(concurrency: NonZeroUsize) -> Self {
         let (reap_tx, reap_rx) = reap_channel(concurrency);
@@ -181,14 +181,14 @@ impl SubprocessActuator {
     /// `wiring.shutdown_rx` signals; performs the SIGTERM → 5s grace → SIGKILL sequence on the way
     /// out. If `wiring.hard_shutdown_rx` fires (operator pressed Ctrl-C twice within
     /// `HARD_EXIT_WINDOW`), the grace is pre-empted: the loop breaks immediately, the SIGTERM phase
-    /// still runs (cheap; gives well-behaved children a chance to exit cleanly), then phase 2's
-    /// grace becomes a near-zero wait before phase 3 SIGKILLs everything still alive.
+    /// still runs (cheap; gives well-behaved children a chance to exit cleanly), then phase 2's grace
+    /// becomes a near-zero wait before phase 3 SIGKILLs everything still alive.
     ///
     /// `wiring.hard_shutdown_done_tx` is the back-channel to the signal thread: the actuator pulses
-    /// it once at the close of phase 3 SIGKILL fanout (trigger-agnostic — pulse fires whenever
-    /// phase 3 runs, regardless of soft/hard origin). On the hard-exit path the signal thread waits
-    /// for this pulse (or the sender-drop that follows thread exit) before `process::exit(130)`, so
-    /// the parent never aborts mid-fanout and leaves orphans on PID 1.
+    /// it once at the close of phase 3 SIGKILL fanout (trigger-agnostic — pulse fires whenever phase
+    /// 3 runs, regardless of soft/hard origin). On the hard-exit path the signal thread waits for
+    /// this pulse (or the sender-drop that follows thread exit) before `process::exit(130)`, so the
+    /// parent never aborts mid-fanout and leaves orphans on PID 1.
     ///
     /// `engine_in` is `&dyn` — the controller borrows the sink for the duration of [`Self::run`]
     /// without owning it. The closure surrounding the spawn site in the bin keeps the `Box<dyn
@@ -223,20 +223,20 @@ impl SubprocessActuator {
                         self.state.handle_submit(effect, spawner, &self.reap_tx, engine_in);
                     }
                     Ok(EffectOp::Cancel { profile }) => {
-                        // Engine-driven abandon: SIGTERM in-flight effects for `profile`, drop
-                        // queued work for the same profile. The wait threads still drive natural
-                        // reap → handle_reap → terminate_plan, which emits EffectComplete; the
-                        // engine routes that late completion to EffectCompleteOutsideAwaiting.
+                        // Engine-driven abandon: SIGTERM in-flight effects for `profile`, drop queued
+                        // work for the same profile. The wait threads still drive natural reap →
+                        // handle_reap → terminate_plan, which emits EffectComplete; the engine routes
+                        // that late completion to EffectCompleteOutsideAwaiting.
                         self.state.handle_cancel(profile);
                     }
                     Err(crossbeam::channel::RecvError) => {
                         // Bin closed `effects_tx` — the driver's `ActuatorIO` dropped. Distinct
                         // trigger from the `shutdown_rx` / `hard_shutdown_rx` arms below: those are
                         // operator-signal-driven and arrive AHEAD of the channel close; this arm
-                        // fires when the driver's shutdown path either bypassed the soft-pulse
-                        // (panic mid-`run`) or already drained the pulse before disconnect. Logged
-                        // at info so operators reading the tail can disambiguate the shutdown
-                        // trigger from the channel-close vs signal-pulse paths.
+                        // fires when the driver's shutdown path either bypassed the soft-pulse (panic
+                        // mid-`run`) or already drained the pulse before disconnect. Logged at info
+                        // so operators reading the tail can disambiguate the shutdown trigger from
+                        // the channel-close vs signal-pulse paths.
                         tracing::info!("effects_rx disconnected; entering shutdown");
                         break;
                     }
@@ -292,8 +292,8 @@ impl SubprocessActuator {
         }
         // Phase 3: SIGKILL stragglers, then pulse the back-channel. Trigger-agnostic: the pulse
         // semantics are "phase 3 ran", not "phase 3 ran because of hard". The signal thread only
-        // reads on the hard-exit path; a soft-shutdown pulse fills the bounded(1) slot, nobody
-        // drains it, no semantic impact.
+        // reads on the hard-exit path; a soft-shutdown pulse fills the bounded(1) slot, nobody drains
+        // it, no semantic impact.
         //
         // Pulse-before-phase-4: SIGKILL is uninterruptible, so the kernel will reap regardless of
         // whether the actuator finishes phase 4's reap drain. Waiting for phase 4 would bottleneck
@@ -310,9 +310,9 @@ impl SubprocessActuator {
             }
             let _ = hard_shutdown_done_tx.try_send(());
         }
-        // Phase 4: drain remaining reaps. SIGKILL is uninterruptible (kernel guarantee), so the
-        // wait threads must return eventually. Cap with a wall-clock guard to avoid hanging on
-        // misbehaving mocks; in production this loop terminates within microseconds of phase 3.
+        // Phase 4: drain remaining reaps. SIGKILL is uninterruptible (kernel guarantee), so the wait
+        // threads must return eventually. Cap with a wall-clock guard to avoid hanging on misbehaving
+        // mocks; in production this loop terminates within microseconds of phase 3.
         let final_deadline = Instant::now() + self.state.shutdown_grace;
         while self.has_running() {
             let now = Instant::now();
@@ -339,20 +339,20 @@ impl SubprocessActuator {
 impl Drop for SubprocessActuator {
     /// Safety net for drop paths the explicit `run → shutdown` pipeline can't reach: a panic
     /// mid-[`Self::run`] unwinds past the explicit `shutdown` call without firing it; a boot-fail
-    /// that constructs but never runs the controller drops the actuator with empty state. The
-    /// fanout below SIGTERMs then SIGKILLs every still-running child so wait threads' blocked
-    /// `waitpid` calls return and the kernel reaps anything left over `_exit`.
+    /// that constructs but never runs the controller drops the actuator with empty state. The fanout
+    /// below SIGTERMs then SIGKILLs every still-running child so wait threads' blocked `waitpid`
+    /// calls return and the kernel reaps anything left over `_exit`.
     ///
-    /// **No grace window, no reap drain.** Drop is the panic-recovery shape — clean exit goes
-    /// through `Self::shutdown`, which owns the SIGTERM → grace → SIGKILL → reap-drain phasing.
-    /// Here the invariant is "make the kernel-side cleanup unblockable, then return." Wait threads
-    /// each hold a `reap_tx` clone; the channel stays connected for their final sends (the
-    /// controller's clone drops only with this struct's `reap_tx` field, which is after Drop
-    /// returns). Detached wait threads finish either inline with the kernel's reap or, in
-    /// pathological cases, get reaped by the kernel on this process's `_exit`.
+    /// **No grace window, no reap drain.** Drop is the panic-recovery shape — clean exit goes through
+    /// `Self::shutdown`, which owns the SIGTERM → grace → SIGKILL → reap-drain phasing. Here the
+    /// invariant is "make the kernel-side cleanup unblockable, then return." Wait threads each hold
+    /// a `reap_tx` clone; the channel stays connected for their final sends (the controller's clone
+    /// drops only with this struct's `reap_tx` field, which is after Drop returns). Detached wait
+    /// threads finish either inline with the kernel's reap or, in pathological cases, get reaped by
+    /// the kernel on this process's `_exit`.
     ///
-    /// On the happy path, `Self::shutdown` has already drained `state.slots` of running children (its
-    /// phase 4 reaps every completion before returning), so the iteration below runs zero times.
+    /// On the happy path, `Self::shutdown` has already drained `state.slots` of running children
+    /// (its phase 4 reaps every completion before returning), so the iteration below runs zero times.
     fn drop(&mut self) {
         for slot in self.state.slots.values() {
             let Some(job) = slot.running.as_ref() else {
@@ -401,8 +401,8 @@ mod tests {
 
     /// Test adapter that lifts an [`EffectCompletion`] envelope into the engine-side
     /// `Input::EffectComplete` so the harness's `Receiver<Input>` continues to observe completions
-    /// in the engine's vocabulary. Mirrors the bin's [`WakingEffectCompleteSender`] without
-    /// dragging in the bin's transport identity.
+    /// in the engine's vocabulary. Mirrors the bin's [`WakingEffectCompleteSender`] without dragging
+    /// in the bin's transport identity.
     ///
     /// [`WakingEffectCompleteSender`]: # "in specter-bin"
     struct TestEngineIn(Sender<Input>);
@@ -524,8 +524,8 @@ mod tests {
         join: Option<thread::JoinHandle<()>>,
     }
 
-    /// Empty env snapshot — convenience for the majority of tests that don't exercise
-    /// `${env.<NAME>}` resolution.
+    /// Empty env snapshot — convenience for the majority of tests that don't exercise `${env.<NAME>}`
+    /// resolution.
     fn empty_env() -> Arc<EnvSnapshot> {
         Arc::new(EnvSnapshot::from_map::<_, &str, &str>([]))
     }
@@ -549,8 +549,8 @@ mod tests {
             })
         }
 
-        /// Inject a custom `temp_dir` into the actuator state — the only call site is the fence
-        /// that pins `start_plan` reading from `ActuatorState.temp_dir` rather than calling
+        /// Inject a custom `temp_dir` into the actuator state — the only call site is the fence that
+        /// pins `start_plan` reading from `ActuatorState.temp_dir` rather than calling
         /// `std::env::temp_dir()` per Effect.
         fn new_with_grace_and_env_and_tmp(
             concurrency: NonZeroUsize,
@@ -629,8 +629,8 @@ mod tests {
             }
         }
 
-        /// Block until `MockSpawner` has recorded at least `n` spawns. Times out after `dur`;
-        /// returns the actual recorded list.
+        /// Block until `MockSpawner` has recorded at least `n` spawns. Times out after `dur`; returns
+        /// the actual recorded list.
         fn wait_for_spawns(&self, n: usize, dur: Duration) -> Vec<SpawnRecord> {
             let deadline = Instant::now() + dur;
             loop {
@@ -707,8 +707,8 @@ mod tests {
         // No second spawn yet (first still "running").
         thread::sleep(Duration::from_millis(50));
         assert_eq!(h.spawner.spawns().len(), 1, "running blocks new spawn");
-        // Complete the first; pump should pick up the *latest* (corr=3, corr=2 was dropped by
-        // Latest coalesce).
+        // Complete the first; pump should pick up the *latest* (corr=3, corr=2 was dropped by Latest
+        // coalesce).
         h.spawner.complete(s[0].pid, EffectOutcome::Ok).unwrap();
         let s2 = h.wait_for_spawns(2, Duration::from_secs(1));
         assert_eq!(s2.len(), 2, "second spawn fires after reap");
@@ -833,9 +833,9 @@ mod tests {
         // The actuator's `effects_rx` observing Disconnected (driver-side `effects_tx` dropped)
         // routes through the new explicit `Err` arm. Distinct from the `shutdown_rx` and
         // `hard_shutdown_rx` arms exercised by the existing shutdown tests. The trigger is the
-        // engine-thread-exit path: production reaches this state when the driver's `ActuatorIO`
-        // drops without a prior soft pulse (panic mid-`run`, or a future shutdown shape that
-        // bypasses the pulse).
+        // engine-thread-exit path: production reaches this state when the driver's `ActuatorIO` drops
+        // without a prior soft pulse (panic mid-`run`, or a future shutdown shape that bypasses the
+        // pulse).
         let mut h = Harness::new(nz(4));
         h.close_effects_tx_for_test();
 
@@ -855,8 +855,8 @@ mod tests {
         let shutdown_tx = h.shutdown_tx.clone();
         let spawner = Arc::clone(&h.spawner);
         let waiter_thread = thread::spawn(move || {
-            // After shutdown trigger, briefly wait, then complete the child (mock waiters block
-            // until told). This simulates the child responding to SIGTERM gracefully.
+            // After shutdown trigger, briefly wait, then complete the child (mock waiters block until
+            // told). This simulates the child responding to SIGTERM gracefully.
             thread::sleep(Duration::from_millis(50));
             spawner
                 .complete(pid, EffectOutcome::Failed(Termination::Signal(15)))
@@ -1063,13 +1063,13 @@ mod tests {
         // Regression fence for a (now-closed) race in the synth-Reap teardown: when spawn failures
         // synthesised a `Reaped` via a channel hop, an interleaved same-key submit could replace
         // `slot.running` before the synth drained, then the synth would clobber the new job's state
-        // and leave the per-Sub gate desynced. The fix routes synth-Failed dispatch directly
-        // through `advance_or_terminate` on the controller call stack.
+        // and leave the per-Sub gate desynced. The fix routes synth-Failed dispatch directly through
+        // `advance_or_terminate` on the controller call stack.
         //
         // This test exercises the simpler post-failure observable: after a spawn-failure on (Sub=7,
         // Profile=1, Resource=1), a follow-up Effect for the *same* Sub on (Profile=2, Resource=2)
-        // must spawn promptly. If `running_subs` still contained Sub 7, the per-Sub gate would
-        // defer the second submit indefinitely.
+        // must spawn promptly. If `running_subs` still contained Sub 7, the per-Sub gate would defer
+        // the second submit indefinitely.
         let mut h = Harness::new(nz(4));
         h.spawner.inject_spawn_error(std::io::ErrorKind::NotFound);
         h.submit(make_effect_perfile(7, 1, 1, 1));
@@ -1385,14 +1385,15 @@ mod tests {
     }
 
     /// Multi-step plan + cap=1 + concurrent fresh Sub: the plan's advance-step branch picks up the
-    /// freshly-released permit (reap-side path is on-stack in the controller, so it always wins
-    /// over pump's queue scan for the same permit). The concurrent Sub's plan starts only after the
+    /// freshly-released permit (reap-side path is on-stack in the controller, so it always wins over
+    /// pump's queue scan for the same permit). The concurrent Sub's plan starts only after the
     /// multi-step plan terminates.
     ///
-    /// This is the deterministic shape of "multi-step plan-atomicity under contention": all steps of
-    /// plan A run before plan B starts. The race-on-select shape (where pump's submit-handler for B
-    /// beats handle_reap's advance, forcing plan_continue) is covered deterministically in the
-    /// unit-level `step_ok_not_last_with_no_permit_defers_via_plan_continue` test in `pool/state.rs`.
+    /// This is the deterministic shape of "multi-step plan-atomicity under contention": all steps
+    /// of plan A run before plan B starts. The race-on-select shape (where pump's submit-handler
+    /// for B beats handle_reap's advance, forcing plan_continue) is covered deterministically in
+    /// the unit-level `step_ok_not_last_with_no_permit_defers_via_plan_continue` test in
+    /// `pool/state.rs`.
     #[test]
     fn multi_step_plan_runs_to_terminus_before_concurrent_sub_starts() {
         let mut h = Harness::new(nz(1)); // cap=1: one global permit
@@ -1767,8 +1768,8 @@ mod tests {
         h.shutdown();
     }
 
-    /// Predicate reaping Failed with no else-branch terminates the plan Ok (predicate's `on_failed
-    /// = Escape` — the "branch, not guard" outcome elision). The reaped Failed outcome stays out of
+    /// Predicate reaping Failed with no else-branch terminates the plan Ok (predicate's `on_failed =
+    /// Escape` — the "branch, not guard" outcome elision). The reaped Failed outcome stays out of
     /// `EffectComplete`.
     #[test]
     fn predicate_failed_no_else_terminates_ok_without_propagation() {
@@ -1803,10 +1804,10 @@ mod tests {
     /// predicate's outcome does NOT propagate to plan terminus.
     ///
     /// Deterministic shape: a no-else conditional whose predicate spawn-fails (via injected
-    /// `ErrorKind::NotFound`). The dispatch at cursor 0 sees the predicate op's synth-Failed
-    /// outcome and reads `op.target(&Failed) = on_failed = Escape` (the no-else "branch, not guard"
-    /// elision), so the plan terminates with `EffectOutcome::Ok`. Short-circuiting spawn-failure
-    /// straight to terminus would emit `EffectComplete::Failed` instead; the Ok outcome here is the
+    /// `ErrorKind::NotFound`). The dispatch at cursor 0 sees the predicate op's synth-Failed outcome
+    /// and reads `op.target(&Failed) = on_failed = Escape` (the no-else "branch, not guard" elision),
+    /// so the plan terminates with `EffectOutcome::Ok`. Short-circuiting spawn-failure straight to
+    /// terminus would emit `EffectComplete::Failed` instead; the Ok outcome here is the
     /// no-propagation invariant in observable form.
     ///
     /// Zero spawns are recorded — the injection short-circuits `MockSpawner::spawn` before the
@@ -1849,8 +1850,8 @@ mod tests {
     /// [`predicate_failed_spawns_else_branch_outcome_does_not_propagate`]**: that test reaps a
     /// natural Failed from a real spawn; this test has zero predicate spawns recorded — the
     /// synth-Failed dispatch must work without any in-flight `RunningJob` for cursor 0. Together
-    /// they pin "the dispatch loop is uniform on bytecode shape" across all three
-    /// Failed-at-cursor-0 sources.
+    /// they pin "the dispatch loop is uniform on bytecode shape" across all three Failed-at-cursor-0
+    /// sources.
     #[test]
     fn predicate_resolver_failure_cascades_to_else_branch() {
         // Three-op CFG: predicate(${env.MISSING}) → on_ok = Continue(1) (then), on_failed =
@@ -1931,8 +1932,8 @@ mod tests {
         let prog_path = || {
             // CFG-shape mirror of `[exec=a, when=b then=[exec=c]]`: op 0: Exec(a) — on_ok =
             // Continue(1), on_failed = Terminate op 1: predicate b — on_ok = Continue(2) (then),
-            // on_failed = Escape (no-else branch elision) op 2: Exec(c) — on_ok = Escape, on_failed
-            // = Terminate
+            // on_failed = Escape (no-else branch elision) op 2: Exec(c) — on_ok = Escape, on_failed =
+            // Terminate
             let mut b = ProgramBuilder::new();
             let a = b.emit(SpawnBody::Exec(ExecAction::new(
                 [ArgTemplate::new([ArgPart::literal("/bin/a")])],
@@ -2081,8 +2082,8 @@ mod tests {
         h.spawner
             .complete(stage0_pid, EffectOutcome::Failed(Termination::Exit(7)))
             .unwrap();
-        // Wait for the cascade SIGTERM to land. The mock signaler records Term(pid) on
-        // `signal_term`. Poll briefly.
+        // Wait for the cascade SIGTERM to land. The mock signaler records Term(pid) on `signal_term`.
+        // Poll briefly.
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             let signals = h.spawner.signals();
@@ -2234,8 +2235,8 @@ mod tests {
     }
 
     /// Per-stage timeout: the pipe carries a stage whose `ExecAction.timeout` is set. The per-stage
-    /// timer thread fires at the deadline and signals SIGTERM. The test verifies the recorded
-    /// signal lands on the right pid.
+    /// timer thread fires at the deadline and signals SIGTERM. The test verifies the recorded signal
+    /// lands on the right pid.
     #[test]
     fn pipe_stage_timeout_sigterms_unfinished_stage() {
         let timeout = Duration::from_millis(60);
@@ -2248,8 +2249,8 @@ mod tests {
         ]);
         let program = pipe_program(stages);
 
-        // Short shutdown_grace so the SIGKILL escalation also lands inside the test window if
-        // SIGTERM doesn't take effect.
+        // Short shutdown_grace so the SIGKILL escalation also lands inside the test window if SIGTERM
+        // doesn't take effect.
         let mut h = Harness::new_with_grace(nz(4), Duration::from_millis(20));
         h.submit(make_effect_perfile_with_program(55, 55, 55, 1, program));
         let spawns = h.wait_for_spawns(2, Duration::from_secs(1));
@@ -2283,8 +2284,8 @@ mod tests {
         h.spawner
             .complete(stage1_pid, EffectOutcome::Failed(Termination::Signal(15)))
             .unwrap();
-        // The aggregator on stage 1's failure cascades SIGTERM to *later* siblings (none here),
-        // then continues draining. Stage 0 hasn't completed yet — drain it so the wait finishes.
+        // The aggregator on stage 1's failure cascades SIGTERM to *later* siblings (none here), then
+        // continues draining. Stage 0 hasn't completed yet — drain it so the wait finishes.
         h.spawner.complete(stage0_pid, EffectOutcome::Ok).unwrap();
         h.wait_for_effect_completes(1, Duration::from_secs(2));
         h.shutdown();

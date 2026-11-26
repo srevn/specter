@@ -1,19 +1,19 @@
 //! Per-input dispatch handlers.
 //!
 //! Each `on_*` method handles one [`specter_core::Input`] variant for one Profile. They call the
-//! burst-lifecycle helpers (`burst.rs`), the refcount edges (`refcounts.rs`), and the
-//! reconciliation (`reconcile.rs`). Logic that fits in one row of the transition table stays
-//! inline; logic shared across rows (e.g., emit Effects on Standard stable verdict) is factored
-//! into private helpers within this module.
+//! burst-lifecycle helpers (`burst.rs`), the refcount edges (`refcounts.rs`), and the reconciliation
+//! (`reconcile.rs`). Logic that fits in one row of the transition table stays inline; logic shared
+//! across rows (e.g., emit Effects on Standard stable verdict) is factored into private helpers
+//! within this module.
 //!
 //! `on_probe_response` routes every response by *state*: the gated correlation lives on a
 //! state-resident [`specter_core::ProbeSlot`], and the gate ([`Engine::profile_probe_gate`]) reads
-//! that correlation *and* the routing class in one resolution (pre-disarm); the slot is then
-//! disarmed once on dispatch. The Verifying choke and the post-fire Rebase arm share one certifier,
-//! `certify_probe_response`: lower the outcome, verify kind agreement, and fold the single
-//! quiescence verdict via [`specter_core::quiescence_verdict`]. `dispatch_burst_outcome` then fans
-//! the certified result out per [`specter_core::BurstIntent`]; the Rebase arm maps it to the
-//! rebase-loop consequence.
+//! that correlation *and* the routing class in one resolution (pre-disarm); the slot is then disarmed
+//! once on dispatch. The Verifying choke and the post-fire Rebase arm share one certifier,
+//! `certify_probe_response`: lower the outcome, verify kind agreement, and fold the single quiescence
+//! verdict via [`specter_core::quiescence_verdict`]. `dispatch_burst_outcome` then fans the certified
+//! result out per [`specter_core::BurstIntent`]; the Rebase arm maps it to the rebase-loop
+//! consequence.
 
 use crate::Engine;
 use crate::coverage::CoverageClass;
@@ -39,12 +39,12 @@ use std::time::{Duration, Instant};
 
 /// Consecutive-Retry floor at which a forced-ceiling hash-channel disagreement upgrades from the
 /// generic despite-change diagnostic to [`Diagnostic::ChangeOutsideEventMask`]. Below the floor the
-/// disagreement keeps its generic story — one or two near-deadline disagreements are consistent
-/// with a slow writer the ceiling happened to catch mid-flight. At the floor, repeated settle
-/// windows that were each event-silent (any in-mask event zeroes the burst's `retry_streak`) yet
-/// each hashed differently witness motion the `events` mask structurally cannot see. Three is the
-/// smallest streak a single write straddling two adjacent samples cannot produce, and small enough
-/// to be reachable within a typical `settle : max_settle` ratio before the ceiling fires.
+/// disagreement keeps its generic story — one or two near-deadline disagreements are consistent with
+/// a slow writer the ceiling happened to catch mid-flight. At the floor, repeated settle windows
+/// that were each event-silent (any in-mask event zeroes the burst's `retry_streak`) yet each hashed
+/// differently witness motion the `events` mask structurally cannot see. Three is the smallest streak
+/// a single write straddling two adjacent samples cannot produce, and small enough to be reachable
+/// within a typical `settle : max_settle` ratio before the ceiling fires.
 pub(crate) const CHANGE_OUTSIDE_MASK_RETRY_FLOOR: u32 = 3;
 
 impl Engine {
@@ -54,8 +54,8 @@ impl Engine {
     /// 1. Idempotence guard — `watch_demand == 0` ⇒ `EventOnUnwatchedResource` + drop (race between
     ///    `Unwatch` and the Sensor's drain).
     /// 2. Pending descents whose `current_prefix == resource` get a fresh descent probe
-    ///    (`on_descent_event`). Descent prefix watches register STRUCTURE-only, so any event
-    ///    reaching here is structurally relevant — descent dispatch is unfiltered.
+    ///    (`on_descent_event`). Descent prefix watches register STRUCTURE-only, so any event reaching
+    ///    here is structurally relevant — descent dispatch is unfiltered.
     /// 3. Idle Profiles whose `watch_root_parent == resource` and whose anchor is currently absent
     ///    (`current.is_none()`) re-enter pending descent — the probe-`Failed` / watch-rejection
     ///    fallback (observed losses are already `Pending` via their own loss step). Same STRUCTURE
@@ -69,9 +69,9 @@ impl Engine {
     ///    - Mask-admitted descendant events that cannot move the Profile's proof object — boundary
     ///      Dirs and Dir-METADATA — drop with `EventOutsideProofObject`, identity events exempted
     ///      (the proof-relevance guard below).
-    ///    - Terminal-on-anchor → [`Self::finalize_anchor_lost_and_descend`] — anchor loss is
-    ///      uniform across static, mixed, and minted Profiles. Anything else that passes the filter
-    ///      → `drive_burst`.
+    ///    - Terminal-on-anchor → [`Self::finalize_anchor_lost_and_descend`] — anchor loss is uniform
+    ///      across static, mixed, and minted Profiles. Anything else that passes the filter →
+    ///      `drive_burst`.
     pub(crate) fn on_fs_event(
         &mut self,
         resource: ResourceId,
@@ -82,10 +82,10 @@ impl Engine {
         // Idempotence + the single pre-dispatch resource resolution. One `tree.get`: a stale id or
         // `watch_demand == 0` is a race between Unwatch and the Sensor's drain (drop with
         // `EventOnUnwatchedResource`). A live, watched slot yields the event path, captured here —
-        // pre-dispatch, off the proven-live `&Resource`. The path is the staleness-immune
-        // historical fact the burst accumulators need: a later covering dispatch can reap the slot,
-        // so a post-dispatch `path_of` would be fallible exactly where the obligation must not lose
-        // an entry.
+        // pre-dispatch, off the proven-live `&Resource`. The path is the staleness-immune historical
+        // fact the burst accumulators need: a later covering dispatch can reap the slot, so a
+        // post-dispatch `path_of` would be fallible exactly where the obligation must not lose an
+        // entry.
         let Some(r) = self.tree.get(resource) else {
             out.diagnostics
                 .push(Diagnostic::EventOnUnwatchedResource { resource });
@@ -107,8 +107,8 @@ impl Engine {
 
         // Single-pass classification of the event's carriers: Profiles that "carry" a dispatch
         // responsibility for this resource. Descent prefix and watch-root-parent watches both
-        // register STRUCTURE-only, so any event reaching here is structurally relevant for both
-        // arms — no class filter applies before dispatch. Mutual exclusion is structural (`Pending`
+        // register STRUCTURE-only, so any event reaching here is structurally relevant for both arms
+        // — no class filter applies before dispatch. Mutual exclusion is structural (`Pending`
         // excludes `Parked` at the `ProfileState` sum-type level).
         let carriers = self.classify_event_carriers(resource);
         let descent_count = carriers.descents.len();
@@ -129,8 +129,8 @@ impl Engine {
             &mut self.coverage_scratch,
         );
         if covering.is_empty() && descent_count == 0 && recovery_count == 0 {
-            // No consumer: covered by no Profile, no in-flight descent, no recovery kicked off.
-            // Emit `EventNoConsumer` (a benign "watched but no listener" signal — typically a
+            // No consumer: covered by no Profile, no in-flight descent, no recovery kicked off. Emit
+            // `EventNoConsumer` (a benign "watched but no listener" signal — typically a
             // `WatchRootParent` event for an entry we don't track) and drop. Distinct from
             // `EventOnUnwatchedResource` (the `watch_demand == 0` race earlier) so log levels can
             // diverge.
@@ -155,10 +155,10 @@ impl Engine {
                 continue;
             };
 
-            // Anchor events bypass the class filter unconditionally (lifecycle: anchor
-            // disappearance recovery, anchor reappearance detection, etc.). Descendant events whose
-            // class is not in the Profile's `events` drop here, before `drive_burst` notes into the
-            // pre-fire or post-fire burst's `dirty`.
+            // Anchor events bypass the class filter unconditionally (lifecycle: anchor disappearance
+            // recovery, anchor reappearance detection, etc.). Descendant events whose class is not
+            // in the Profile's `events` drop here, before `drive_burst` notes into the pre-fire or
+            // post-fire burst's `dirty`.
             if !is_anchor && !profile_events.intersects(event_class) {
                 out.diagnostics.push(Diagnostic::EventClassDropped {
                     resource,
@@ -175,23 +175,23 @@ impl Engine {
             //   identity in the parent's enumeration folds; member churn inside it is invisible to
             //   every verdict. The Profile's own FDs no longer exist at boundary Dirs (watch
             //   installation is Interior-gated), so this arm is reached via co-located demand — a
-            //   minted Profile's anchor FD sits exactly on the discovery terminus slot, and the
-            //   event must drop *for the discovery Profile* while the minted Profile sees it as an
-            //   anchor event and correctly drives its own burst.
+            //   minted Profile's anchor FD sits exactly on the discovery terminus slot, and the event
+            //   must drop *for the discovery Profile* while the minted Profile sees it as an anchor
+            //   event and correctly drives its own burst.
             // - **Dir-METADATA** (attribute axis): chmod / chown / touch on a directory folds into
-            //   no proof object (`dir_hash` deliberately excludes `root_meta.mtime`). kqueue
-            //   classes mkdir/rmdir backrefs (`NOTE_LINK`) as STRUCTURE, so dropping Dir-METADATA
-            //   loses no structural signal.
+            //   no proof object (`dir_hash` deliberately excludes `root_meta.mtime`). kqueue classes
+            //   mkdir/rmdir backrefs (`NOTE_LINK`) as STRUCTURE, so dropping Dir-METADATA loses no
+            //   structural signal.
             //
             // Identity events are exempt: a boundary Dir's own identity folds into the proof object
-            // where its parent lists it, so its deletion or rename moves the proof even though
-            // churn inside it cannot. A discovery terminus is the common case — a Dir terminus's
-            // deletion drives the discovery burst beside its parent chain directory's own STRUCTURE
-            // event, while a File terminus's folds to CONTENT and is class-dropped above. Driving a
-            // burst on a proof-irrelevant event could only end in a `nothing_changed` verdict —
-            // which a never-fired Sub converts into a spurious first fire — and the guard sits
-            // before `drive_burst`, so post-fire absorbs are equally stopped (a proof-irrelevant
-            // event must not extend a settle loop).
+            // where its parent lists it, so its deletion or rename moves the proof even though churn
+            // inside it cannot. A discovery terminus is the common case — a Dir terminus's deletion
+            // drives the discovery burst beside its parent chain directory's own STRUCTURE event,
+            // while a File terminus's folds to CONTENT and is class-dropped above. Driving a burst
+            // on a proof-irrelevant event could only end in a `nothing_changed` verdict — which a
+            // never-fired Sub converts into a spurious first fire — and the guard sits before
+            // `drive_burst`, so post-fire absorbs are equally stopped (a proof-irrelevant event must
+            // not extend a settle loop).
             if !is_anchor && !is_identity {
                 let dir_kinded = matches!(resource_kind, ResourceKind::Dir);
                 if matches!(class, CoverageClass::Boundary)
@@ -218,12 +218,12 @@ impl Engine {
         }
     }
 
-    /// Re-enter recovery descent for a [`ProfileState::Parked`] Profile — the single park exit
-    /// every recovery trigger converges on: the event-scan arm of [`Self::classify_event_carriers`]
-    /// (a `StructureChanged` at `watch_root_parent` or at the co-claimed anchor slot),
+    /// Re-enter recovery descent for a [`ProfileState::Parked`] Profile — the single park exit every
+    /// recovery trigger converges on: the event-scan arm of [`Self::classify_event_carriers`] (a
+    /// `StructureChanged` at `watch_root_parent` or at the co-claimed anchor slot),
     /// `on_sensor_overflow`'s Parked arm, and `join_profile`'s `Join::Parked` re-arm. **Every park
-    /// exit is a descent entry, never a Seed** — a parked anchor may be gone or refused, so its
-    /// exit probes for it first, and only the descent's terminus, finding it, runs the tail that
+    /// exit is a descent entry, never a Seed** — a parked anchor may be gone or refused, so its exit
+    /// probes for it first, and only the descent's terminus, finding it, runs the tail that
     /// re-installs the claim, the anchor watch and the parent edge (`seed_at_anchor`).
     ///
     /// **The prefix is re-derived from the Profile, not the trigger.** `watch_root_parent` when
@@ -231,9 +231,9 @@ impl Engine {
     /// the parent resolves for every non-root anchor) — so a channel-bearing park, a channel-less
     /// park reached by an anchor-slot event or an overflow, and a re-attach all enter the same
     /// single-segment descent. Descent is self-correcting (a probe at a disk-absent prefix answers
-    /// `Vanished` → rewind toward `/`), so any Tree-derived entry is safe; a re-rejected prefix
-    /// watch re-purges to `Parked` — converges, no loop within a step. A root anchor with no parent
-    /// stays parked (degenerate — nothing to descend from).
+    /// `Vanished` → rewind toward `/`), so any Tree-derived entry is safe; a re-rejected prefix watch
+    /// re-purges to `Parked` — converges, no loop within a step. A root anchor with no parent stays
+    /// parked (degenerate — nothing to descend from).
     ///
     /// **Fallback, not the primary recovery route.** Every *observed* loss (anchor-terminal event,
     /// probe `Vanished`, kind mismatch) re-enters descent inside the loss step itself via
@@ -247,10 +247,10 @@ impl Engine {
     /// re-attach carries no observation at all); latching it would false-first-fire a never-fired
     /// Sub whose anchor the entry probe then finds unchanged on disk. Fired Subs are protected by
     /// witness-drift either way. A genuine replacement is witnessed by the probes themselves: an
-    /// entry probe finding the anchor absent records the absence half, and the later probe that
-    /// finds it completes the appearance — descent-wide semantics, not a recovery special case.
-    /// Accepted narrow miss: when the entry probe finds the replacement already present (no absence
-    /// half ever observed), a never-fired Sub misses that one fire.
+    /// entry probe finding the anchor absent records the absence half, and the later probe that finds
+    /// it completes the appearance — descent-wide semantics, not a recovery special case. Accepted
+    /// narrow miss: when the entry probe finds the replacement already present (no absence half ever
+    /// observed), a never-fired Sub misses that one fire.
     ///
     /// **Recovery overlap.** A channel-bearing park's parent already holds `+1 STRUCTURE` from
     /// `Profile.watch_root_parent` (set at the original anchor materialization, never cleared on
@@ -270,11 +270,12 @@ impl Engine {
         self.enter_anchor_recovery_descent(profile_id, parent, DescentWitness::Unobserved, out);
     }
 
-    /// Shared single-segment descent entry for anchor recovery: the anchor's segment becomes the sole
-    /// remaining component and `parent` the descent prefix. Both recovery producers funnel here — the
-    /// park exit ([`Self::start_pending_recovery`]: parent / anchor-slot event, overflow, re-attach —
-    /// unwitnessed) and the observed-loss wrapper ([`Self::finalize_anchor_lost_and_descend`],
-    /// witnessed) — differing only in the latch's birth value.
+    /// Shared single-segment descent entry for anchor recovery: the anchor's segment becomes the
+    /// sole remaining component and `parent` the descent prefix. Both recovery producers funnel here
+    /// — the park exit ([`Self::start_pending_recovery`]: parent / anchor-slot event, overflow,
+    /// re-attach — unwitnessed) and the observed-loss wrapper
+    /// ([`Self::finalize_anchor_lost_and_descend`], witnessed) — differing only in the latch's birth
+    /// value.
     ///
     /// The early returns are structural no-recovery cases, not races: a reaped Profile has nothing
     /// to recover, and an anchor with no segment name (the FS root) has no parent to descend from.
@@ -304,25 +305,25 @@ impl Engine {
     ///
     /// **Gate.** `profile_probe_gate(response.owner)` yields the gated slot's own correlation and
     /// routing class in one resolution. The response is gated by `correlation == received`; a
-    /// mismatch, or an absent gate (stale `ProfileId`, response after Cancel, response after a
-    /// fresh mint, out-of-order response, no probe in flight), leaves live state intact and yields
+    /// mismatch, or an absent gate (stale `ProfileId`, response after Cancel, response after a fresh
+    /// mint, out-of-order response, no probe in flight), leaves live state intact and yields
     /// [`Diagnostic::StaleProbeResponse`].
     ///
-    /// **Consume-once.** `take_owner_probe` disarms the slot exactly once, *after* the gate
-    /// captured the route and *before* any dispatch. The received correlation is absent from state
-    /// before dispatch, so it cannot route twice — disarm *is* the consume.
+    /// **Consume-once.** `take_owner_probe` disarms the slot exactly once, *after* the gate captured
+    /// the route and *before* any dispatch. The received correlation is absent from state before
+    /// dispatch, so it cannot route twice — disarm *is* the consume.
     ///
     /// **Routing.** [`Engine::profile_probe_gate`] captures the routing class *with* the staleness
-    /// correlation, one resolution ([`crate::probe::ProfileProbeRoute`] is [`Copy`]; the later
-    /// disarm leaves the carrier variant intact). The old `Some(c)`/no-route regression case folds
+    /// correlation, one resolution ([`crate::probe::ProfileProbeRoute`] is [`Copy`]; the later disarm
+    /// leaves the carrier variant intact). The old `Some(c)`/no-route regression case folds
     /// structurally into an absent gate (⇒ stale). Each route then *parses* the wire
     /// [`ProbeOutcome`](specter_core::ProbeOutcome) into the typed engine-side outcome that route's
-    /// consumers accept — `ProofOutcome` for `Verifying` / `Rebasing`, `DescentOutcome` for
-    /// `Descent` — so an illegal `(route, outcome)` pairing is unrepresentable past the parse and
-    /// never reaches the certifier or the descent dispatcher. A payload shape the route cannot
-    /// accept (a proof route receiving the structural `SegmentObserved`, or a descent receiving an
-    /// `AnchorOk` / `SubtreeProven` proof) is a walker-contract violation: the parse fails and the
-    /// arm routes to the route-appropriate recovery — the burst recovery finishes the burst to Idle
+    /// consumers accept — `ProofOutcome` for `Verifying` / `Rebasing`, `DescentOutcome` for `Descent`
+    /// — so an illegal `(route, outcome)` pairing is unrepresentable past the parse and never reaches
+    /// the certifier or the descent dispatcher. A payload shape the route cannot accept (a proof
+    /// route receiving the structural `SegmentObserved`, or a descent receiving an `AnchorOk` /
+    /// `SubtreeProven` proof) is a walker-contract violation: the parse fails and the arm routes to
+    /// the route-appropriate recovery — the burst recovery finishes the burst to Idle
     /// (anchor/baseline survive; a walker defect is not an anchor-identity change), the descent
     /// recovery abandons the descent prefix — each emitting one honest `WalkerContractViolated` and
     /// self-healing on the next `FsEvent`. The match is total over `ProfileProbeRoute`'s three
@@ -336,10 +337,10 @@ impl Engine {
         let profile_id = response.owner;
         let received = response.correlation;
 
-        // One resolution yields the gated correlation *and* the routing class. The route is
-        // captured with the gate — before the disarm — so it stays valid through dispatch (disarm
-        // empties the slot but leaves the carrier variant intact). An absent gate or a `received`
-        // mismatch is every stale path.
+        // One resolution yields the gated correlation *and* the routing class. The route is captured
+        // with the gate — before the disarm — so it stays valid through dispatch (disarm empties
+        // the slot but leaves the carrier variant intact). An absent gate or a `received` mismatch
+        // is every stale path.
         let Some((_, route)) = self
             .profile_probe_gate(profile_id)
             .filter(|&(c, _)| c == received)
@@ -380,8 +381,8 @@ impl Engine {
                     // Same certifier as the Verifying choke — the post-fire rebase response folds
                     // through `quiescence_verdict` over the post-command tree. The verdict drives
                     // the rebase-loop consequence table; `Vanished` / `Failed` route to the
-                    // rebase-specific cleanup; `Degraded` (kind mismatch) was already handled
-                    // inside the certifier.
+                    // rebase-specific cleanup; `Degraded` (kind mismatch) was already handled inside
+                    // the certifier.
                     Ok(proof) => {
                         match self.certify_probe_response(profile_id, proof, forced, out) {
                             CertifiedResponse::Proceed { snapshot, verdict } => {
@@ -565,8 +566,8 @@ impl Engine {
     }
 
     /// Whether the burst's consequence at the verdict floor requires a tree-quiescence proof
-    /// (Contract B — "fire when the tree settles") rather than mere baseline establishment
-    /// (Contract A — the cold-Seed `SilentPin` path, which records a reference freely).
+    /// (Contract B — "fire when the tree settles") rather than mere baseline establishment (Contract
+    /// A — the cold-Seed `SilentPin` path, which records a reference freely).
     ///
     /// Returns `false` only for the cold-Seed quiet case: a `Seed`-intent `PreFire` burst with
     /// `dirty.is_empty()` AND no prior fires on the Profile. Every other reachable shape — Standard
@@ -574,9 +575,9 @@ impl Engine {
     /// owes a quiescence proof.
     ///
     /// **Composed.** Reads `profile.state()` (intent + `dirty.is_empty()`) and
-    /// `SubRegistry::any_fired`. The predicate spans two stores, so it lives on `Engine` rather
-    /// than as a `Profile` method, taking the already-resolved `&Profile` from
-    /// [`Self::fold_context`] (no redundant `get`) plus its `profile_id` for the `subs` lookup.
+    /// `SubRegistry::any_fired`. The predicate spans two stores, so it lives on `Engine` rather than
+    /// as a `Profile` method, taking the already-resolved `&Profile` from [`Self::fold_context`]
+    /// (no redundant `get`) plus its `profile_id` for the `subs` lookup.
     ///
     /// **Conservative for recovery Seed.** `any_fired = true` Seed bursts with `dirty.is_empty()`
     /// are marked proof-owing even though [`Self::classify_consequence`] may post-`apply_snapshot`
@@ -587,9 +588,9 @@ impl Engine {
     /// **Non-`Active` defaults to `true`.** A non-`Active` state at the verdict floor cannot occur
     /// — `fold_context` already proved Profile presence, and the floor is reached only through the
     /// `profile_probe_gate` ⇒ `take_owner_probe` dispatch on `Active(Verifying | Rebasing)`. The
-    /// fall-through arm `debug_assert!(false)` to surface a contract violation in dev/CI and
-    /// degrades to the proof-owing default in release, preserving the fire-safety invariant rather
-    /// than silently bypassing it.
+    /// fall-through arm `debug_assert!(false)` to surface a contract violation in dev/CI and degrades
+    /// to the proof-owing default in release, preserving the fire-safety invariant rather than
+    /// silently bypassing it.
     #[must_use]
     fn owes_proof_from(&self, profile: &Profile, profile_id: ProfileId) -> bool {
         match profile.state() {
@@ -620,13 +621,13 @@ impl Engine {
     /// the pre-fire consequence.
     ///
     /// `Proceed` ⇒ the verdict feeds the single intent-agnostic [`Self::dispatch_quiescence_ok`]
-    /// router (`intent` only selects the consequence split, not a forked path — the
-    /// certified-sample machinery is intent-agnostic). `Vanished` / `Failed` ⇒ the shared pre-fire
-    /// helper, threaded the burst's `intent` for the diagnostic (the route split lives at the
-    /// callers, not in the certifier: a vanished anchor's cleanup is route-specific, and the Rebase
-    /// arm maps the same two variants to its own helpers). `Degraded` ⇒ nothing — the certifier
-    /// already resolved the terminal: its kind-mismatch producer emitted the diagnostic and tore
-    /// the burst down; its absent-Profile producer found nothing to tear down.
+    /// router (`intent` only selects the consequence split, not a forked path — the certified-sample
+    /// machinery is intent-agnostic). `Vanished` / `Failed` ⇒ the shared pre-fire helper, threaded
+    /// the burst's `intent` for the diagnostic (the route split lives at the callers, not in the
+    /// certifier: a vanished anchor's cleanup is route-specific, and the Rebase arm maps the same
+    /// two variants to its own helpers). `Degraded` ⇒ nothing — the certifier already resolved the
+    /// terminal: its kind-mismatch producer emitted the diagnostic and tore the burst down; its
+    /// absent-Profile producer found nothing to tear down.
     fn dispatch_burst_outcome(
         &mut self,
         profile_id: ProfileId,
@@ -650,8 +651,9 @@ impl Engine {
         }
     }
 
-    /// Apply a successful probe response's `TreeSnapshot` to the Profile's `current`. Single home for
-    /// the "Dir → graft / File → inline write" dispatch shared by the three `dispatch_*_ok` helpers.
+    /// Apply a successful probe response's `TreeSnapshot` to the Profile's `current`. Single home
+    /// for the "Dir → graft / File → inline write" dispatch shared by the three `dispatch_*_ok`
+    /// helpers.
     ///
     /// `TreeSnapshot::Dir` flows through [`crate::reconcile::graft`] (splice + reconcile + commit
     /// via `Profile::install_dir_current`); `TreeSnapshot::File` writes inline through
@@ -660,11 +662,11 @@ impl Engine {
     /// **Typed prior extraction.** On the Dir arm this helper extracts the Dir prior from
     /// `Profile.current` under one immutable borrow and threads it to [`graft`] as a typed
     /// `Option<Arc<DirSnapshot>>`. Lifting the extraction here keeps graft's body Dir-typed
-    /// end-to-end and centralises the File-shaped-prior detection at the single boundary that
-    /// already owns the Profile borrow shape.
+    /// end-to-end and centralises the File-shaped-prior detection at the single boundary that already
+    /// owns the Profile borrow shape.
     ///
-    /// **Kind agreement is a caller responsibility.** Production callers reach this helper only
-    /// after [`Engine::certify_probe_response`]'s inline kind guard passed (Verifying via
+    /// **Kind agreement is a caller responsibility.** Production callers reach this helper only after
+    /// [`Engine::certify_probe_response`]'s inline kind guard passed (Verifying via
     /// `dispatch_burst_outcome`, Rebasing via the post-fire arm). The setters' debug_assert is a
     /// defensive backstop for any future caller bypassing the boundary.
     pub(crate) fn apply_snapshot(
@@ -708,10 +710,10 @@ impl Engine {
     /// `kind` tells us which transition this timer drives — settle expiry (Batching → Verifying,
     /// with possible reschedule), burst-deadline expiry (force-fire), gate-deadline expiry
     /// (actuator-hang recovery), or the post-fire rebase loop's spacing / ceiling. The `id` epoch
-    /// survives the validation re-check that [`is_timer_referenced`] performs against the live
-    /// burst slot for that `kind`; `pop_expired` already ran the same check before `step` was
-    /// called, so the production path runs it twice (cheap), and any direct
-    /// `step(Input::TimerExpired)` from a test or fuzzer falls through the same gate.
+    /// survives the validation re-check that [`is_timer_referenced`] performs against the live burst
+    /// slot for that `kind`; `pop_expired` already ran the same check before `step` was called, so
+    /// the production path runs it twice (cheap), and any direct `step(Input::TimerExpired)` from a
+    /// test or fuzzer falls through the same gate.
     ///
     /// `now` flows through to every handler that schedules a follow-up:
     /// [`Engine::on_settle_expired`]'s reschedule, [`Engine::handle_post_fire_settle_expired`]'s
@@ -759,8 +761,8 @@ impl Engine {
     /// `Some(now)`); the `event_drives_batching` re-entry from a Verifying/Draining cancel. The
     /// cold-Seed arm constructs `Verifying` directly with `None` and never schedules a `Settle`
     /// timer. The match's `None` arm is therefore unreachable in production; it carries
-    /// `debug_assert!(false)` + the safe transition default to surface a future writer that opens the
-    /// unreachable shape, the same convention `owes_proof_from` and `verifying_probe_target` use.
+    /// `debug_assert!(false)` + the safe transition default to surface a future writer that opens
+    /// the unreachable shape, the same convention `owes_proof_from` and `verifying_probe_target` use.
     ///
     /// **Preconditions** (guaranteed by [`is_timer_referenced`] upstream): `Profile.state ==
     /// Active(PreFire(_))` and `pre.phase == PreFirePhase::Batching { settle_timer == popped_id }`.
@@ -818,9 +820,9 @@ impl Engine {
     /// A Failed arrival clears the Sub's per-Sub fire history
     /// ([`specter_core::SubRegistry::clear_fired`]) — only for a `Subtree` `key`; `PerFile` carries
     /// no fire history. A failed Effect produced no observable state to deduplicate against, so the
-    /// next stable verdict for that Sub must fire fresh even on an unchanged tree.
-    /// Phase-independent (Awaiting decrement, late arrival, or unknown), and a no-op if the Sub
-    /// already detached (its flag died with the slotmap entry).
+    /// next stable verdict for that Sub must fire fresh even on an unchanged tree. Phase-independent
+    /// (Awaiting decrement, late arrival, or unknown), and a no-op if the Sub already detached (its
+    /// flag died with the slotmap entry).
     ///
     /// Two passes for borrow shapes (single-threaded `step` ⇒ no change between them): pass 1
     /// resolves the route (read borrow), pass 2 applies the completion (`&mut`). The counter owns
@@ -829,8 +831,8 @@ impl Engine {
     /// - `LastReached` ⇒ route on [`BurstFinish`]: `ReturnToIdle` → arm the rebase-loop ceiling at
     ///   the `Awaiting → Rebasing` edge ([`Engine::arm_rebase_loop_ceiling`], scheduled at `now +
     ///   max_settle`), then [`Engine::transition_to_rebasing`] to probe the post-command tree
-    ///   immediately — probe-first, no driving FS event to debounce (the Cold-Seed invariant);
-    ///   `Reap` → `finish_burst_to_idle`.
+    ///   immediately — probe-first, no driving FS event to debounce (the Cold-Seed invariant); `Reap`
+    ///   → `finish_burst_to_idle`.
     /// - `Decremented` ⇒ stay Awaiting.
     /// - else (non-Awaiting, stale, `NotAwaiting`) ⇒ late completion: `EffectCompleteForUnknownSub`
     ///   / `EffectCompleteOutsideAwaiting`.
@@ -849,8 +851,8 @@ impl Engine {
     ) {
         // The Sub registry is consulted only for the unknown-Sub diagnostic in the `Diagnose` arm:
         // a Sub detached mid-Awaiting (the reap-pending case) is gone from the registry by the time
-        // its Effects' completions arrive, but the Profile is still alive and waiting for the
-        // counter to drain — we must NOT short-circuit here, or the counter would never advance.
+        // its Effects' completions arrive, but the Profile is still alive and waiting for the counter
+        // to drain — we must NOT short-circuit here, or the counter would never advance.
         // `key.profile()` is O(1) and never depends on the Sub registry.
         let profile_id = key.profile();
 
@@ -882,8 +884,8 @@ impl Engine {
                     CompletionRoute::Diagnose
                 }
             },
-            // PreFire phases (Batching / Verifying / Draining), Idle, Pending, stale Profile
-            // (None): not waiting for this completion — a late arrival the engine no longer tracks.
+            // PreFire phases (Batching / Verifying / Draining), Idle, Pending, stale Profile (None):
+            // not waiting for this completion — a late arrival the engine no longer tracks.
             _ => CompletionRoute::Diagnose,
         };
 
@@ -913,8 +915,8 @@ impl Engine {
                     // skip the sweep).
                     BurstFinish::Reap => self.finish_burst_to_idle(profile_id, out),
                 },
-                // Off Awaiting between passes (unreachable under single-threaded `step`) or
-                // vanished — late completion.
+                // Off Awaiting between passes (unreachable under single-threaded `step`) or vanished
+                // — late completion.
                 Some(AwaitVerdict::NotAwaiting) | None => {
                     self.diagnose_late_completion(sub, profile_id, out);
                 }
@@ -950,13 +952,13 @@ impl Engine {
     /// response collapses to each arm's natural shape:
     ///
     /// 1. **Sub `removed`** — resolve the name. `Some` ⇒ `detach_sub_inner` (reap the Profile if
-    ///    its last Sub left, defer if active). `None` ⇒ [`Diagnostic::ConfigDiffUnknownSub`] (a
-    ///    name whose prior attach failed and never entered the registry — nothing to detach).
+    ///    its last Sub left, defer if active). `None` ⇒ [`Diagnostic::ConfigDiffUnknownSub`] (a name
+    ///    whose prior attach failed and never entered the registry — nothing to detach).
     /// 2. **Sub `modified_params`** — target + identity unchanged; only the params differ. Resolve
     ///    the name; on `Some`, [`Self::rebind_sub_inner`] rebinds the Sub in place via the
-    ///    [`specter_core::SubRegistry::rebind`] edge, a template with the set it minted — no
-    ///    Profile churn, no kernel-watch flap, no baseline loss. On `None`, the prior attach failed
-    ///    and the Sub never entered the registry; the engine degrades the entry to a fresh attach
+    ///    [`specter_core::SubRegistry::rebind`] edge, a template with the set it minted — no Profile
+    ///    churn, no kernel-watch flap, no baseline loss. On `None`, the prior attach failed and the
+    ///    Sub never entered the registry; the engine degrades the entry to a fresh attach
     ///    ([`Diagnostic::ConfigDiffRebindFallbackAttach`] narrates the reason).
     /// 3. **Sub `modified_identity`** — target / scan / max_settle / events changed; the Sub must
     ///    move to a different Profile partition. The attach's own gate
@@ -996,8 +998,8 @@ impl Engine {
                 Some(sid) => self.rebind_sub_inner(sid, req.params, out),
                 None => {
                     // Prior attach failed; the Sub never entered the registry. Params alone cannot
-                    // apply to a non-existent Sub — degrade to a fresh attach, narrating the
-                    // *reason* (the fallback attach emits its own lifecycle diagnostics).
+                    // apply to a non-existent Sub — degrade to a fresh attach, narrating the *reason*
+                    // (the fallback attach emits its own lifecycle diagnostics).
                     out.diagnostics
                         .push(Diagnostic::ConfigDiffRebindFallbackAttach {
                             name: req.name.clone(),
@@ -1023,15 +1025,15 @@ impl Engine {
 
     /// Dispatch a [`specter_core::Input::WatchOpRejected`].
     ///
-    /// The Sensor failed to install a kernel watch (typically `EMFILE` / `ENFILE` on FD
-    /// exhaustion). Three things must happen:
+    /// The Sensor failed to install a kernel watch (typically `EMFILE` / `ENFILE` on FD exhaustion).
+    /// Three things must happen:
     ///
     /// 1. [`specter_core::Tree::vacate`] the rejected slot — clear every contribution atomically,
     ///    so the engine's view of "is this slot watched?" matches reality.
     /// 2. Walk every Profile that holds a claim on `resource` (anchor / watch-root parent / descent
-    ///    prefix) and clean up its bookkeeping — otherwise the owner flag contradicts the
-    ///    post-vacate counter, and any subsequent owner-driven release path would either see the
-    ///    wrong union on recompute or silently drift further out of sync.
+    ///    prefix) and clean up its bookkeeping — otherwise the owner flag contradicts the post-vacate
+    ///    counter, and any subsequent owner-driven release path would either see the wrong union on
+    ///    recompute or silently drift further out of sync.
     /// 3. Emit one `ProfileClaimPurged` Diagnostic per affected (owner, claim_kind) pair, plus the
     ///    umbrella `WatchOpRejected` diagnostic.
     ///
@@ -1052,9 +1054,9 @@ impl Engine {
             .push(Diagnostic::WatchOpRejected { resource, failure });
 
         // Snapshot every claimer BEFORE any mutation. Borrow checker (we'll mutate self.profiles in
-        // the loops) and we want a stable view of the pre-clamp world: a Profile that's
-        // `Pending(d)` with `d.current_prefix() == resource` must be detected here, because the
-        // helpers we run below transition the Profile to Idle.
+        // the loops) and we want a stable view of the pre-clamp world: a Profile that's `Pending(d)`
+        // with `d.current_prefix() == resource` must be detected here, because the helpers we run
+        // below transition the Profile to Idle.
         let mut anchor_claimers: SmallVec<[ProfileId; 2]> = SmallVec::new();
         let mut parent_claimers: SmallVec<[ProfileId; 2]> = SmallVec::new();
         let mut descent_claimers: SmallVec<[ProfileId; 2]> = SmallVec::new();
@@ -1076,8 +1078,8 @@ impl Engine {
         // `Unwatch`. The per-claimer loops below run their owner-bookkeeping and call `sub_watch`,
         // which short-circuits on the post-vacate state (absent key). One slot, one terminus.
         //
-        // The three claimer classes below — anchor, watch-root parent, descent prefix — are the
-        // only owners notified. A vacated `ProfileDescendant` contribution notifies no one, and the
+        // The three claimer classes below — anchor, watch-root parent, descent prefix — are the only
+        // owners notified. A vacated `ProfileDescendant` contribution notifies no one, and the
         // post-graft reconciler re-watches only diff-created entries, so a rejected chain /
         // descendant watch never self-heals while the entry stays in the snapshot; observation
         // converges opportunistically through probes from still-watched ancestors. Accepted debt:
@@ -1114,10 +1116,10 @@ impl Engine {
             });
         }
 
-        // Descent claimers: `cancel_owner_probe` (disarm + Cancel iff a descent probe was in
-        // flight, idempotent), then release the prefix claim (transitions Profile → Idle). Without
-        // the cancel-before-release, a late `ProbeResponse` would arrive after the Profile
-        // transitions out of Pending and drop with `StaleProbeResponse` — wasted I/O.
+        // Descent claimers: `cancel_owner_probe` (disarm + Cancel iff a descent probe was in flight,
+        // idempotent), then release the prefix claim (transitions Profile → Idle). Without the
+        // cancel-before-release, a late `ProbeResponse` would arrive after the Profile transitions
+        // out of Pending and drop with `StaleProbeResponse` — wasted I/O.
         for pid in descent_claimers {
             self.cancel_owner_probe(pid, out);
             self.release_descent_prefix_claim(pid, ParkNarration::Operational, out);
@@ -1130,33 +1132,33 @@ impl Engine {
         }
     }
 
-    /// Sensor reports it dropped events at the kernel level (inotify's `IN_Q_OVERFLOW`). Reseed
-    /// every Profile in scope so the engine's post-probe Seed-Ok (`dispatch_quiescence_ok`)
-    /// re-establishes baseline against disk reality and runs drift detection. Active-mode drift
-    /// (`baseline.hash() != current.hash()`) fires once for every SubtreeRoot Sub on the Profile
-    /// that has fired, then rebases.
+    /// Sensor reports it dropped events at the kernel level (inotify's `IN_Q_OVERFLOW`). Reseed every
+    /// Profile in scope so the engine's post-probe Seed-Ok (`dispatch_quiescence_ok`) re-establishes
+    /// baseline against disk reality and runs drift detection. Active-mode drift (`baseline.hash()
+    /// != current.hash()`) fires once for every SubtreeRoot Sub on the Profile that has fired, then
+    /// rebases.
     ///
     /// # Per-Profile dispatch
     ///
     /// Each in-scope Profile is reseeded according to its current state:
     ///
     /// - **`Idle`** — direct [`Engine::start_seed_burst`]. The Profile's `current` is preserved as
-    ///   the seed probe's `baseline_subtree` for mtime-skip; the response
-    ///   (`dispatch_quiescence_ok`) rebases or fires-on-drift.
+    ///   the seed probe's `baseline_subtree` for mtime-skip; the response (`dispatch_quiescence_ok`)
+    ///   rebases or fires-on-drift.
     /// - **`Active(_)`** — abandon the in-flight burst via [`Engine::finish_burst_to_idle`] (which
-    ///   cancels any pending probe and runs the Draining-sweep reconfirm cascade), then start a
-    ///   fresh seed burst. The Standard burst's accumulated `dirty` provenance is discarded — the
-    ///   seed re-baselines against the post-overflow tree, which strictly dominates whatever the
-    ///   Standard burst was tracking. `reap_pending` Profiles reaped inside `finish_burst_to_idle`
-    ///   skip the seed (no Profile to seed).
+    ///   cancels any pending probe and runs the Draining-sweep reconfirm cascade), then start a fresh
+    ///   seed burst. The Standard burst's accumulated `dirty` provenance is discarded — the seed
+    ///   re-baselines against the post-overflow tree, which strictly dominates whatever the Standard
+    ///   burst was tracking. `reap_pending` Profiles reaped inside `finish_burst_to_idle` skip the
+    ///   seed (no Profile to seed).
     /// - **`Pending(_)`** — the anchor doesn't yet exist and the Profile holds no baseline to
     ///   drift-test, so there is nothing to re-Seed; instead the descent re-probes via
-    ///   [`Engine::on_descent_event`]. A disarmed descent (awaiting an `IN_CREATE` for the next
-    ///   path component) that lost that event to the overflow window would otherwise wedge until
-    ///   some unrelated event at the prefix; the fresh probe reads the post-overflow tree directly.
-    ///   When a probe is already in flight, [`Engine::on_descent_event`] latches a re-probe-owed
-    ///   debt instead of dropping the overflow — the in-flight walk may predate the overflow
-    ///   window, so the response dispatch repays it with a probe that reads the post-overflow tree.
+    ///   [`Engine::on_descent_event`]. A disarmed descent (awaiting an `IN_CREATE` for the next path
+    ///   component) that lost that event to the overflow window would otherwise wedge until some
+    ///   unrelated event at the prefix; the fresh probe reads the post-overflow tree directly. When
+    ///   a probe is already in flight, [`Engine::on_descent_event`] latches a re-probe-owed debt
+    ///   instead of dropping the overflow — the in-flight walk may predate the overflow window, so
+    ///   the response dispatch repays it with a probe that reads the post-overflow tree.
     /// - **`Parked`** — one recovery-descent attempt via [`Engine::start_pending_recovery`]
     ///   (channel-less parks included: the prefix re-derives from the Tree). Never a re-Seed — a
     ///   park has no anchor to probe; the cold Seed the Idle arm runs would fabricate a baseline
@@ -1218,24 +1220,24 @@ impl Engine {
                 ProfileState::Active(_, finish) => {
                     // Overflow on an Active burst is reseed-XOR-reap, not a pure teardown. The
                     // in-flight probe's wire `Cancel` is a syscall-skip optimization only —
-                    // `on_profile_probe_response`'s staleness gate is the sole correctness
-                    // authority for a late response; the `Cancel` merely spares a not-yet-dequeued
-                    // worker a wasted recursive walk. Whether it is needed turns on whether a
-                    // superseding `submit` follows in THIS step:
+                    // `on_profile_probe_response`'s staleness gate is the sole correctness authority
+                    // for a late response; the `Cancel` merely spares a not-yet-dequeued worker a
+                    // wasted recursive walk. Whether it is needed turns on whether a superseding
+                    // `submit` follows in THIS step:
                     //
-                    //  reseed (will_reap == false): finish_burst_to_idle returns the Profile to
-                    //  Idle, then start_seed_burst emits a fresh Probe{P,C2}. The sensor's
-                    //  per-owner expectation map is a last-writer-wins upsert keyed by owner, so
-                    //  submit(P,C2) alone supersedes C1: a not-yet-dequeued C1 worker self-skips on
-                    //  expected[P] != C1. A wire Cancel{P} here would be strictly redundant AND the
-                    //  only same-owner Cancel+Probe pair the engine can emit — so disarm the engine
-                    //  slot only (take_owner_probe, no wire op), exactly as the response path does.
+                    //  reseed (will_reap == false): finish_burst_to_idle returns the Profile to Idle,
+                    //  then start_seed_burst emits a fresh Probe{P,C2}. The sensor's per-owner
+                    //  expectation map is a last-writer-wins upsert keyed by owner, so submit(P,C2)
+                    //  alone supersedes C1: a not-yet-dequeued C1 worker self-skips on expected[P]
+                    //  != C1. A wire Cancel{P} here would be strictly redundant AND the only
+                    //  same-owner Cancel+Probe pair the engine can emit — so disarm the engine slot
+                    //  only (take_owner_probe, no wire op), exactly as the response path does.
                     //
                     //  reap (will_reap == true): finish_burst_to_idle reaps the Profile and
-                    //  start_seed_burst then no-ops (require_idle finds it detached). No
-                    //  superseding submit follows, so the worker would run a full doomed walk —
-                    //  emit the wire Cancel via cancel_owner_probe, the same syscall-skip the
-                    //  pure-teardown sites rely on.
+                    //  start_seed_burst then no-ops (require_idle finds it detached). No superseding
+                    //  submit follows, so the worker would run a full doomed walk — emit the wire
+                    //  Cancel via cancel_owner_probe, the same syscall-skip the pure-teardown sites
+                    //  rely on.
                     //
                     // The disarm MUST precede finish_burst_to_idle: that helper swaps the Profile
                     // to Idle and destructures the prior burst, so an armed Verifying/Rebasing slot
@@ -1248,8 +1250,8 @@ impl Engine {
                     // A Seed in `Batching` (or any burst in Batching/Draining/Awaiting) holds no
                     // probe slot — the slot lives on the Verifying/Rebasing phase variant. Both
                     // take_owner_probe and cancel_owner_probe are idempotent no-ops there, so the
-                    // disarm above is harmless on a slot-less burst and the only states it does
-                    // real work on are exactly the slot-bearing ones the tripwire argument covers.
+                    // disarm above is harmless on a slot-less burst and the only states it does real
+                    // work on are exactly the slot-bearing ones the tripwire argument covers.
                     //
                     // `will_reap` is read off the matched `finish` (BurstFinish is Copy) before any
                     // &mut self call, so NLL ends the &Profile borrow here — the shape
@@ -1270,18 +1272,18 @@ impl Engine {
                     // When a descent probe is already in flight, `on_descent_event` latches a
                     // re-probe-owed debt rather than dropping the overflow: the in-flight walk may
                     // predate the overflow window, so the response dispatch repays it with a probe
-                    // that reads the post-overflow tree. No per-Profile diagnostic — consistent
-                    // with the Idle/Active arms; the step's SensorOverflow diagnostic covers it.
+                    // that reads the post-overflow tree. No per-Profile diagnostic — consistent with
+                    // the Idle/Active arms; the step's SensorOverflow diagnostic covers it.
                     self.on_descent_event(pid, out);
                 }
                 ProfileState::Parked => {
                     // One recovery-descent attempt per overflow — including channel-less parks: the
                     // purge's no-descend rationale is about *immediate* re-descent at purge time,
-                    // while an overflow is a later, externally-paced signal, so re-trying the
-                    // prefix watch the kernel may now accept is bounded by overflow rate, not a
-                    // tight loop. The entry derives the prefix from `watch_root_parent` or the
-                    // Tree; a re-rejected watch re-purges to Parked — converges. A root anchor with
-                    // no parent stays parked (degenerate).
+                    // while an overflow is a later, externally-paced signal, so re-trying the prefix
+                    // watch the kernel may now accept is bounded by overflow rate, not a tight loop.
+                    // The entry derives the prefix from `watch_root_parent` or the Tree; a
+                    // re-rejected watch re-purges to Parked — converges. A root anchor with no parent
+                    // stays parked (degenerate).
                     self.start_pending_recovery(pid, out);
                 }
             }
@@ -1293,8 +1295,8 @@ impl Engine {
     /// Enumerate Profiles whose anchor lies in the subtree rooted at `r` (the anchor itself is `r`,
     /// or `r` is on the anchor's ancestor chain). Used by [`Self::on_sensor_overflow`] to scope a
     /// per-resource overflow signal — the FSEvents-style "this stream's queue overflowed" case. v1
-    /// inotify always emits [`OverflowScope::Global`] so this is dead-stream-equipment in the
-    /// inotify path; kept for the engine API's symmetric handling across backends.
+    /// inotify always emits [`OverflowScope::Global`] so this is dead-stream-equipment in the inotify
+    /// path; kept for the engine API's symmetric handling across backends.
     ///
     /// Worst-case `O(profiles × tree-depth)`. Acceptable for typical per-resource overflow rates
     /// (rare under healthy invariants).
@@ -1307,9 +1309,9 @@ impl Engine {
     }
 
     /// Start a new burst (Seed if no baseline yet, Standard if baseline established); pre-fire
-    /// `Active` → fold the event through `event_drives_batching` (notes into `dirty`, emits a
-    /// Cancel iff a probe was in flight, arms a fresh settle timer); post-fire `Active` (`Awaiting`
-    /// / `Rebasing`) → defer it via `absorb_event_into_fire_tail`.
+    /// `Active` → fold the event through `event_drives_batching` (notes into `dirty`, emits a Cancel
+    /// iff a probe was in flight, arms a fresh settle timer); post-fire `Active` (`Awaiting` /
+    /// `Rebasing`) → defer it via `absorb_event_into_fire_tail`.
     ///
     /// Pre-fire, `dirty` is the single accumulator — its captured paths both derive the probe scope
     /// (their component-LCA, resolved to a live id) and are projected to the `Chains` proof
@@ -1320,9 +1322,9 @@ impl Engine {
     /// guard.
     ///
     /// `event` is threaded purely for the `EventAbsorbedByFireTail` diagnostic so the operator can
-    /// correlate logs to the deferred FsEvent. The "no baseline → Seed" branch handles the
-    /// degenerate post-`Vanished` Idle state (`current.is_none()`): a Standard burst with no
-    /// baseline cannot dispatch a stability verdict.
+    /// correlate logs to the deferred FsEvent. The "no baseline → Seed" branch handles the degenerate
+    /// post-`Vanished` Idle state (`current.is_none()`): a Standard burst with no baseline cannot
+    /// dispatch a stability verdict.
     pub(crate) fn drive_burst(
         &mut self,
         profile_id: ProfileId,
@@ -1337,16 +1339,16 @@ impl Engine {
         };
         match p.state() {
             ProfileState::Idle => {
-                // The fork's real question is "do I have a trustworthy *settled baseline* to
-                // debounce against, or must I re-Seed?". `current_is_some()` was only ever a
-                // faithful proxy because `current` and `settled` were once installed atomically; a
-                // Seed that grafts `current` while deferring the pin (the `Retry` re-batch loop, or
-                // a loop terminated by the `Abandon` ceiling) leaves Idle with `current = Some` but
-                // no settled baseline — routing that to a Standard burst would make a never-fired
-                // Profile *fire* on first quiescence where Seed deliberately stays silent. Branch
-                // on the baseline's presence directly. (`classify_event_carriers`'s
-                // `!current_is_some()` is a different question — "is the anchor absent ⇒
-                // loss-recovery candidate?" — and correctly stays `current_is_some()`.)
+                // The fork's real question is "do I have a trustworthy *settled baseline* to debounce
+                // against, or must I re-Seed?". `current_is_some()` was only ever a faithful proxy
+                // because `current` and `settled` were once installed atomically; a Seed that grafts
+                // `current` while deferring the pin (the `Retry` re-batch loop, or a loop terminated
+                // by the `Abandon` ceiling) leaves Idle with `current = Some` but no settled baseline
+                // — routing that to a Standard burst would make a never-fired Profile *fire* on first
+                // quiescence where Seed deliberately stays silent. Branch on the baseline's presence
+                // directly. (`classify_event_carriers`'s `!current_is_some()` is a different question
+                // — "is the anchor absent ⇒ loss-recovery candidate?" — and correctly stays
+                // `current_is_some()`.)
                 if p.baseline_is_some() {
                     self.start_standard_burst(profile_id, event_resource, event_path, now, out);
                 } else {
@@ -1362,9 +1364,9 @@ impl Engine {
                 }
             }
             // The post-fire absorb arm is *the* typed-disjoint path from the pre-fire
-            // `event_drives_batching` arm: noting into `dirty` and emitting
-            // `EventAbsorbedByFireTail` belongs to `PostFireBurst` alone, and the helper owns the
-            // mutation in `burst.rs` so `transitions.rs` never reaches for burst internals.
+            // `event_drives_batching` arm: noting into `dirty` and emitting `EventAbsorbedByFireTail`
+            // belongs to `PostFireBurst` alone, and the helper owns the mutation in `burst.rs` so
+            // `transitions.rs` never reaches for burst internals.
             ProfileState::Active(ActiveBurst::PostFire(_), _) => {
                 self.absorb_event_into_fire_tail(
                     profile_id,
@@ -1388,19 +1390,19 @@ impl Engine {
 
     /// Arm (or re-arm) the operator `absorb` window on each Profile `sub`'s watch fires on
     /// ([`specter_core::SubRegistry::firing_profiles`]) — the [`specter_core::Input::ArmAbsorb`]
-    /// handler. Deriving a window's `(expiry, mode)` from the operator's `duration` is the one
-    /// place this policy lives: `None` ⇒ a one-shot window one `settle` interval of that Profile
-    /// wide ([`AbsorbMode::ConsumeOnFirst`], to cover a single expected replication); `Some(d)` ⇒ a
+    /// handler. Deriving a window's `(expiry, mode)` from the operator's `duration` is the one place
+    /// this policy lives: `None` ⇒ a one-shot window one `settle` interval of that Profile wide
+    /// ([`AbsorbMode::ConsumeOnFirst`], to cover a single expected replication); `Some(d)` ⇒ a
     /// `d`-wide window ([`AbsorbMode::PersistUntil`], to cover a run of them). A `--for 0s` yields
     /// `expiry == now`, which `absorb_window_live` reads inert — a harmless operator-owned no-op,
     /// no validation.
     ///
     /// [`Profile::arm_absorb`] sets the window **and** retro-latches any in-flight pre-fire burst
-    /// in one operation (the reverse race — the replication's events opened a burst before the
-    /// signal arrived — so a burst already batching folds too). A stale `sub`, or a template that
-    /// holds no match, arms nothing. Each window narrates [`Diagnostic::AbsorbArmed`], in
-    /// `firing_profiles`' order, so a `tail` sees every arm, not only the eventual
-    /// [`Diagnostic::QuiescenceAbsorbed`] fold.
+    /// in one operation (the reverse race — the replication's events opened a burst before the signal
+    /// arrived — so a burst already batching folds too). A stale `sub`, or a template that holds no
+    /// match, arms nothing. Each window narrates [`Diagnostic::AbsorbArmed`], in `firing_profiles`'
+    /// order, so a `tail` sees every arm, not only the eventual [`Diagnostic::QuiescenceAbsorbed`]
+    /// fold.
     pub(crate) fn on_arm_absorb(
         &mut self,
         sub: SubId,
@@ -1435,8 +1437,8 @@ impl Engine {
     /// [`Self::finalize_anchor_lost_and_park`] (no descent — their failure modes would loop it; the
     /// park is the honest terminal). The probe-dispatch callers reach this with their slot already
     /// disarmed (`take_owner_probe` ran before dispatch), so the `cancel_owner_probe` below is a
-    /// no-op there — no wire Cancel; for the event/rejection routes it cancels a genuinely
-    /// in-flight Verifying/Rebasing probe.
+    /// no-op there — no wire Cancel; for the event/rejection routes it cancels a genuinely in-flight
+    /// Verifying/Rebasing probe.
     ///
     /// **`watch_root_parent` is intentionally preserved.** It is both the descent prefix the
     /// observed-loss wrapper re-enters against immediately, and — for the parked terminals — the
@@ -1469,9 +1471,9 @@ impl Engine {
         if matches!(p.state(), ProfileState::Pending(_) | ProfileState::Parked) {
             return;
         }
-        // Capture `was_active` BEFORE discard_anchor_state. The helper does not mutate
-        // Profile.state (only `finish_burst_to_idle` does), so the read is order-insensitive in v1;
-        // pinning it before the helper guards against any future helper change that touches state.
+        // Capture `was_active` BEFORE discard_anchor_state. The helper does not mutate Profile.state
+        // (only `finish_burst_to_idle` does), so the read is order-insensitive in v1; pinning it
+        // before the helper guards against any future helper change that touches state.
         let was_active = matches!(p.state(), ProfileState::Active(_, _));
 
         // Idempotent: emits Cancel iff a probe is in flight (Active+Verifying ⇒ slot armed). For
@@ -1494,8 +1496,8 @@ impl Engine {
     }
 
     /// Observed-loss terminal: [`Self::finalize_anchor_lost`], then re-enter pending descent at the
-    /// anchor's recovery parent *inside the loss step itself* — witnessed, so the terminus Seed
-    /// owes a fire (`seed_owes_first_fire` / witness drift).
+    /// anchor's recovery parent *inside the loss step itself* — witnessed, so the terminus Seed owes
+    /// a fire (`seed_owes_first_fire` / witness drift).
     ///
     /// "Anchor lost" and "anchor doesn't yet exist" are the same state: Resource identity is
     /// `(parent, segment)` and survives delete-and-recreate, so an observed loss re-enters the same
@@ -1507,8 +1509,8 @@ impl Engine {
     /// tmp-create event could re-capture the dying inode.
     ///
     /// Callers are the five observed-loss sites: the anchor-terminal event path, the kind-mismatch
-    /// certifier arm, and the three probe-`Vanished` dispatches. The three probe-`Failed`
-    /// dispatches and `on_watch_op_rejected`'s anchor purge take the sibling wrapper
+    /// certifier arm, and the three probe-`Vanished` dispatches. The three probe-`Failed` dispatches
+    /// and `on_watch_op_rejected`'s anchor purge take the sibling wrapper
     /// [`Self::finalize_anchor_lost_and_park`] — descending there would loop tightly (probe → fail;
     /// materialize → watch → reject) against a condition the descent cannot fix.
     fn finalize_anchor_lost_and_descend(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
@@ -1525,9 +1527,9 @@ impl Engine {
         if !matches!(p.state(), ProfileState::Idle) || p.current_is_some() {
             return;
         }
-        // The recovery channel, NOT `tree.parent(anchor)`: `None` only after a parent-watch
-        // rejection purge, where a descent would loop materialize → watch → reject. Park explicitly
-        // — the honest state label; recovery comes from the channel-less park's own doors (a sensor
+        // The recovery channel, NOT `tree.parent(anchor)`: `None` only after a parent-watch rejection
+        // purge, where a descent would loop materialize → watch → reject. Park explicitly — the
+        // honest state label; recovery comes from the channel-less park's own doors (a sensor
         // overflow re-deriving the parent from the Tree, an operator re-attach, detach).
         let Some(parent) = p.watch_root_parent() else {
             self.park_profile(profile_id, ParkNarration::Operational, out);
@@ -1536,16 +1538,16 @@ impl Engine {
         self.enter_anchor_recovery_descent(profile_id, parent, DescentWitness::Appeared, out);
     }
 
-    /// Unhealable-loss terminal: [`Self::finalize_anchor_lost`], then park. The wrapper for the
-    /// loss routes where an immediate descent would tight-loop against a condition descent cannot
-    /// fix — the three probe-`Failed { Denied }` dispatches (path-fatal `EACCES`/`ELOOP`/`EIO`: the
-    /// anchor typically never left disk, so probe → fail repeats) and `on_watch_op_rejected`'s
-    /// anchor purge (the kernel refused the watch, so materialize → Watch → reject repeats).
+    /// Unhealable-loss terminal: [`Self::finalize_anchor_lost`], then park. The wrapper for the loss
+    /// routes where an immediate descent would tight-loop against a condition descent cannot fix —
+    /// the three probe-`Failed { Denied }` dispatches (path-fatal `EACCES`/`ELOOP`/`EIO`: the anchor
+    /// typically never left disk, so probe → fail repeats) and `on_watch_op_rejected`'s anchor purge
+    /// (the kernel refused the watch, so materialize → Watch → reject repeats).
     ///
-    /// The park is the typed home of "anchorless, awaiting recovery or operator action": the
-    /// Profile leaves every burst-routing surface (`covering_profiles` filters `Parked`) and gains
-    /// the recovery doors — a `StructureChanged` at `watch_root_parent` or at the co-claimed anchor
-    /// slot, a sensor overflow, an operator re-attach — each re-entering descent, never a Seed.
+    /// The park is the typed home of "anchorless, awaiting recovery or operator action": the Profile
+    /// leaves every burst-routing surface (`covering_profiles` filters `Parked`) and gains the
+    /// recovery doors — a `StructureChanged` at `watch_root_parent` or at the co-claimed anchor slot,
+    /// a sensor overflow, an operator re-attach — each re-entering descent, never a Seed.
     fn finalize_anchor_lost_and_park(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
         self.finalize_anchor_lost(profile_id, out);
         // A reaped Profile has nothing to park; a non-Idle or still-anchored Profile means finalize
@@ -1562,9 +1564,9 @@ impl Engine {
 
     /// The single `Parked` writer — every park entry (the two loss wrappers' park arms and
     /// [`Self::release_descent_prefix_claim`]'s descent teardown) routes the state write through
-    /// here. Transitions through the `ProfileMap` chokepoint (counting the carrier edge; the
-    /// dropped prior is `Idle` or a disarmed `Pending` descent — `ProbeSlot`'s Drop tripwire
-    /// enforces cancel-first at the discard itself), asserts the park's anchor coherence (`Parked ⇒
+    /// here. Transitions through the `ProfileMap` chokepoint (counting the carrier edge; the dropped
+    /// prior is `Idle` or a disarmed `Pending` descent — `ProbeSlot`'s Drop tripwire enforces
+    /// cancel-first at the discard itself), asserts the park's anchor coherence (`Parked ⇒
     /// Unclassified ∧ AnchorClaim::None`), and narrates.
     ///
     /// `narration` keeps the operator stream honest in both directions: every *operational* park
@@ -1598,19 +1600,19 @@ impl Engine {
     }
 
     /// Emit [`Diagnostic::PerFileDriftDroppedOnRecovery`] iff a live survival witness exists, the
-    /// post-graft `current` drifted from it, and the Profile carries a `PerStableFile` Sub. A
-    /// Seed-Ok that closes an anchor-loss window rebases `baseline := observed`, absorbing the
-    /// whole loss-window delta in one move: the Subtree side re-fires its drifted Subs from the
-    /// witness, but a `PerStableFile` Sub has no per-leaf witness, so its loss-window reactions
-    /// vanish without a trace — exactly the case to flag.
+    /// post-graft `current` drifted from it, and the Profile carries a `PerStableFile` Sub. A Seed-Ok
+    /// that closes an anchor-loss window rebases `baseline := observed`, absorbing the whole
+    /// loss-window delta in one move: the Subtree side re-fires its drifted Subs from the witness,
+    /// but a `PerStableFile` Sub has no per-leaf witness, so its loss-window reactions vanish without
+    /// a trace — exactly the case to flag.
     ///
     /// Standalone witness-drift predicate, **not** folded into the drift fork: a PerFile-only
     /// recovery never records a fire (so it classifies [`Consequence::SilentPin`], never
-    /// [`Consequence::RecoveryFire`]) yet is precisely this signal's target, so the condition
-    /// cannot piggy-back on the fork. Invoked while the witness is still live — at the recovery
-    /// fire (post-gate, once) and on the seal-only terminal, each *before*
-    /// [`specter_core::Profile::rebase_baseline`] consumes it. A byte-identical recovery (`current
-    /// == witness`) dropped nothing and emits nothing.
+    /// [`Consequence::RecoveryFire`]) yet is precisely this signal's target, so the condition cannot
+    /// piggy-back on the fork. Invoked while the witness is still live — at the recovery fire
+    /// (post-gate, once) and on the seal-only terminal, each *before*
+    /// [`specter_core::Profile::rebase_baseline`] consumes it. A byte-identical recovery (`current ==
+    /// witness`) dropped nothing and emits nothing.
     fn warn_perfile_dropped_on_recovery(&self, profile_id: ProfileId, out: &mut StepOutput) {
         if let Some(p) = self.profiles.get(profile_id)
             && let Some(witness) = p.survival_witness()
@@ -1630,15 +1632,15 @@ impl Engine {
     /// [`Engine::seed_drift_observed`] fork. Pure `&self`; reads the post-graft state the caller
     /// ([`Engine::fire_or_seal`]) committed immediately before.
     ///
-    /// **The shape layer precedes both the intent fork and the fold override.** A
-    /// `MatchChain`-shaped Profile classifies [`Consequence::Reconcile`] for *any* intent: cold
-    /// Seed (first enumeration), triggered Seed, Standard, and post-recovery Seed all converge on
-    /// the same idempotent reconcile (the registry dedup query makes a re-reconcile a no-op), so
-    /// the Seed-flag machinery below is never consulted for discovery. The early return also keeps
-    /// the fold override off a chain verdict, whatever its Profile holds: no input arms that
-    /// Profile's window (an absorb addressed to a template arms the Profiles it minted onto,
-    /// [`specter_core::SubRegistry::firing_profiles`]), and a window armed there would have no
-    /// Effect to suppress — minting proceeds and the latch stays unconsumed.
+    /// **The shape layer precedes both the intent fork and the fold override.** A `MatchChain`-shaped
+    /// Profile classifies [`Consequence::Reconcile`] for *any* intent: cold Seed (first enumeration),
+    /// triggered Seed, Standard, and post-recovery Seed all converge on the same idempotent reconcile
+    /// (the registry dedup query makes a re-reconcile a no-op), so the Seed-flag machinery below is
+    /// never consulted for discovery. The early return also keeps the fold override off a chain
+    /// verdict, whatever its Profile holds: no input arms that Profile's window (an absorb addressed
+    /// to a template arms the Profiles it minted onto,
+    /// [`specter_core::SubRegistry::firing_profiles`]), and a window armed there would have no Effect
+    /// to suppress — minting proceeds and the latch stays unconsumed.
     ///
     /// A Standard burst always fires the Standard consequence. A Seed burst splits three disjoint
     /// ways: a fresh Profile that witnessed activity owes a *first* fire (the Standard consequence
@@ -1654,11 +1656,11 @@ impl Engine {
     /// the fold latch at birth (a live operator `absorb` window —
     /// [`specter_core::ProfileState::burst_fold_latched`]) folds rather than fires. A firing `base`
     /// ([`Consequence::is_firing`]) becomes [`Consequence::AbsorbFold`]; a non-firing `base`
-    /// ([`Consequence::SilentPin`]) passes through, so a redundant Cold-Seed leaves the window
-    /// armed for the first fireable burst. This is the **sole** verdict-time consult of the fold
-    /// decision, and it reads the burst's frozen latch, never the window — the
-    /// orthogonal-to-[`specter_core::BurstIntent`] terminal-consequence switch the latch was
-    /// designed to be.
+    /// ([`Consequence::SilentPin`]) passes through, so a redundant Cold-Seed leaves the window armed
+    /// for the first fireable burst. This is the **sole** verdict-time consult of the fold decision,
+    /// and it reads the burst's frozen latch, never the window — the
+    /// orthogonal-to-[`specter_core::BurstIntent`] terminal-consequence switch the latch was designed
+    /// to be.
     fn classify_consequence(&self, profile_id: ProfileId, intent: BurstIntent) -> Consequence {
         // Shape layer: a discovery Profile's stable verdict reconciles the match set, whatever the
         // intent, ahead of the fold override.
@@ -1678,9 +1680,9 @@ impl Engine {
                 } else if self.seed_drift_observed(profile_id) {
                     // `seed_drift_observed` implies `any_fired`, which within this single `&self`
                     // resolution implies a non-empty fired set — so the empty arm is a
-                    // registry-timing defensive (a detached Sub's flag died with its slotmap
-                    // entry). It falls to the silent seal, exactly as the prior pin's
-                    // `!drifted.is_empty()` guard did.
+                    // registry-timing defensive (a detached Sub's flag died with its slotmap entry).
+                    // It falls to the silent seal, exactly as the prior pin's `!drifted.is_empty()`
+                    // guard did.
                     let drifted = self.subs.fired_in(profile_id);
                     if drifted.is_empty() {
                         Consequence::SilentPin
@@ -1716,13 +1718,13 @@ impl Engine {
     /// machinery is intent-agnostic, so there is no Seed special case to fork at this layer.
     ///
     /// `apply_snapshot` runs *before* `classify_consequence`: the drift read needs the post-graft
-    /// `current`, and `seed_owes_first_fire`'s inputs (`any_fired`, the pre-fire `dirty`
-    /// accumulator) are invariant under the graft, so the classification is order-stable.
+    /// `current`, and `seed_owes_first_fire`'s inputs (`any_fired`, the pre-fire `dirty` accumulator)
+    /// are invariant under the graft, so the classification is order-stable.
     ///
     /// The three non-firing arms — [`Consequence::SilentPin`], [`Consequence::AbsorbFold`], and
     /// [`Consequence::Reconcile`] — share the silent-seal terminus
-    /// ([`Engine::seal_baseline_silently`]): no Effect to defer, so none consults the Draining
-    /// gate. `AbsorbFold` and `Reconcile` each run a per-cause prologue first (the
+    /// ([`Engine::seal_baseline_silently`]): no Effect to defer, so none consults the Draining gate.
+    /// `AbsorbFold` and `Reconcile` each run a per-cause prologue first (the
     /// [`Diagnostic::QuiescenceAbsorbed`] narration + count bump; the reconcile's mint pass), since
     /// the seal may reap the Profile. The three firing consequences cross the single gate in
     /// [`Engine::gated_fire`].
@@ -1772,10 +1774,10 @@ impl Engine {
             }
             Consequence::Reconcile => {
                 // Prologue-before-seal, `AbsorbFold`'s ordering rationale: the seal can reap the
-                // Profile (a template detached mid-burst marks the burst for reap), so the mint
-                // pass lands while it is live. `reconcile_matches` derives its template set from
-                // the live registry, so that same zombie burst mints nothing — and it touches no
-                // burst state; the burst exits through the seal's `finish_burst_to_idle` alone.
+                // Profile (a template detached mid-burst marks the burst for reap), so the mint pass
+                // lands while it is live. `reconcile_matches` derives its template set from the live
+                // registry, so that same zombie burst mints nothing — and it touches no burst state;
+                // the burst exits through the seal's `finish_burst_to_idle` alone.
                 self.reconcile_matches(profile_id, now, out);
                 self.seal_baseline_silently(profile_id, out);
             }
@@ -1799,8 +1801,8 @@ impl Engine {
     /// Seal `baseline := current` silently and finish the burst — the shared terminus for a
     /// non-firing commit.
     ///
-    /// Flags the per-file drop *while the witness is still live* (the predicate self-gates to a
-    /// live witness + a `PerStableFile` Sub), then rebases and finishes. The warn must precede
+    /// Flags the per-file drop *while the witness is still live* (the predicate self-gates to a live
+    /// witness + a `PerStableFile` Sub), then rebases and finishes. The warn must precede
     /// [`specter_core::Profile::rebase_baseline`], which consumes the witness it reads. No Effect
     /// to defer ⇒ never Draining-gated. The caller ([`Engine::fire_or_seal`]) has already committed
     /// the observed tree (`apply_snapshot`, once for every consequence), so this seals over the
@@ -1815,12 +1817,12 @@ impl Engine {
 
     /// The single Draining-gate site. Fire iff `forced` (the `max_settle` ceiling expired — out of
     /// time, fire regardless of a churning covered descendant) **or** no covered strict-descendant
-    /// Profile is in an Active Standard burst; otherwise defer via
-    /// [`Engine::transition_to_draining`] (don't fire an ancestor's "tree settled" command while a
-    /// nested watched subtree churns — the `finish_burst_to_idle` sweep reconfirms once the
-    /// descendant settles). The descendant query is evaluated fresh here, never cached; `forced`
-    /// short-circuits it, so a deadline-fire neither pays for nor consults the gate. `forced` is
-    /// the [`QuiescenceVerdict::Stable`]([`StableReason::Forced`]) ceiling case (the bounded
+    /// Profile is in an Active Standard burst; otherwise defer via [`Engine::transition_to_draining`]
+    /// (don't fire an ancestor's "tree settled" command while a nested watched subtree churns — the
+    /// `finish_burst_to_idle` sweep reconfirms once the descendant settles). The descendant query
+    /// is evaluated fresh here, never cached; `forced` short-circuits it, so a deadline-fire neither
+    /// pays for nor consults the gate. `forced` is the
+    /// [`QuiescenceVerdict::Stable`]([`StableReason::Forced`]) ceiling case (the bounded
     /// `BurstDeadline` / `RebaseCeiling` expired) — a hard ceiling fires through, never defers.
     ///
     /// On the fire branch, post-gate and exactly once: the fresh-Seed per-file-skip narration
@@ -1834,9 +1836,9 @@ impl Engine {
     /// projected by `effect_forced`) is what later lands on [`specter_core::Effect::forced`]. For a
     /// `Standard` fire the two coincide (the caller passes the same bit to both), so the split is
     /// inert; it is load-bearing only for [`EmitMode::SeedDrift`], which carries no inner bit (a
-    /// recovery drift fire is never a time-pressured force-fire on its `Effect`) yet can still
-    /// arrive here `forced = true` — a recovery that hit the bounded ceiling bypasses the gate
-    /// without marking its `Effect`.
+    /// recovery drift fire is never a time-pressured force-fire on its `Effect`) yet can still arrive
+    /// here `forced = true` — a recovery that hit the bounded ceiling bypasses the gate without
+    /// marking its `Effect`.
     fn gated_fire(
         &mut self,
         profile_id: ProfileId,
@@ -1880,8 +1882,8 @@ impl Engine {
     ///   region must not poison `current`.
     /// - [`QuiescenceVerdict::Abandon`] — [`Diagnostic::QuiescenceCeilingUnreadable`] names the
     ///   directory, and the burst finishes without committing: an unread region must never become
-    ///   the dedup / Seed baseline. Its evidence parks rather than re-batching against a region
-    ///   that stays unreadable, and the next burst re-proves it.
+    ///   the dedup / Seed baseline. Its evidence parks rather than re-batching against a region that
+    ///   stays unreadable, and the next burst re-proves it.
     fn dispatch_quiescence_ok(
         &mut self,
         profile_id: ProfileId,
@@ -1905,8 +1907,8 @@ impl Engine {
             QuiescenceVerdict::Stable(StableReason::Forced {
                 hash_channel_disagreed,
             }) => {
-                // N event-silent windows that each hashed differently are motion outside the
-                // `events` mask, not a slow writer the deadline caught.
+                // N event-silent windows that each hashed differently are motion outside the `events`
+                // mask, not a slow writer the deadline caught.
                 if hash_channel_disagreed {
                     let retries = self
                         .profiles
@@ -1961,8 +1963,8 @@ impl Engine {
     /// survival-mode-authoritative priority is structural — there is no ordering to maintain here
     /// and the witness cannot be silently lost on recovery. `None` (a fresh, never-fired Profile)
     /// preserves "a fresh Seed with **no witnessed activity** never fires an Effect" — a fresh Seed
-    /// that *did* witness activity is diverted upstream by [`Engine::seed_owes_first_fire`] and
-    /// never reaches this predicate.
+    /// that *did* witness activity is diverted upstream by [`Engine::seed_owes_first_fire`] and never
+    /// reaches this predicate.
     ///
     /// The boolean answer is per-Profile; the caller ([`Engine::classify_consequence`]) builds the
     /// SeedDrift fire filter from the Profile's fired Subs ([`specter_core::SubRegistry::fired_in`]).
@@ -2020,10 +2022,10 @@ impl Engine {
     /// [`crate::burst::pre_fire_target`], not a second computation of it: that function *computes*
     /// the dirty-LCA target at [`Engine::transition_to_verifying`] and writes it onto
     /// [`specter_core::PreFirePhase::Verifying`]'s payload (immutable for the variant's lifetime);
-    /// this method reads it back when the probe responds, so the snapshot grafts at the resource the
-    /// probe was scoped to. The same value is also read back at the emission choke
-    /// ([`Engine::probe_emission_request`]) to render the wire: computed once at the transition, read
-    /// back wherever the probe's scope is needed. The `p.resource` fallback on the
+    /// this method reads it back when the probe responds, so the snapshot grafts at the resource
+    /// the probe was scoped to. The same value is also read back at the emission choke
+    /// ([`Engine::probe_emission_request`]) to render the wire: computed once at the transition,
+    /// read back wherever the probe's scope is needed. The `p.resource` fallback on the
     /// structurally-unreachable non-Verifying arm matches the historical `unwrap_or(anchor)`. `None`
     /// only on the structurally-unreachable absent-Profile path (the caller arms then return).
     ///
@@ -2032,11 +2034,11 @@ impl Engine {
     /// [`Self::certify_probe_response`]'s entry guard proved the Profile present, and after
     /// `profile_probe_gate` proved its state is `Active(PreFire(Verifying))`.
     ///
-    /// The covered-descendant fire-gate is **not** read here. It is a fire-only concern, so it
-    /// lives at the single gate site ([`Engine::gated_fire`]) — evaluated fresh from the live tree
-    /// only when a fire reaches it, and short-circuited entirely on a `forced` deadline-fire.
-    /// Computing it here would re-introduce the "derived then discarded on the non-fire arms" shape
-    /// this unification dissolves.
+    /// The covered-descendant fire-gate is **not** read here. It is a fire-only concern, so it lives
+    /// at the single gate site ([`Engine::gated_fire`]) — evaluated fresh from the live tree only
+    /// when a fire reaches it, and short-circuited entirely on a `forced` deadline-fire. Computing
+    /// it here would re-introduce the "derived then discarded on the non-fire arms" shape this
+    /// unification dissolves.
     fn verifying_probe_target(&self, profile_id: ProfileId) -> Option<ResourceId> {
         let Some(p) = self.profiles.get(profile_id) else {
             debug_assert!(
@@ -2072,8 +2074,8 @@ impl Engine {
 
     /// Emit Effects for `mode`, seal the survival witness for the recovery consequence, then settle
     /// the burst: `Awaiting` when ≥1 Effect was pushed, else finish to Idle. The single home for
-    /// the shared `emit_effects → count>0 ? awaiting : finish` triple — the one funnel every
-    /// fireable Seed/Standard consequence reaches.
+    /// the shared `emit_effects → count>0 ? awaiting : finish` triple — the one funnel every fireable
+    /// Seed/Standard consequence reaches.
     ///
     /// **The seal is keyed on `EmitMode::SeedDrift`, not a separate discriminant.** Only a recovery
     /// drift-fire emits `SeedDrift`, so the mode *is* the witness-consumption signal:
@@ -2125,10 +2127,10 @@ impl Engine {
     }
 
     /// (pre-fire, Vanished) — for both [`BurstIntent`]s. Treats a vanished probe root as an
-    /// anchor-disappearance signal: routes through [`Self::finalize_anchor_lost_and_descend`],
-    /// whose discard releases the anchor's `watch_demand` contribution so the trichotomy invariant
-    /// in `reap_profile` — `!(Pending && AnchorClaim::Held)` — holds when the wrapper re-enters
-    /// descent within this same step.
+    /// anchor-disappearance signal: routes through [`Self::finalize_anchor_lost_and_descend`], whose
+    /// discard releases the anchor's `watch_demand` contribution so the trichotomy invariant in
+    /// `reap_profile` — `!(Pending && AnchorClaim::Held)` — holds when the wrapper re-enters descent
+    /// within this same step.
     ///
     /// A Standard probe targets the dirty-LCA — possibly a *descendant*, not the anchor — so
     /// `Vanished` there means "the probed subtree root is gone", which an `rm -rf` racing the walk
@@ -2142,10 +2144,10 @@ impl Engine {
     /// inode disappearing, and the wrapper's witnessed descent re-acquires it at materialization
     /// (`dispatch_descent_ok`'s anchor arm re-bumps `anchor.watch_demand` with the Profile's mask).
     ///
-    /// `intent` only selects the [`Diagnostic::ProbeVanished`] payload — the consequence is
-    /// identical for both. Standard bursts always run on materialized Profiles (`drive_burst`
-    /// routes baseline-less `FsEvent`s to Seed instead), so the guard is effectively unconditional
-    /// in v1 — kept for robustness against future routing changes.
+    /// `intent` only selects the [`Diagnostic::ProbeVanished`] payload — the consequence is identical
+    /// for both. Standard bursts always run on materialized Profiles (`drive_burst` routes
+    /// baseline-less `FsEvent`s to Seed instead), so the guard is effectively unconditional in v1 —
+    /// kept for robustness against future routing changes.
     fn dispatch_pre_fire_vanished(
         &mut self,
         profile_id: ProfileId,
@@ -2162,13 +2164,13 @@ impl Engine {
         self.finalize_anchor_lost_and_descend(profile_id, out);
     }
 
-    /// (pre-fire, Failed) — the two [`ProbeFailure`] classes say different things and take
-    /// different consequences, for either intent:
+    /// (pre-fire, Failed) — the two [`ProbeFailure`] classes say different things and take different
+    /// consequences, for either intent:
     ///
     /// - [`ProbeFailure::Denied`] — the root refused its `lstat`, or could be read neither whole
     ///   nor from an earlier listing, or the prober faulted. The anchor's identity is in question:
-    ///   [`Self::finalize_anchor_lost_and_park`], not the descend wrapper, since an anchor that
-    ///   still exists would probe and fail in a tight loop. The park's recovery
+    ///   [`Self::finalize_anchor_lost_and_park`], not the descend wrapper, since an anchor that still
+    ///   exists would probe and fail in a tight loop. The park's recovery
     ///   ([`Self::start_pending_recovery`]) is the parent's (or a co-claimed anchor slot's) next
     ///   event, an overflow, or a re-attach.
     /// - [`ProbeFailure::Transient`] — the walk observed nothing and says nothing of the anchor,
@@ -2220,8 +2222,8 @@ impl Engine {
     /// - [`QuiescenceVerdict::Stable`] — commit the post-command tree and rebase `baseline :=
     ///   current`, natural or forced alike. A forced one is always narrated, because no Effect
     ///   records it: [`Diagnostic::RebaseCeilingForced`] with `observed_change =
-    ///   hash_channel_disagreed`, or [`Diagnostic::ChangeOutsideEventMask`] when a disagreement
-    ///   tails a `retry_streak` at-or-above [`CHANGE_OUTSIDE_MASK_RETRY_FLOOR`]. Then a
+    ///   hash_channel_disagreed`, or [`Diagnostic::ChangeOutsideEventMask`] when a disagreement tails
+    ///   a `retry_streak` at-or-above [`CHANGE_OUTSIDE_MASK_RETRY_FLOOR`]. Then a
     ///   [`BurstFinish::ReturnToIdle`] burst with a final-window residual restarts from it, so a
     ///   change in that window is not lost, whatever the burst's origin; any other finishes.
     /// - [`QuiescenceVerdict::Retry`] — the next sample, a settle window later
@@ -2254,8 +2256,8 @@ impl Engine {
                     hash_channel_disagreed,
                 } = reason
                 {
-                    // Narrated before the exit, so the stream names the ceiling ahead of any
-                    // restart it produces.
+                    // Narrated before the exit, so the stream names the ceiling ahead of any restart
+                    // it produces.
                     let intent = self.rebase_burst_intent(profile_id);
                     if hash_channel_disagreed {
                         let retries = self
@@ -2323,12 +2325,12 @@ impl Engine {
     /// (Rebase, Vanished). Anchor disappeared between fire and rebase. Symmetric path with
     /// `dispatch_pre_fire_vanished`: route through [`Self::finalize_anchor_lost_and_descend`]. A
     /// command whose effect atomically replaces its own anchor lands here and re-fires once per
-    /// settle window until its output stabilizes (witness equality / B1 terminate idempotent
-    /// commands after one extra cycle) — the same semantics the anchor-terminal route already
-    /// carries for self-replacing commands. Diagnostic carries the burst's actual intent so logs
-    /// can distinguish Seed-driven (drift) vs Standard-driven Rebasing; the lookup falls back to
-    /// `Standard` only on a stale-Profile or non-Active defensive path (the routing in
-    /// `on_probe_response` guarantees `Active(Rebasing)` at entry).
+    /// settle window until its output stabilizes (witness equality / B1 terminate idempotent commands
+    /// after one extra cycle) — the same semantics the anchor-terminal route already carries for
+    /// self-replacing commands. Diagnostic carries the burst's actual intent so logs can distinguish
+    /// Seed-driven (drift) vs Standard-driven Rebasing; the lookup falls back to `Standard` only on
+    /// a stale-Profile or non-Active defensive path (the routing in `on_probe_response` guarantees
+    /// `Active(Rebasing)` at entry).
     fn dispatch_rebase_vanished(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
         if self.profiles.get(profile_id).is_none() {
             return;
@@ -2345,18 +2347,18 @@ impl Engine {
         self.finalize_anchor_lost_and_descend(profile_id, out);
     }
 
-    /// (Rebase, Failed). Probe failed at the anchor between fire and rebase — the post-fire mirror of
-    /// [`Self::dispatch_pre_fire_failed`]. `Denied` parks via [`Self::finalize_anchor_lost_and_park`]
-    /// (no descent — the tight-loop rationale on `dispatch_pre_fire_failed`). `Transient` mirrors the
-    /// post-fire `Undischarged` consequence: settle-space the next sample through `Rebasing →
-    /// Settling` ([`Self::transition_to_settling`]) while the `RebaseCeiling` holds (`!forced`), or —
-    /// once it forces — park the final-window residual and finish to Idle, the prior baseline
-    /// **frozen** in place, never rebased blind (the same refusal-plus-park the
-    /// `RebaseCeilingUnreadable` / `Abandon` arm carries). A zombie (`Reap`) burst short-circuits the
-    /// unforced loop-back to the finish — no consumer exists for the baseline the loop would walk to
-    /// certify (mirroring `handle_gate_deadline`'s zombie route). Diagnostic carries the burst's
-    /// actual intent (Standard fallback on the same defensive path noted on the `Vanished` sibling;
-    /// read before the consequence for the same reason).
+    /// (Rebase, Failed). Probe failed at the anchor between fire and rebase — the post-fire mirror
+    /// of [`Self::dispatch_pre_fire_failed`]. `Denied` parks via
+    /// [`Self::finalize_anchor_lost_and_park`] (no descent — the tight-loop rationale on
+    /// `dispatch_pre_fire_failed`). `Transient` mirrors the post-fire `Undischarged` consequence:
+    /// settle-space the next sample through `Rebasing → Settling` ([`Self::transition_to_settling`])
+    /// while the `RebaseCeiling` holds (`!forced`), or — once it forces — park the final-window
+    /// residual and finish to Idle, the prior baseline **frozen** in place, never rebased blind (the
+    /// same refusal-plus-park the `RebaseCeilingUnreadable` / `Abandon` arm carries). A zombie
+    /// (`Reap`) burst short-circuits the unforced loop-back to the finish — no consumer exists for
+    /// the baseline the loop would walk to certify (mirroring `handle_gate_deadline`'s zombie route).
+    /// Diagnostic carries the burst's actual intent (Standard fallback on the same defensive path
+    /// noted on the `Vanished` sibling; read before the consequence for the same reason).
     fn dispatch_rebase_failed(
         &mut self,
         profile_id: ProfileId,
@@ -2402,11 +2404,11 @@ impl Engine {
     }
 
     /// True iff the burst carries [`BurstFinish::Reap`] — a zombie whose Profile is destroyed at
-    /// the burst finish, so no consumer exists for anything the burst would still produce: the
-    /// rebase `Retry` / unforced-`Transient` loop-backs short-circuit on it (no baseline reader —
-    /// mirroring `handle_gate_deadline`'s zombie route), and the verdict-terminal router degrades
-    /// `ParkResidue` / `Restart` to a plain finish (parked evidence would die with the Profile; a
-    /// restart would extend a burst whose Subs are gone). The same projection `emit_effects` and
+    /// the burst finish, so no consumer exists for anything the burst would still produce: the rebase
+    /// `Retry` / unforced-`Transient` loop-backs short-circuit on it (no baseline reader — mirroring
+    /// `handle_gate_deadline`'s zombie route), and the verdict-terminal router degrades `ParkResidue`
+    /// / `Restart` to a plain finish (parked evidence would die with the Profile; a restart would
+    /// extend a burst whose Subs are gone). The same projection `emit_effects` and
     /// `on_effect_complete` read.
     fn burst_is_zombie(&self, profile_id: ProfileId) -> bool {
         self.profiles
@@ -2416,10 +2418,10 @@ impl Engine {
 
     /// The verdict-terminal router: every *verdict / probe-failure dispatch arm* that concludes a
     /// burst routes its evidence disposition through here, then finishes — raw
-    /// [`Engine::finish_burst_to_idle`] calls are teardown-only (anchor loss, overflow, detach,
-    /// reap, the zero-effect seal: those die because the world changed, not because a proof
-    /// concluded, so "evidence disposition" is a category error for them). One typed decision at
-    /// exactly the arms where a proof concludes; see [`EvidenceDisposition`] for the three arms.
+    /// [`Engine::finish_burst_to_idle`] calls are teardown-only (anchor loss, overflow, detach, reap,
+    /// the zero-effect seal: those die because the world changed, not because a proof concluded, so
+    /// "evidence disposition" is a category error for them). One typed decision at exactly the arms
+    /// where a proof concludes; see [`EvidenceDisposition`] for the three arms.
     ///
     /// A zombie ([`BurstFinish::Reap`]) burst degrades every disposition to `Discard` — the Profile
     /// is destroyed at the finish, so parked evidence would die with it and a restart would extend
@@ -2518,9 +2520,9 @@ impl Engine {
     /// so only pre-fire phases arrive and the structurally-unreachable non-pre-fire re-read folds
     /// to "no verify" — a silent no-op preserving the prior inline `else { return; }`.
     fn handle_burst_deadline(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
-        // "burst-deadline elapsed ⇒ forced fire on next emission" is the first action; the phase then
-        // decides whether that emission is driven now (Batching/Draining — no probe in flight) or by
-        // the in-flight verify's response (Verifying), which dispatches with `forced` observed.
+        // "burst-deadline elapsed ⇒ forced fire on next emission" is the first action; the phase
+        // then decides whether that emission is driven now (Batching/Draining — no probe in flight)
+        // or by the in-flight verify's response (Verifying), which dispatches with `forced` observed.
         self.force_pending(profile_id);
         let needs_verify = self
             .profiles
@@ -2539,8 +2541,8 @@ impl Engine {
     }
 
     /// `gate_deadline` row — actuator-hang recovery. Force-transitions the burst from `Awaiting`
-    /// directly to `Rebasing`, skipping the `Settling` debounce window: the actuator has already hung
-    /// for 4× max_settle, so the bounded wait is spent. Raises `forced` via
+    /// directly to `Rebasing`, skipping the `Settling` debounce window: the actuator has already
+    /// hung for 4× max_settle, so the bounded wait is spent. Raises `forced` via
     /// [`Engine::force_pending_post_fire`] (the symmetric mirror of pre-fire's `handle_burst_deadline
     /// → force_pending`), then drives [`Engine::transition_to_rebasing`] for the final walk.
     ///
@@ -2554,10 +2556,10 @@ impl Engine {
     /// [`Diagnostic::EffectCompleteOutsideAwaiting`].
     ///
     /// **Zombie burst short-circuit.** A burst carrying [`BurstFinish::Reap`] has no consumer for
-    /// the rebased baseline — its Profile is dying. Skip the rebase probe entirely and route
-    /// straight through `finish_burst_to_idle`, which runs the Draining-sweep reconfirm and then
-    /// dispatches `reap_profile`. The diagnostic still fires so operators see the actuator-hang
-    /// signal; only the wasted rebase round-trip is elided.
+    /// the rebased baseline — its Profile is dying. Skip the rebase probe entirely and route straight
+    /// through `finish_burst_to_idle`, which runs the Draining-sweep reconfirm and then dispatches
+    /// `reap_profile`. The diagnostic still fires so operators see the actuator-hang signal; only
+    /// the wasted rebase round-trip is elided.
     ///
     /// Defensive: if the phase has already advanced (e.g., a race with `finalize_anchor_lost`), the
     /// helper no-ops. The `is_timer_referenced` gate already filters most non-Awaiting fires; this
@@ -2579,15 +2581,16 @@ impl Engine {
         let zombie = matches!(finish, BurstFinish::Reap);
 
         // Engine→actuator effect-cancel emission — the single abandonment site, structural dual of
-        // `cancel_owner_probe` for probes. Emitted *before* the phase change so the actuator sees the
-        // cancel ahead of the forced rebase response: its `Stable(Forced)` terminal restarts a fresh
-        // burst from a non-empty final-window residual (`restart_burst_from_fire_tail_residual`) and
-        // re-submits effects for the same profile in a later step. The actuator's `handle_cancel`
-        // SIGTERMs in-flight children for this profile and drops queued work; the wait threads still
-        // drive natural reap, and the engine routes the late `EffectComplete` to
-        // `EffectCompleteOutsideAwaiting` (zombie case routes to `EffectCompleteForUnknownSub`). Same
-        // emission shape for both zombie and force-rebasing — the OS resources held by hung children
-        // must be released regardless of whether the Profile has a consumer for the rebased baseline.
+        // `cancel_owner_probe` for probes. Emitted *before* the phase change so the actuator sees
+        // the cancel ahead of the forced rebase response: its `Stable(Forced)` terminal restarts a
+        // fresh burst from a non-empty final-window residual
+        // (`restart_burst_from_fire_tail_residual`) and re-submits effects for the same profile in
+        // a later step. The actuator's `handle_cancel` SIGTERMs in-flight children for this profile
+        // and drops queued work; the wait threads still drive natural reap, and the engine routes
+        // the late `EffectComplete` to `EffectCompleteOutsideAwaiting` (zombie case routes to
+        // `EffectCompleteForUnknownSub`). Same emission shape for both zombie and force-rebasing —
+        // the OS resources held by hung children must be released regardless of whether the Profile
+        // has a consumer for the rebased baseline.
         out.push_cancel_effect(profile_id);
 
         out.diagnostics.push(if zombie {
@@ -2604,19 +2607,19 @@ impl Engine {
         if zombie {
             self.finish_burst_to_idle(profile_id, out);
         } else {
-            // Symmetric mirror of pre-fire's `handle_burst_deadline → force_pending → drive
-            // Verifying now`. Shares the `Awaiting → Rebasing` edge with the natural completion
-            // path (`on_effect_complete`) but takes it *forced*: no follow-up timer is scheduled —
-            // the `forced` bit drives the next probe response to a commit terminal in one walk.
+            // Symmetric mirror of pre-fire's `handle_burst_deadline → force_pending → drive Verifying
+            // now`. Shares the `Awaiting → Rebasing` edge with the natural completion path
+            // (`on_effect_complete`) but takes it *forced*: no follow-up timer is scheduled — the
+            // `forced` bit drives the next probe response to a commit terminal in one walk.
             self.force_pending_post_fire(profile_id);
             self.transition_to_rebasing(profile_id, out);
         }
     }
 
-    /// `PostFireSettle` row — the HashChannel re-sample spacing expiry (the only surviving
-    /// post-fire `Settling` window; the natural rebase entry is probe-first, `Awaiting →
-    /// Rebasing`). The symmetric mirror of [`Engine::on_settle_expired`] on the pre-fire side,
-    /// including the reschedule fork.
+    /// `PostFireSettle` row — the HashChannel re-sample spacing expiry (the only surviving post-fire
+    /// `Settling` window; the natural rebase entry is probe-first, `Awaiting → Rebasing`). The
+    /// symmetric mirror of [`Engine::on_settle_expired`] on the pre-fire side, including the
+    /// reschedule fork.
     ///
     /// **Reschedule path**: `now − last_event_time < settle`. `absorb_event_into_fire_tail` updated
     /// `last_event_time` after the settle timer was scheduled; the quiet window is not yet closed.
@@ -2634,10 +2637,9 @@ impl Engine {
     /// `debug_assert!(false)` + the safe transition default (the pre-fire mirror at
     /// `on_settle_expired`).
     ///
-    /// **Preconditions** (guaranteed by [`is_timer_referenced`]
-    /// upstream): `Profile.state == Active(PostFire(Settling {
-    /// settle_timer == popped_id }))`. The defensive early returns below cover direct
-    /// `step(Input::TimerExpired)` calls that bypass `pop_expired`.
+    /// **Preconditions** (guaranteed by [`is_timer_referenced`] upstream): `Profile.state ==
+    /// Active(PostFire(Settling { settle_timer == popped_id }))`. The defensive early returns below
+    /// cover direct `step(Input::TimerExpired)` calls that bypass `pop_expired`.
     fn handle_post_fire_settle_expired(
         &mut self,
         profile_id: ProfileId,
@@ -2685,13 +2687,13 @@ impl Engine {
     /// [`Engine::handle_burst_deadline`]. Latches [`specter_core::CeilingState::Reached`] via
     /// [`Engine::force_pending_post_fire`] (the single-source [`specter_core::CeilingState::Armed`]
     /// → `Reached` writer), then mirrors `handle_burst_deadline`'s phase routing exactly: in
-    /// `Settling` no probe is in flight (the `Batching` analogue — the HashChannel re-sample
-    /// spacing window, now the only post-fire `Settling`), so drive the final sample *now* via
+    /// `Settling` no probe is in flight (the `Batching` analogue — the HashChannel re-sample spacing
+    /// window, now the only post-fire `Settling`), so drive the final sample *now* via
     /// [`Engine::transition_to_rebasing`]; in `Rebasing` a probe is already in flight (the
     /// `Verifying` analogue), so set-only — its response carries the terminal. `Awaiting` is
     /// unreachable (the ceiling is armed only at the natural `Awaiting → Rebasing` entry, and the
-    /// burst leaves `Awaiting` in that same step) and folds to the no-op default, as does a
-    /// vanished Profile.
+    /// burst leaves `Awaiting` in that same step) and folds to the no-op default, as does a vanished
+    /// Profile.
     fn handle_rebase_ceiling(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
         // Single-source latch: `post.ceiling = CeilingState::Reached`, collapsing the prior two-field
         // `forced = true; rebase_ceiling = None` lockstep into one write. `is_timer_referenced` only
@@ -2744,8 +2746,8 @@ impl Engine {
     /// is flagged [`BurstFinish::Reap`]).
     ///
     /// **Per-Sub observational bookkeeping.** Each emission triggers
-    /// [`specter_core::SubRegistry::record_fired`] (bumps `fire_count`, stamps `last_fired_at =
-    /// now`) and pushes one [`Diagnostic::SubFired`] carrying the aggregated per-pass count (1 for
+    /// [`specter_core::SubRegistry::record_fired`] (bumps `fire_count`, stamps `last_fired_at = now`)
+    /// and pushes one [`Diagnostic::SubFired`] carrying the aggregated per-pass count (1 for
     /// SubtreeRoot, the per-leaf count for PerStableFile). A `FireVerdict::SuppressDedup` verdict
     /// instead bumps `dedup_suppressed_count` and emits nothing. The B1-dedup-load-bearing
     /// [`specter_core::SubRegistry::mark_fired`] stays the SubtreeRoot edge — separate signal,
@@ -2772,9 +2774,9 @@ impl Engine {
         // Read the cached anchor classification. `None` falls back to `Dir` — the actuator's
         // `compute_cwd` then anchors at the path itself; if the actuator's later `chdir` discovers
         // the path doesn't behave as a directory, the Effect surfaces `EffectOutcome::Failed`.
-        // Reaching `None` here implies a fresh resource-based attach whose Seed probe hasn't
-        // returned — the next Seed-Ok's `apply_snapshot` classifies the anchor
-        // (`install_{dir,file}_current` writes the kind as the anchor-sum discriminant).
+        // Reaching `None` here implies a fresh resource-based attach whose Seed probe hasn't returned
+        // — the next Seed-Ok's `apply_snapshot` classifies the anchor (`install_{dir,file}_current`
+        // writes the kind as the anchor-sum discriminant).
         let anchor_kind = p.kind().unwrap_or(ResourceKind::Dir);
         // Substitution-side projection of `ScanConfig.exclude`. The resolver iterates source strings;
         // the sensor consults compiled matchers. The order is the exclude list's build-time canonical
@@ -2784,9 +2786,9 @@ impl Engine {
 
         let anchor_path: Arc<Path> = self.tree.path_of(resource).unwrap_or_else(empty_path);
 
-        // Lazy-build the Diff Arc only if any Sub needs it AND both a baseline and a current
-        // snapshot are present. With baseline pinned across coalesced bursts, `Effect.diff`
-        // describes the *net* change since the last EffectComplete::Ok.
+        // Lazy-build the Diff Arc only if any Sub needs it AND both a baseline and a current snapshot
+        // are present. With baseline pinned across coalesced bursts, `Effect.diff` describes the
+        // *net* change since the last EffectComplete::Ok.
         let mut diff_arc: Option<Arc<Diff>> = None;
         let ensure_diff = |diff_slot: &mut Option<Arc<Diff>>| {
             if diff_slot.is_none()
@@ -2823,9 +2825,9 @@ impl Engine {
                     } => (&s.name, spawn, history.has_fired, *minted_by),
                     // A template never fires — discovery's "fire" is the reconcile's batch of
                     // attachments, and the verdict floor classifies its Profile to Reconcile before
-                    // the fire fork. Reaching here is a routing breach; the skip is the
-                    // semantically correct degrade (a Mint must not fire), loud in dev so the
-                    // misrouting dispatcher gets fixed, never daemon-fatal in release.
+                    // the fire fork. Reaching here is a routing breach; the skip is the semantically
+                    // correct degrade (a Mint must not fire), loud in dev so the misrouting
+                    // dispatcher gets fixed, never daemon-fatal in release.
                     Reaction::Mint { .. } => {
                         debug_assert!(
                             false,
@@ -2841,8 +2843,8 @@ impl Engine {
                 FireVerdict::SkipScope => continue,
                 FireVerdict::SuppressDedup => {
                     // Observational only: count the B1-dedup-suppressed verdict so the
-                    // operator-facing `list --wide` surfaces how often a Sub's reaction *would*
-                    // have fired against an unchanged tree.
+                    // operator-facing `list --wide` surfaces how often a Sub's reaction *would* have
+                    // fired against an unchanged tree.
                     self.subs.record_dedup_suppressed(sub_id);
                     continue;
                 }
@@ -2915,8 +2917,8 @@ impl Engine {
     /// Two carrier classes:
     ///
     /// - **Descent** ([`ProfileId`]): Profiles currently descending whose
-    ///   `DescentState.current_prefix() == resource` (`ProfileState::Pending(d)`). Each descent
-    ///   owner gets a fresh probe via [`Engine::on_descent_event`].
+    ///   `DescentState.current_prefix() == resource` (`ProfileState::Pending(d)`). Each descent owner
+    ///   gets a fresh probe via [`Engine::on_descent_event`].
     /// - **Recovery** ([`ProfileId`]): `Parked` Profiles whose `watch_root_parent == Some(resource)`
     ///   **or** whose own anchor slot is `resource` (alive only via a co-claimer's FD — another
     ///   Profile's parent claim, a co-anchored Profile, a descent prefix; a free, legitimate recovery
@@ -2927,9 +2929,9 @@ impl Engine {
     ///   inside the loss step itself (`finalize_anchor_lost_and_descend`) and is `Pending` — the
     ///   descents arm — before any later parent event can select it here.
     ///
-    /// **O(1) carrier gate.** The scan body is O(profiles), but under a sustained storm every
-    /// Profile is in a steady `Active` burst, so it iterates the full registry only to return
-    /// empty. The registry maintains a `nonsteady` count of the carrier-*eligible* owners
+    /// **O(1) carrier gate.** The scan body is O(profiles), but under a sustained storm every Profile
+    /// is in a steady `Active` burst, so it iterates the full registry only to return empty. The
+    /// registry maintains a `nonsteady` count of the carrier-*eligible* owners
     /// ([`Profile::is_nonsteady`]); when it is zero no carrier of either class can exist, so the
     /// scan is provably empty and skipped in O(1) — the keeps-up-storm win an operator feels as the
     /// daemon no longer pegging a core during a build.
@@ -2938,13 +2940,13 @@ impl Engine {
     /// per-resource index a naïve reading invites: the carrier predicates key on per-Profile fields
     /// (`current_prefix`, `watch_root_parent`, the anchor slot), so a resource-keyed index would
     /// have to be rewritten at every descent advance and park edge. The bucket instead
-    /// over-approximates to the state predicate — sound (every true carrier is `Pending` or
-    /// `Parked`, so a zero gate is never a false skip; a channel-less park over-counts harmlessly)
-    /// and *tight* where it matters: a healthy anchored `Idle` Profile and a steady `Active` burst
-    /// are excluded, so a quiet watcher coexisting with a storm does not defeat the gate. Every
-    /// membership edge flows through the `ProfileMap` state chokepoints (`transition_state` /
-    /// `map_state` / `materialize_anchor`). A `#[cfg(debug_assertions)]` full recount tripwire
-    /// below pins each maintained count every call; release pays only the O(1) compare.
+    /// over-approximates to the state predicate — sound (every true carrier is `Pending` or `Parked`,
+    /// so a zero gate is never a false skip; a channel-less park over-counts harmlessly) and *tight*
+    /// where it matters: a healthy anchored `Idle` Profile and a steady `Active` burst are excluded,
+    /// so a quiet watcher coexisting with a storm does not defeat the gate. Every membership edge
+    /// flows through the `ProfileMap` state chokepoints (`transition_state` / `map_state` /
+    /// `materialize_anchor`). A `#[cfg(debug_assertions)]` full recount tripwire below pins each
+    /// maintained count every call; release pays only the O(1) compare.
     fn classify_event_carriers(&self, resource: ResourceId) -> EventCarriers {
         #[cfg(debug_assertions)]
         {
@@ -3002,11 +3004,11 @@ pub(crate) enum ParkNarration {
 ///
 /// `descents` (via `current_prefix`) and `recoveries` (`Parked`, via `watch_root_parent` or the
 /// co-claimed anchor slot) are honest parallel fields: the entry helpers genuinely differ
-/// ([`Engine::on_descent_event`] re-probes a live descent; `start_pending_recovery` re-enters
-/// descent from the park), so a merged list would only force a match-dispatch back into the two
-/// distinct helpers. After an observed loss the same Profile moves from the recoveries class to the
-/// descents class within the loss step itself — only probe-`Failed` / watch-rejection Profiles
-/// linger in the recoveries class.
+/// ([`Engine::on_descent_event`] re-probes a live descent; `start_pending_recovery` re-enters descent
+/// from the park), so a merged list would only force a match-dispatch back into the two distinct
+/// helpers. After an observed loss the same Profile moves from the recoveries class to the descents
+/// class within the loss step itself — only probe-`Failed` / watch-rejection Profiles linger in the
+/// recoveries class.
 struct EventCarriers {
     descents: SmallVec<[ProfileId; 2]>,
     recoveries: SmallVec<[ProfileId; 2]>,
@@ -3028,8 +3030,8 @@ impl EventCarriers {
 /// Actuator will actually run.
 ///
 /// `dispatch_*_ok` consumes this to decide whether the Profile should enter the `Awaiting` phase
-/// (count > 0, at least one Effect is in flight) or short-circuit to `finish_burst_to_idle` (count
-/// == 0: dedup-hash suppressed every emission, no Subs matched, or `reap_pending` was set). The
+/// (count > 0, at least one Effect is in flight) or short-circuit to `finish_burst_to_idle` (count ==
+/// 0: dedup-hash suppressed every emission, no Subs matched, or `reap_pending` was set). The
 /// `#[must_use]` attribute prevents a future caller from silently dropping the count and
 /// re-introducing the post-emit "Idle-but-Effects-in-flight" leakage.
 #[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]
@@ -3038,10 +3040,10 @@ pub(crate) struct EmitOutcome {
     pub count: u32,
 }
 
-/// Fire-mode for [`Engine::emit_effects`]. Captures the structural distinction between Standard
-/// burst stable-verdict emission and Seed-drift emission, replacing the prior `(forced: bool,
-/// drift_filter: Option<&[DedupKey]>)` parameter pair where the interaction between the two flags
-/// was load-bearing but unmodelled.
+/// Fire-mode for [`Engine::emit_effects`]. Captures the structural distinction between Standard burst
+/// stable-verdict emission and Seed-drift emission, replacing the prior `(forced: bool, drift_filter:
+/// Option<&[DedupKey]>)` parameter pair where the interaction between the two flags was load-bearing
+/// but unmodelled.
 ///
 /// The two modes differ along three axes that all fall out of the variant — no separate field
 /// discipline:
@@ -3062,9 +3064,9 @@ pub(crate) struct EmitOutcome {
 ///   reseed of a `Snapshot`-baseline Profile drops them the same way but carries no witness, so it
 ///   is a further v1 limitation the diagnostic does not cover.
 ///
-/// **Payload type.** `drifted: &[SubId]` rather than `&[DedupKey]`. By construction the slice
-/// carries only `DedupKey::Subtree { sub, profile }` entries whose `profile == profile_id` (the
-/// focal Profile); projecting to `SubId` upstream drops the redundant profile field AND removes the
+/// **Payload type.** `drifted: &[SubId]` rather than `&[DedupKey]`. By construction the slice carries
+/// only `DedupKey::Subtree { sub, profile }` entries whose `profile == profile_id` (the focal
+/// Profile); projecting to `SubId` upstream drops the redundant profile field AND removes the
 /// variant-ambiguity (a `DedupKey::PerFile` cannot be represented in `&[SubId]`). The SeedDrift
 /// Subtree-arm filter becomes `drifted.contains(&sub_id)` — same cost class as `contains(&dk)`,
 /// stronger type contract.
@@ -3089,20 +3091,20 @@ impl EmitMode<'_> {
 
 /// The consequence of a fireable quiescence verdict ([`QuiescenceVerdict::Stable`], inner
 /// [`StableReason::Natural`] or [`StableReason::Forced`]) for a burst whose
-/// [`specter_core::BurstIntent`] is known — computed once by [`Engine::classify_consequence`]
-/// *after* the observed tree is committed, so the drift read sees the post-graft `current`.
+/// [`specter_core::BurstIntent`] is known — computed once by [`Engine::classify_consequence`] *after*
+/// the observed tree is committed, so the drift read sees the post-graft `current`.
 ///
-/// **Owned payload by design.** [`Self::RecoveryFire`] carries the drifted Sub set so the
-/// classifier stays a total `&self` function; the `&[SubId]` borrow [`EmitMode::SeedDrift`] needs
-/// is taken at the `emit_effects` boundary, never stored on the classification (the classify and
-/// the emit are different stack frames — a stored borrow would outlive the local it points at).
+/// **Owned payload by design.** [`Self::RecoveryFire`] carries the drifted Sub set so the classifier
+/// stays a total `&self` function; the `&[SubId]` borrow [`EmitMode::SeedDrift`] needs is taken at
+/// the `emit_effects` boundary, never stored on the classification (the classify and the emit are
+/// different stack frames — a stored borrow would outlive the local it points at).
 ///
 /// Each variant's emission mode, Draining-gate participation, witness seal, and honesty narration
 /// are a total function of the variant. No derived `bool` or `Seal` discriminant is threaded
 /// alongside: the seal and the per-file-drop narration are read off `EmitMode::SeedDrift` at the
-/// single fire site, and the fresh-Seed skip narration — the one fact `EmitMode` cannot carry,
-/// since [`Self::StandardFire`] and [`Self::FreshSeedFire`] share `EmitMode::Standard` — is the
-/// only bit passed on.
+/// single fire site, and the fresh-Seed skip narration — the one fact `EmitMode` cannot carry, since
+/// [`Self::StandardFire`] and [`Self::FreshSeedFire`] share `EmitMode::Standard` — is the only bit
+/// passed on.
 #[derive(Debug)]
 #[must_use]
 enum Consequence {
@@ -3112,9 +3114,10 @@ enum Consequence {
     /// `EmitMode::Standard`; Draining-gated; no seal; [`Diagnostic::PerFileFireSkippedOnFreshSeed`]
     /// post-gate.
     FreshSeedFire,
-    /// Recovery whose post-graft tree drifted from the settled reference, with a non-empty fired set.
-    /// `EmitMode::SeedDrift`; Draining-gated; **seals the survival witness at this certified-recovery
-    /// decision** (pre-`Awaiting`); [`Diagnostic::PerFileDriftDroppedOnRecovery`] post-gate.
+    /// Recovery whose post-graft tree drifted from the settled reference, with a non-empty fired
+    /// set. `EmitMode::SeedDrift`; Draining-gated; **seals the survival witness at this
+    /// certified-recovery decision** (pre-`Awaiting`); [`Diagnostic::PerFileDriftDroppedOnRecovery`]
+    /// post-gate.
     RecoveryFire(SmallVec<[SubId; 2]>),
     /// The non-firing arm reached by the *intent classification itself*. Four disjoint origins reach
     /// it: a fresh-static daemon restart (no witnessed activity, no baseline to drift against), a
@@ -3123,11 +3126,11 @@ enum Consequence {
     /// witness if any) and finishes; **never Draining-gated** — no Effect to defer.
     /// [`Diagnostic::PerFileDriftDroppedOnRecovery`] (self-gating predicate) before the rebase.
     SilentPin,
-    /// The non-firing arm reached by the operator `absorb` *override* of a would-have-fired
-    /// verdict: the live pre-fire burst carries the fold latch
-    /// ([`specter_core::ProfileState::burst_fold_latched`]), so a firing `base`
-    /// ([`Self::is_firing`]) is replaced with a silent baseline advance — the echo of an expected
-    /// replication is folded into the settled reference instead of re-fired.
+    /// The non-firing arm reached by the operator `absorb` *override* of a would-have-fired verdict:
+    /// the live pre-fire burst carries the fold latch
+    /// ([`specter_core::ProfileState::burst_fold_latched`]), so a firing `base` ([`Self::is_firing`])
+    /// is replaced with a silent baseline advance — the echo of an expected replication is folded
+    /// into the settled reference instead of re-fired.
     ///
     /// Shares [`Self::SilentPin`]'s seal *terminus* ([`Engine::seal_baseline_silently`]) but is a
     /// **distinct variant**, not a `SilentPin` flag: it differs in *bookkeeping* (one
@@ -3166,8 +3169,8 @@ impl Consequence {
 }
 
 /// One Sub's fire verdict in an [`Engine::emit_effects`] pass — the total fold of the three fire
-/// gates. Distinguishing `SuppressDedup` from `SkipScope` keeps the *reason* inspectable (unit
-/// table, future per-cause metrics) even though the loop currently treats both as "don't emit".
+/// gates. Distinguishing `SuppressDedup` from `SkipScope` keeps the *reason* inspectable (unit table,
+/// future per-cause metrics) even though the loop currently treats both as "don't emit".
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 enum FireVerdict {
     /// Emit for this Sub (Subtree: one Effect; PerStableFile: one per matching diff entry).
@@ -3188,8 +3191,8 @@ enum FireVerdict {
 /// - **B1 dedup suppress.** A `SubtreeRoot` Sub under `Standard` suppresses iff it is not
 ///   force-fired, the tree is unchanged since the last rebase (`nothing_changed`), AND it has fired
 ///   before (`already_fired`) — a never-fired Sub is its own first emission even on an unchanged
-///   tree. SeedDrift's `drifted` holds only drifted Subs, so suppression is structurally
-///   unreachable on that mode (its arm yields `Emit`).
+///   tree. SeedDrift's `drifted` holds only drifted Subs, so suppression is structurally unreachable
+///   on that mode (its arm yields `Emit`).
 /// - **PerStableFile under SeedDrift.** Skipped entirely — Seed-time drift is Subtree-only (PerFile
 ///   keeps no per-leaf fire history).
 fn fire_decision(
@@ -3219,13 +3222,13 @@ fn fire_decision(
     }
 }
 
-/// The files a per-stable-file fire runs on: each file or symlink `diff` created, modified or
-/// renamed into, as its slot under `anchor` and its segment. A deleted entry runs nothing, nor does
-/// a directory or a special file; a symlink does, as it targets a file in practice.
+/// The files a per-stable-file fire runs on: each file or symlink `diff` created, modified or renamed
+/// into, as its slot under `anchor` and its segment. A deleted entry runs nothing, nor does a
+/// directory or a special file; a symlink does, as it targets a file in practice.
 ///
 /// Each entry resolves to the slot `graft` materialized for it, or, where the Tree no longer holds
-/// one, to one [`ensure_descendant`] materializes under reconcile's own rules, so no file goes
-/// unrun for want of a slot.
+/// one, to one [`ensure_descendant`] materializes under reconcile's own rules, so no file goes unrun
+/// for want of a slot.
 fn stable_file_targets<'a>(
     tree: &'a mut Tree,
     anchor: ResourceId,
@@ -3260,19 +3263,19 @@ fn stable_file_targets<'a>(
 /// - `Vanished` / `Failed`: anchor disappeared / I/O error at the probe root; the caller routes to
 ///   its own per-route cleanup (the certifier is route-agnostic — folding a non-snapshot is
 ///   meaningless).
-/// - `Degraded`: the certifier resolved a terminal state and the caller does nothing. Two
-///   producers, both contract-violation degrades: a kind mismatch (the certifier emitted
+/// - `Degraded`: the certifier resolved a terminal state and the caller does nothing. Two producers,
+///   both contract-violation degrades: a kind mismatch (the certifier emitted
 ///   [`Diagnostic::AnchorKindMismatch`] and tore the burst down through
 ///   [`Engine::finalize_anchor_lost`]), or an absent Profile at the floor (a gate breach — nothing
 ///   to tear down).
 ///
 /// **Reachability.** Every `Degraded` producer is a contract-violation degrade, and all are
 /// unreachable on a correct sensor: the payload-shape violation (a proof route receiving
-/// `SegmentObserved`) is rejected before the certifier by the typed demux decode; the absent
-/// Profile cannot occur because the gate dispatches only on `Active(Verifying | Rebasing)`; the
-/// kind mismatch cannot occur because the walker collapses every on-disk Dir↔File swap to
-/// `Vanished` rather than returning a kind-divergent snapshot. The channel exists to degrade these
-/// violations gracefully, not to handle a reachable fault.
+/// `SegmentObserved`) is rejected before the certifier by the typed demux decode; the absent Profile
+/// cannot occur because the gate dispatches only on `Active(Verifying | Rebasing)`; the kind mismatch
+/// cannot occur because the walker collapses every on-disk Dir↔File swap to `Vanished` rather than
+/// returning a kind-divergent snapshot. The channel exists to degrade these violations gracefully,
+/// not to handle a reachable fault.
 #[derive(Debug)]
 enum CertifiedResponse {
     Proceed {
@@ -3294,8 +3297,8 @@ enum CertifiedResponse {
 ///   ([`Engine::restart_burst_from_fire_tail_residual`]) on a `ReturnToIdle` burst, else finish.
 /// - `ParkResidue` — a non-consuming bounded terminal (`Abandon`, a ceiling-forced transient probe
 ///   failure). The proof never read the evidence's region, so it parks into
-///   [`specter_core::Profile::park_burst_evidence`]'s standing obligation for the next burst to
-///   drain and re-prove; then finish.
+///   [`specter_core::Profile::park_burst_evidence`]'s standing obligation for the next burst to drain
+///   and re-prove; then finish.
 /// - `Discard` — the evidence has no future consumer (the zombie short-circuits): finish raw.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 enum EvidenceDisposition {
@@ -3331,8 +3334,8 @@ enum CompletionRoute {
     Diagnose,
 }
 
-/// Event-class assignment. Maps an [`FsEvent`] + the resource's [`ResourceKind`] to the
-/// [`ClassSet`] bit it represents.
+/// Event-class assignment. Maps an [`FsEvent`] + the resource's [`ResourceKind`] to the [`ClassSet`]
+/// bit it represents.
 ///
 /// Non-terminal events have a fixed class regardless of kind:
 /// - [`FsEvent::ContentChanged`] → [`ClassSet::CONTENT`]

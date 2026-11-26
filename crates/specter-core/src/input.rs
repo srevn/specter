@@ -43,8 +43,8 @@ impl FsEvent {
     }
 
     /// Recency-class events — `ContentChanged` / `MetadataChanged` / `StructureChanged`. Each is a
-    /// lossy "this resource changed in this class" hint whose sole truth is the next probe; the
-    /// exact complement of [`Self::is_identity`].
+    /// lossy "this resource changed in this class" hint whose sole truth is the next probe; the exact
+    /// complement of [`Self::is_identity`].
     #[must_use]
     pub const fn is_recency(self) -> bool {
         !self.is_identity()
@@ -94,24 +94,24 @@ pub enum Input {
         resource: ResourceId,
         failure: WatchFailure,
     },
-    /// Hot-reload diff payload. **Name-keyed**: the loader carries operator names, never engine
-    /// ids. The engine's `on_config_diff` resolves each name to its live id through the registry's
+    /// Hot-reload diff payload. **Name-keyed**: the loader carries operator names, never engine ids.
+    /// The engine's `on_config_diff` resolves each name to its live id through the registry's
     /// `by_name` index, then applies the buckets atomically in one step — removals → modifications
     /// → additions — all merging into a single sorted [`crate::StepOutput`].
     ConfigDiff(SubRegistryDiff),
-    /// Sensor reports it dropped events at the kernel level — the watch state is intact but the
-    /// event stream is no longer trustworthy over `scope`. The engine response is to reseed every
-    /// Profile in scope (`Engine::on_sensor_overflow`): cancel any in-flight burst and start a
-    /// fresh Seed burst whose post-probe Seed-Ok (`dispatch_quiescence_ok`) re-establishes baseline
-    /// against disk reality and runs the drift detection. Active-mode drift (overflow path:
-    /// `baseline` persists across the reseed) compares `baseline.hash()` against the post-graft
+    /// Sensor reports it dropped events at the kernel level — the watch state is intact but the event
+    /// stream is no longer trustworthy over `scope`. The engine response is to reseed every Profile
+    /// in scope (`Engine::on_sensor_overflow`): cancel any in-flight burst and start a fresh Seed
+    /// burst whose post-probe Seed-Ok (`dispatch_quiescence_ok`) re-establishes baseline against
+    /// disk reality and runs the drift detection. Active-mode drift (overflow path: `baseline`
+    /// persists across the reseed) compares `baseline.hash()` against the post-graft
     /// `current.hash()`; survival-mode drift (anchor-loss recovery path) compares
     /// `last_settled_hash_at_loss` against `current.hash()`. On drift, fires once for every
     /// SubtreeRoot Sub on the Profile that has fired ([`crate::Sub::has_fired`]), then rebases.
     ///
     /// Always [`OverflowScope::Global`] on the v1 inotify backend (`IN_Q_OVERFLOW` is queue-wide).
-    /// The [`OverflowScope::Resource`] variant exists for FSEvents (per-stream overflow) and to
-    /// keep the engine's handler shape stable across backends.
+    /// The [`OverflowScope::Resource`] variant exists for FSEvents (per-stream overflow) and to keep
+    /// the engine's handler shape stable across backends.
     SensorOverflow {
         scope: OverflowScope,
     },
@@ -137,9 +137,9 @@ pub enum Input {
     /// it folds together. A stale `sub` arms nothing.
     ///
     /// `duration` is the window length: `None` ⇒ one `settle` interval of the Profile it arms,
-    /// consume-on-first (a one-shot cover for a single replication); `Some(d)` ⇒ a window
-    /// persisting `d` (a run of them). The engine derives each `(expiry, mode)`, so the wire
-    /// carries only the raw duration.
+    /// consume-on-first (a one-shot cover for a single replication); `Some(d)` ⇒ a window persisting
+    /// `d` (a run of them). The engine derives each `(expiry, mode)`, so the wire carries only the
+    /// raw duration.
     ArmAbsorb {
         sub: SubId,
         duration: Option<Duration>,

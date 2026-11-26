@@ -1,10 +1,10 @@
 //! Refcount-edge helpers for the per-Resource contributions map.
 //!
-//! One refcount: the **contributions map** (`Resource.contributions`) gates FD lifetime — a
-//! Resource is Watched iff the map is non-empty. The map is a `BTreeMap<ContribKey, ClassSet>`:
-//! each key identifies a single contributor (Profile anchor / parent / descent / descendant); the
-//! value is that contributor's `ClassSet` mask. The per-Resource events union is the OR fold over
-//! the map's values.
+//! One refcount: the **contributions map** (`Resource.contributions`) gates FD lifetime — a Resource
+//! is Watched iff the map is non-empty. The map is a `BTreeMap<ContribKey, ClassSet>`: each key
+//! identifies a single contributor (Profile anchor / parent / descent / descendant); the value is
+//! that contributor's `ClassSet` mask. The per-Resource events union is the OR fold over the map's
+//! values.
 //!
 //! Each primitive emits `WatchOp` ops as follows:
 //! - [`add_watch`]: `Watch` on the empty → non-empty edge OR on any union change at non-empty.
@@ -20,8 +20,8 @@
 //!   the slot is being abandoned at once (kernel-watch rejection, or `reconcile::delete_child` on a
 //!   fully-drained slot).
 //!
-//! **Idempotent absent-key sub.** Calling [`sub_watch`] for a key that is not in the map is a
-//! silent no-op. This makes the helper safe to invoke against post-vacate slots
+//! **Idempotent absent-key sub.** Calling [`sub_watch`] for a key that is not in the map is a silent
+//! no-op. This makes the helper safe to invoke against post-vacate slots
 //! ([`specter_core::Tree::vacate`] cleared the map) and slots drained by a prior sub-walk in the
 //! same step (e.g., [`crate::Engine::release_descendant_claim`]'s take-and-walk pass).
 //!
@@ -71,10 +71,10 @@ pub(crate) fn add_watch(
 
     let emit = was_empty || new_union != prev_union;
     if emit {
-        // Sample `kind` and resolve the path only when actually emitting — saves the `kind_raw`
-        // field read and `path_of` walk for every idempotent re-insert (same key, same mask).
-        // Reborrow `tree` for `path_of` once the `res` borrow ends (the `kind_raw` read above is
-        // the last `res` use).
+        // Sample `kind` and resolve the path only when actually emitting — saves the `kind_raw` field
+        // read and `path_of` walk for every idempotent re-insert (same key, same mask). Reborrow
+        // `tree` for `path_of` once the `res` borrow ends (the `kind_raw` read above is the last
+        // `res` use).
         let kind = res.kind_raw();
         let path = tree.path_of(r).unwrap_or_else(empty_path);
         out.watch_ops.push(WatchOp::Watch {
@@ -129,16 +129,17 @@ pub(crate) fn sub_watch(tree: &mut Tree, r: ResourceId, key: ContribKey, out: &m
 /// Remove the contribution at `(r, key)` and try-reap the slot. Returns `true` iff the slot was
 /// reaped.
 ///
-/// Composes the two halves of the **routine per-key release**: [`sub_watch`] drains the
-/// contribution from `Resource.contributions` (idempotent on absent key — safe against post-vacate
-/// slots and slots a prior sub-walk in this step already drained); [`Tree::try_reap`] then removes
-/// the slot iff `Resource::has_anchors() == false`.
+/// Composes the two halves of the **routine per-key release**: [`sub_watch`] drains the contribution
+/// from `Resource.contributions` (idempotent on absent key — safe against post-vacate slots and slots
+/// a prior sub-walk in this step already drained); [`Tree::try_reap`] then removes the slot iff
+/// `Resource::has_anchors() == false`.
 ///
 /// **Anchors and contributions.** [`specter_core::Resource::has_anchors`] reads three retention
 /// sources: `children`, the `profiles` back-ref, and the contributions map itself. The map is
 /// canonical for "this slot holds a live kernel-watch claim"; removing the last contribution at a
-/// slot zeroes that source, and the slot reaps iff neither back-ref source still reaches into it. The
-/// role tag (`User` / `WatchRootParent` / `DescentScaffold`) is metadata and never gates retention.
+/// slot zeroes that source, and the slot reaps iff neither back-ref source still reaches into it.
+/// The role tag (`User` / `WatchRootParent` / `DescentScaffold`) is metadata and never gates
+/// retention.
 ///
 /// In every production call site, at least one *other* claim is structurally certain to keep the
 /// slot alive across this release — for the descent-prefix release, the prefix's child chain toward
@@ -153,8 +154,8 @@ pub(crate) fn sub_watch(tree: &mut Tree, r: ResourceId, key: ContribKey, out: &m
 /// for the **routine per-key release path** where one contributor releases its single key.
 ///
 /// Caller discipline:
-/// - Owner-side bookkeeping (state flag, snapshot field, etc.) is the caller's responsibility —
-///   this helper only mutates the contributions map and the slot lifecycle.
+/// - Owner-side bookkeeping (state flag, snapshot field, etc.) is the caller's responsibility — this
+///   helper only mutates the contributions map and the slot lifecycle.
 /// - Cancel-first preconditions are the caller's responsibility. For the descent-prefix
 ///   `release_*_claim` helpers in [`crate::claims`] this is enforced structurally: their
 ///   state-discard drops an armed `ProbeSlot` and trips its Drop tripwire.
@@ -397,8 +398,8 @@ mod tests {
     fn sub_watch_then_try_reap_role_only_slot_emits_unwatch_and_reaps() {
         // Production parallel to `release_watch_root_parent_claim` and the
         // `release_*_descent_prefix_claim` family: the role tag is metadata, so a slot whose only
-        // retention claim was the just-dropped contribution reaps in the same step. `sub_watch`
-        // emits `Unwatch` on the empty edge; `try_reap` returns `true` and the slot is gone.
+        // retention claim was the just-dropped contribution reaps in the same step. `sub_watch` emits
+        // `Unwatch` on the empty edge; `try_reap` returns `true` and the slot is gone.
         let mut tree = Tree::new();
         let r = tree.ensure_root("parent", ResourceRole::WatchRootParent);
         let mut out = StepOutput::default();

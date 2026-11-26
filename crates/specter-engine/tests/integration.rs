@@ -183,8 +183,8 @@ fn golden_path_full_lifecycle() {
     );
     assert!(attach_out.effects().is_empty());
 
-    // Seed quiescence proof → baseline = current = empty snapshot; → Idle. Never emits Effects
-    // (fresh Profile).
+    // Seed quiescence proof → baseline = current = empty snapshot; → Idle. Never emits Effects (fresh
+    // Profile).
     let snap_seed = dir_snap(&[]);
     let _ = seed_to_idle(&mut e, pid, &snap_seed, t0);
 
@@ -207,8 +207,8 @@ fn golden_path_full_lifecycle() {
     assert_eq!(stable_out.effects().len(), 1);
     assert!(!stable_out.effects()[0].forced);
 
-    // EffectComplete::Ok drives the burst out of Awaiting and directly into Rebasing (probe-first) —
-    // the WholeSubtree rebase probe is emitted in this very step to capture the post-command tree.
+    // EffectComplete::Ok drives the burst out of Awaiting and directly into Rebasing (probe-first)
+    // — the WholeSubtree rebase probe is emitted in this very step to capture the post-command tree.
     let _ =
         complete_effect_to_rebasing(&mut e, sid, stable_out.effects()[0].key(), t1 + SETTLE * 16);
 
@@ -495,8 +495,8 @@ fn force_fire_emits_effect_with_forced_true() {
         t0,
     );
 
-    // Complete the Seed burst with an empty baseline. The cold-arm Seed answers its in-flight
-    // Verify probe and pins directly.
+    // Complete the Seed burst with an empty baseline. The cold-arm Seed answers its in-flight Verify
+    // probe and pins directly.
     assert!(
         first_probe_correlation(&attach_out).is_some(),
         "cold-arm Seed: probe emitted at burst construction",
@@ -596,10 +596,10 @@ fn step_output_is_sorted() {
 
 #[test]
 fn cancel_all_in_flight_probes_returns_sealed_output() {
-    // Graceful-shutdown probe drain. Two Profiles in Verifying — one probe in flight each —
-    // exercise the multi-owner cancel path; the returned `StepOutput` must carry only
-    // `ProbeOp::Cancel` ops, in owner order, with `watch_ops` and `effects` empty (the live
-    // falsifier of `bin/driver.rs`'s shutdown debug_assert).
+    // Graceful-shutdown probe drain. Two Profiles in Verifying — one probe in flight each — exercise
+    // the multi-owner cancel path; the returned `StepOutput` must carry only `ProbeOp::Cancel` ops,
+    // in owner order, with `watch_ops` and `effects` empty (the live falsifier of `bin/driver.rs`'s
+    // shutdown debug_assert).
     let mut e = Engine::new();
     let r1 = anchor_dir(&mut e, "src");
     let r2 = anchor_dir(&mut e, "dist");

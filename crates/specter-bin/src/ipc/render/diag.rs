@@ -31,8 +31,8 @@ use crate::ipc::wire::{WireDiagnostic, WireTime};
 
 /// Render one event as a single newline-terminated line into the caller's buffer.
 ///
-/// Writer-shape so the call site amortizes the line buffer across iterations — `specter tail`
-/// reuses one [`String`] for the lifetime of the stream loop, symmetric with
+/// Writer-shape so the call site amortizes the line buffer across iterations — `specter tail` reuses
+/// one [`String`] for the lifetime of the stream loop, symmetric with
 /// [`crate::ipc::client::subscribe::Subscription`]'s reused inbound `line_buf`. A 1000-evt/s tail
 /// carries no per-event allocation through the human path; the compound-enum Display impls
 /// ([`crate::ipc::wire::WireOverflowScope`] / [`crate::ipc::wire::WireWatchFailure`]) write through
@@ -49,8 +49,8 @@ pub(crate) fn render(out: &mut String, d: &WireDiagnostic, sty: Styler) {
 }
 
 /// Project the variant's `at` field through the structural commitment that every [`WireDiagnostic`]
-/// variant declares `at: WireTime` as its first field. Single or-pattern arm — a new variant
-/// without an `at` field is a compile error here.
+/// variant declares `at: WireTime` as its first field. Single or-pattern arm — a new variant without
+/// an `at` field is a compile error here.
 const fn at_field(d: &WireDiagnostic) -> &WireTime {
     match d {
         WireDiagnostic::StaleProbeResponse { at, .. }
@@ -122,8 +122,8 @@ const fn at_field(d: &WireDiagnostic) -> &WireTime {
 /// - `warn!` → [`Severity::Warn`] — a degraded-but-recovered edge: a failed / vanished probe (the
 ///   errno self-recovers), a purged claim, a forced ceiling, an overflow reseed, a gate deadline, a
 ///   routing breach the helper bailed on.
-/// - `info!` / `debug!` / `trace!` → [`Severity::Info`] — routine lifecycle, benign races, and
-///   class / consumer drops.
+/// - `info!` / `debug!` / `trace!` → [`Severity::Info`] — routine lifecycle, benign races, and class
+///   / consumer drops.
 ///
 /// Two deliberate departures from a literal level mirror:
 ///
@@ -133,8 +133,8 @@ const fn at_field(d: &WireDiagnostic) -> &WireTime {
 ///   it is [`Severity::Warn`], the data-loss signal it shares with `SensorOverflow`.
 ///
 /// Re-judging a variant means moving it here AND in `log_diagnostic` (its rustdoc carries the
-/// reciprocal note). Tiers are an operator-triage projection, not a wire contract: re-tiering
-/// changes only a line's colour, never its bytes.
+/// reciprocal note). Tiers are an operator-triage projection, not a wire contract: re-tiering changes
+/// only a line's colour, never its bytes.
 const fn severity(d: &WireDiagnostic) -> Severity {
     use WireDiagnostic as W;
     match d {
@@ -146,8 +146,8 @@ const fn severity(d: &WireDiagnostic) -> Severity {
         | W::AnchorKindMismatch { .. }
         | W::WalkerContractViolated { .. } => Severity::Error,
 
-        // `warn!` in the log — a degraded-but-recovered edge — plus the wire-only `Missed`
-        // data-loss marker.
+        // `warn!` in the log — a degraded-but-recovered edge — plus the wire-only `Missed` data-loss
+        // marker.
         W::StaleTimer { .. }
         | W::EffectCompleteOutsideAwaiting { .. }
         | W::EffectCompleteForUnknownSub { .. }
@@ -204,11 +204,10 @@ const fn severity(d: &WireDiagnostic) -> Severity {
     }
 }
 
-/// Append one ` key=value` field — `key` painted [`style::LABEL`], the `=` painted
-/// [`style::DELIM`], the value unstyled. The two leading spaces are the inter-field separator every
-/// line uses, so a run of
-/// `field` calls reproduces the pre-color `  k=v  k2=v2` shape
-/// byte-for-byte under `Styler::Plain`.
+/// Append one ` key=value` field — `key` painted [`style::LABEL`], the `=` painted [`style::DELIM`],
+/// the value unstyled. The two leading spaces are the inter-field separator every line uses, so a
+/// run of `field` calls reproduces the pre-color `  k=v  k2=v2` shape byte-for-byte under
+/// `Styler::Plain`.
 fn field(out: &mut String, sty: Styler, key: &str, value: impl Display) {
     let _ = write!(
         out,
@@ -226,9 +225,9 @@ fn optional_field(out: &mut String, sty: Styler, key: &str, value: Option<impl D
     }
 }
 
-/// Append every non-`at` field as ` key=value` pairs via [`field`]. Exhaustive match — a new
-/// variant lands a compile error here, paired with the matching arm in
-/// [`WireDiagnostic::variant_name`] and the `KNOWN_WIRE_VARIANTS` tag list.
+/// Append every non-`at` field as ` key=value` pairs via [`field`]. Exhaustive match — a new variant
+/// lands a compile error here, paired with the matching arm in [`WireDiagnostic::variant_name`] and
+/// the `KNOWN_WIRE_VARIANTS` tag list.
 ///
 /// Field order mirrors the variant's declaration order so the human form and the JSON form present
 /// fields in the same sequence.
@@ -694,9 +693,9 @@ mod tests {
         assert!(s.contains("  reason=ipc_disabled"), "got: {s:?}");
     }
 
-    /// A Profile-keyed variant (`ProfileReaped`) renders without any `sub=` field — operators
-    /// reading a tail know the event is not per-Sub by the absence of the column. Distinct from
-    /// per-Sub variants that always carry `sub=N`.
+    /// A Profile-keyed variant (`ProfileReaped`) renders without any `sub=` field — operators reading
+    /// a tail know the event is not per-Sub by the absence of the column. Distinct from per-Sub
+    /// variants that always carry `sub=N`.
     #[test]
     fn render_profile_keyed_has_no_sub_field() {
         let mut s = String::new();
@@ -764,10 +763,10 @@ mod tests {
         );
     }
 
-    /// Cross-variant coverage: every variant on the [`super::super::wire::KNOWN_WIRE_VARIANTS`]
-    /// list renders to a non-empty line that contains its tag. Catches a missing `write_fields` arm
-    /// before the operator hits it. Uses the same witness fixture the wire round-trip test consumes
-    /// — duplicating would invite drift.
+    /// Cross-variant coverage: every variant on the [`super::super::wire::KNOWN_WIRE_VARIANTS`] list
+    /// renders to a non-empty line that contains its tag. Catches a missing `write_fields` arm before
+    /// the operator hits it. Uses the same witness fixture the wire round-trip test consumes —
+    /// duplicating would invite drift.
     #[test]
     fn every_variant_renders_a_nonempty_line_with_its_tag() {
         // The wire test fixture lives in wire's test module; we can't reach it cross-module, so we
@@ -776,8 +775,9 @@ mod tests {
         // the wire-side test seam through serde directly.
         //
         // For each variant tag, synthesize the minimum-field JSON shape and feed it through
-        // deserialize → render. A wire variant whose JSON shape doesn't round-trip would already fail
-        // the wire's own round-trip test; this guard reports any render-side regression separately.
+        // deserialize → render. A wire variant whose JSON shape doesn't round-trip would already
+        // fail the wire's own round-trip test; this guard reports any render-side regression
+        // separately.
         let timestamp = serde_json::to_value(WireTime::from(UNIX_EPOCH)).unwrap();
         for tag in crate::ipc::wire::KNOWN_WIRE_VARIANTS {
             let value = synthesize_min_value(tag, &timestamp);
@@ -1014,8 +1014,8 @@ mod tests {
     }
 
     /// Under `Styler::Active` the variant tag wears its severity hue (`Ok`→green for `sub_fired`,
-    /// `Error`→red for `probe_failed`) and the field keys gain SGR; stripping every escape
-    /// reproduces the `Plain` line byte-for-byte (color is purely additive).
+    /// `Error`→red for `probe_failed`) and the field keys gain SGR; stripping every escape reproduces
+    /// the `Plain` line byte-for-byte (color is purely additive).
     #[test]
     fn active_colors_tag_by_severity_and_strips_to_plain() {
         use crate::ipc::render::style::{Severity, severity_style, strip_ansi};

@@ -7,9 +7,9 @@
 //!
 //! Lives on the daemon side ([`crate::driver::ipc::project`]) because the source data
 //! ([`specter_engine::Engine`] + [`crate::driver::DriverState`]) is driver-owned. The "projection
-//! lives at the source" rule the codebase encodes for [`crate::driver::state`]'s
-//! `From<ReloadTrigger> for WireReloadTrigger` applies here too — the wire-side vocabulary at
-//! [`crate::ipc`] stays a true leaf with no `crate::driver` import.
+//! lives at the source" rule the codebase encodes for [`crate::driver::state`]'s `From<ReloadTrigger>
+//! for WireReloadTrigger` applies here too — the wire-side vocabulary at [`crate::ipc`] stays a true
+//! leaf with no `crate::driver` import.
 //!
 //! # Visibility
 //!
@@ -54,8 +54,8 @@ pub(super) fn settle_ms(settle: Duration) -> u64 {
 /// pair (`start_wall`, `start_instant`) is captured atomically in [`DriverState::new`], so the
 /// projection agrees with the operator's wall clock at boot.
 ///
-/// `t < start_instant` is structurally impossible (the engine records fires after the driver
-/// starts); `saturating_duration_since` guards the type-system corner anyway.
+/// `t < start_instant` is structurally impossible (the engine records fires after the driver starts);
+/// `saturating_duration_since` guards the type-system corner anyway.
 ///
 /// `start_wall + duration` overflow is unreachable in any realistic operating window (`i64::MAX`
 /// seconds past the epoch); no guard.

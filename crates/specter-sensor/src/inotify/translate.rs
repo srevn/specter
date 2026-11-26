@@ -15,8 +15,8 @@
 //! Identity floor (always OR-ed): `IN_DELETE_SELF | IN_MOVE_SELF | IN_UNMOUNT`. Defensive flags
 //! (always OR-ed): `IN_EXCL_UNLINK`.
 //!
-//! Dir-anchored watches additionally OR `IN_ONLYDIR` at install time; that lives in the watcher, not
-//! in the translator — it's an `inotify_add_watch` directional flag, not part of the event mask.
+//! Dir-anchored watches additionally OR `IN_ONLYDIR` at install time; that lives in the watcher,
+//! not in the translator — it's an `inotify_add_watch` directional flag, not part of the event mask.
 //!
 //! ## Why no `IN_DONT_FOLLOW`
 //!
@@ -34,11 +34,11 @@
 //!
 //! ## kqueue parity
 //!
-//! kqueue's `NOTE_LINK` is kind-aware: STRUCTURE on Dir, METADATA on File. inotify has no
-//! `NOTE_LINK` analogue — hardlink count changes on a File surface as `IN_ATTRIB` (per
-//! `inotify(7)`: "link count since Linux 2.6.25"), which the translator already routes through
-//! METADATA. The kind-disambiguating branch the kqueue translator carries is therefore collapsed:
-//! `IN_ATTRIB` is set whenever METADATA is requested, regardless of kind.
+//! kqueue's `NOTE_LINK` is kind-aware: STRUCTURE on Dir, METADATA on File. inotify has no `NOTE_LINK`
+//! analogue — hardlink count changes on a File surface as `IN_ATTRIB` (per `inotify(7)`: "link count
+//! since Linux 2.6.25"), which the translator already routes through METADATA. The
+//! kind-disambiguating branch the kqueue translator carries is therefore collapsed: `IN_ATTRIB` is
+//! set whenever METADATA is requested, regardless of kind.
 //!
 //! ## Unknown kind
 //!
@@ -58,21 +58,21 @@ use specter_core::{ClassSet, ResourceKind};
 /// Identity floor — OR-ed onto every inotify registration regardless of the user's `events` mask.
 /// These three bits drive Tree integrity (slot vacate on `IN_DELETE_SELF`) and watch lifecycle
 /// (re-resolve on `IN_MOVE_SELF` / `IN_UNMOUNT`); they must always reach the engine even when the
-/// user opted out of CONTENT / STRUCTURE / METADATA. The engine's entry filter folds terminal
-/// events into the appropriate class for per-Profile filtering (CONTENT for files, STRUCTURE for
-/// dirs); see `engine::transitions::fs_event_to_class`.
+/// user opted out of CONTENT / STRUCTURE / METADATA. The engine's entry filter folds terminal events
+/// into the appropriate class for per-Profile filtering (CONTENT for files, STRUCTURE for dirs);
+/// see `engine::transitions::fs_event_to_class`.
 ///
-/// `IN_IGNORED` is *not* in this floor: it is not part of the user-visible class surface. The
-/// kernel emits it unconditionally as a cleanup signal when a watch descriptor is reaped; the
-/// watcher consumes it before normalization.
+/// `IN_IGNORED` is *not* in this floor: it is not part of the user-visible class surface. The kernel
+/// emits it unconditionally as a cleanup signal when a watch descriptor is reaped; the watcher
+/// consumes it before normalization.
 pub(super) const IDENTITY_FLOOR: u32 = IN_DELETE_SELF | IN_MOVE_SELF | IN_UNMOUNT;
 
 /// Defensive flags applied on every `inotify_add_watch`:
 ///
 /// - `IN_EXCL_UNLINK` — stop firing events on an unlinked-but-still-open inode. kqueue auto-removes
 ///   the registration when the fd closes; inotify's path-based registration would otherwise keep
-///   delivering `IN_MODIFY` on a deleted inode held open by a writer. Setting `IN_EXCL_UNLINK`
-///   aligns inotify's semantics with kqueue's "registration ends when the inode is unreachable."
+///   delivering `IN_MODIFY` on a deleted inode held open by a writer. Setting `IN_EXCL_UNLINK` aligns
+///   inotify's semantics with kqueue's "registration ends when the inode is unreachable."
 ///
 /// Symlink defense lives at the file-open seam (`O_NOFOLLOW` on
 /// [`crate::inotify::ffi::open_o_path`]), not in the install mask — see the module docs above.
@@ -120,8 +120,8 @@ mod tests {
     };
     use specter_core::{ClassSet, ResourceKind};
 
-    /// `IDENTITY_FLOOR` membership is a load-bearing invariant; pin it explicitly so a refactor
-    /// that drops a bit fails this test.
+    /// `IDENTITY_FLOOR` membership is a load-bearing invariant; pin it explicitly so a refactor that
+    /// drops a bit fails this test.
     #[test]
     fn identity_floor_includes_delete_move_unmount() {
         assert_ne!(IDENTITY_FLOOR & IN_DELETE_SELF, 0, "DELETE_SELF missing");

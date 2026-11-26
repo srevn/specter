@@ -1,12 +1,12 @@
 //! Translator: `(ClassSet, ResourceKind) → kqueue NOTE_* fflags`.
 //!
-//! Single platform-specific translation point. Backend-agnostic [`ClassSet`] enters;
-//! kqueue-specific `u32` fflags leave. The identity floor is OR-ed unconditionally onto every
-//! registration so the engine's reconciler always sees terminal events (delete / rename / revoke),
-//! independent of the user's class mask.
+//! Single platform-specific translation point. Backend-agnostic [`ClassSet`] enters; kqueue-specific
+//! `u32` fflags leave. The identity floor is OR-ed unconditionally onto every registration so the
+//! engine's reconciler always sees terminal events (delete / rename / revoke), independent of the
+//! user's class mask.
 //!
-//! Inotify's analogue would live in a sibling module `sensor::inotify::translate`; the engine
-//! surface is unchanged.
+//! Inotify's analogue would live in a sibling module `sensor::inotify::translate`; the engine surface
+//! is unchanged.
 //!
 //! ## Mapping table
 //!
@@ -16,8 +16,8 @@
 //! | `CONTENT`  | ∅ (dir-irrelevant)                        | `NOTE_WRITE \| NOTE_EXTEND`        |
 //! | `METADATA` | `NOTE_ATTRIB`                             | `NOTE_ATTRIB \| NOTE_LINK`         |
 //!
-//! `NOTE_LINK` placement is kind-aware: on a Dir it's a structural signal (subdirectory `..`
-//! backref count change); on a File it's a metadata signal (hardlink count change).
+//! `NOTE_LINK` placement is kind-aware: on a Dir it's a structural signal (subdirectory `..` backref
+//! count change); on a File it's a metadata signal (hardlink count change).
 //!
 //! `ResourceKind::Unknown` (defensive path; the sensor's own `fstat` couldn't classify the inode as
 //! Dir or Reg) is treated as File via [`ResourceKind::effective`] — single source of truth for that
@@ -81,8 +81,8 @@ mod tests {
     };
     use specter_core::{ClassSet, ResourceKind};
 
-    /// `IDENTITY_FLOOR` membership is a load-bearing invariant; pin it explicitly so a refactor
-    /// that drops a bit is a test failure.
+    /// `IDENTITY_FLOOR` membership is a load-bearing invariant; pin it explicitly so a refactor that
+    /// drops a bit is a test failure.
     #[test]
     fn identity_floor_includes_delete_rename_revoke() {
         assert_ne!(IDENTITY_FLOOR & NOTE_DELETE, 0, "DELETE missing from floor");

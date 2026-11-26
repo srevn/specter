@@ -37,8 +37,8 @@
 //!    as the last reference dies.
 //! 8. **`prober_response_rx` / `effect_complete_rx`** drop together with the surrounding struct —
 //!    pure crossbeam `Receiver` drops, which signal `Disconnected` to the paired senders (the prober
-//!    pool's worker threads, the actuator's controller thread). Those threads exit their loops on the
-//!    next observed `Disconnected`, so Reactor drop is the structural shutdown signal for both.
+//!    pool's worker threads, the actuator's controller thread). Those threads exit their loops on
+//!    the next observed `Disconnected`, so Reactor drop is the structural shutdown signal for both.
 //!
 //! The Reactor anchors the canonical `Arc<mio::Waker>` via its `waker` field;
 //! [`Reactor::wake_handle`] emits clones for external senders. Late `wake()` calls against a
@@ -47,8 +47,8 @@
 //! # Lifetime anchoring
 //!
 //! Every kernel-fd source registered against this Poll has its Rust-side ownership structurally
-//! bounded below by this Reactor's lifetime. The watcher, config-watcher, signal pipe, and the
-//! Waker are direct fields; the Hub's listener and per-conn streams are downstream via the
+//! bounded below by this Reactor's lifetime. The watcher, config-watcher, signal pipe, and the Waker
+//! are direct fields; the Hub's listener and per-conn streams are downstream via the
 //! [`EngineDriver`](super::EngineDriver) field order. No external consumer needs to track an fd's
 //! lifetime to reason about whether the kernel state is still observable — if the Reactor exists,
 //! the kernel state is intact.
@@ -110,16 +110,16 @@ pub(super) const TOKEN_LISTENER: Token = Token(4);
 /// AsFd surface every register call needs and the Send required to construct on one thread and move
 /// onto the driver thread.
 pub(crate) struct Reactor<W: FsWatcher = DefaultWatcher> {
-    /// The signal pipeline's reactor-visible surface. Owns the read end of the signal-hook pipe
-    /// that the `sa_sigaction` handlers write to. The handlers stay installed for the life of this
-    /// value; drop unregisters our chain entries from `signal_hook_registry`.
+    /// The signal pipeline's reactor-visible surface. Owns the read end of the signal-hook pipe that
+    /// the `sa_sigaction` handlers write to. The handlers stay installed for the life of this value;
+    /// drop unregisters our chain entries from `signal_hook_registry`.
     signals: SignalPipe,
     /// Optional config watcher — absent under `--no-config-watch` (then `None`) or on watcher-init
     /// failure (then logged + `None`). When present, registered against the Poll registry at
     /// construction; [`Self::poll_and_drain`] dispatches via [`Self::drain_config_watcher`].
     config_watcher: Option<DefaultConfigWatcher>,
-    /// The kqueue / inotify watcher (or a `MockFsWatcher` in tests). Always present (its init
-    /// failure is a startup-fatal `ExitCode::from(1)` upstream of Reactor construction).
+    /// The kqueue / inotify watcher (or a `MockFsWatcher` in tests). Always present (its init failure
+    /// is a startup-fatal `ExitCode::from(1)` upstream of Reactor construction).
     watcher: W,
     /// Pre-allocated event buffer. Owned on Reactor so the per-tick `poll` call reuses the
     /// allocation. `Events::with_capacity(64)` covers the steady-state burst (≤5 static sources +
@@ -147,10 +147,10 @@ pub(crate) struct Reactor<W: FsWatcher = DefaultWatcher> {
 /// Partitioned drain output of one [`Reactor::poll_and_drain`] call.
 ///
 /// The mio reactor's `iter()` yields events in unspecified Token order. `poll_and_drain` dispatches
-/// each event to the appropriate `drain_*` helper, which appends to the matching `DrainedTick`
-/// field. The caller ([`super::EngineDriver::tick`]) then consumes each field in the canonical
-/// order — listener accept → sensor inputs → signals → effects → IPC — to preserve the per-tick
-/// drain discipline the engine's lossy-hint contract depends on.
+/// each event to the appropriate `drain_*` helper, which appends to the matching `DrainedTick` field.
+/// The caller ([`super::EngineDriver::tick`]) then consumes each field in the canonical order —
+/// listener accept → sensor inputs → signals → effects → IPC — to preserve the per-tick drain
+/// discipline the engine's lossy-hint contract depends on.
 ///
 /// Consumption discipline: every field is drained with `std::mem::take` (or by-value `drain`) so a
 /// second read returns an empty Vec, making "drain each source at most once per tick" structurally
@@ -164,8 +164,8 @@ pub(super) struct DrainedTick {
     /// Kernel-level overflow markers from the watcher (inotify's `IN_Q_OVERFLOW`; kqueue never
     /// emits). The engine's tick lifts each into `Input::SensorOverflow { scope }`.
     pub(super) sensor_overflows: Vec<OverflowScope>,
-    /// Drained prober responses. The wake'd channel preserves the engine's per-response Input
-    /// shape, so each entry is already an `Input::ProbeResponse(_)`.
+    /// Drained prober responses. The wake'd channel preserves the engine's per-response Input shape,
+    /// so each entry is already an `Input::ProbeResponse(_)`.
     pub(super) probe_responses: Vec<Input>,
     /// Drained effect completions. Each entry is already an `Input::EffectComplete { .. }` envelope.
     pub(super) effect_completions: Vec<Input>,
@@ -176,8 +176,8 @@ pub(super) struct DrainedTick {
     /// re-arms its `config_settle_until` deadline on `true`; `false` carries no information.
     pub(super) config_event_pulse: bool,
     /// `true` iff `TOKEN_LISTENER` fired this tick. The tick delegates accept to
-    /// [`super::Hub::drain_accept`] gated on this bool — making the accept step explicit in
-    /// `tick.rs` rather than implicit inside the dispatch loop here.
+    /// [`super::Hub::drain_accept`] gated on this bool — making the accept step explicit in `tick.rs`
+    /// rather than implicit inside the dispatch loop here.
     pub(super) listener_ready: bool,
     /// `true` iff `Reactor::drain_effect_completions` observed
     /// [`crossbeam::channel::TryRecvError::Disconnected`] this tick.
@@ -194,11 +194,11 @@ pub(super) struct DrainedTick {
     /// completions FIRST (Ok arm) and only sets this flag when the Disconnected variant lands, so a
     /// healthy pulse-with-completions tick never trips the flag.
     pub(super) actuator_gone: bool,
-    /// Per-conn tokens whose readiness this tick included WRITABLE. The tick's drain pass walks
-    /// these calling [`super::Hub::drain_writable`] on each.
+    /// Per-conn tokens whose readiness this tick included WRITABLE. The tick's drain pass walks these
+    /// calling [`super::Hub::drain_writable`] on each.
     pub(super) ready_writes: Vec<Token>,
-    /// Per-conn tokens whose readiness this tick included READABLE. The tick's drain pass walks
-    /// these calling [`super::Hub::read_conn_into_lines`] on each.
+    /// Per-conn tokens whose readiness this tick included READABLE. The tick's drain pass walks these
+    /// calling [`super::Hub::read_conn_into_lines`] on each.
     pub(super) ready_reads: Vec<Token>,
 }
 
@@ -215,8 +215,8 @@ impl<W: FsWatcher> Reactor<W> {
     ///
     /// The constructor mints the [`WakeHandle`] (the sole call site of [`WakeHandle::new`] in the
     /// bin, which is itself the sole call site of [`mio::Waker::new`] — making mio's "one Waker per
-    /// Poll" contract structural by typing) and anchors it as the `waker` field. Downstream
-    /// consumers receive clones via [`Self::wake_handle`]; the Hub registers against a
+    /// Poll" contract structural by typing) and anchors it as the `waker` field. Downstream consumers
+    /// receive clones via [`Self::wake_handle`]; the Hub registers against a
     /// [`Registry::try_clone()`] obtained through [`Self::registry_clone`].
     ///
     /// # Errors
@@ -236,8 +236,8 @@ impl<W: FsWatcher> Reactor<W> {
 
         // Watcher fd registration goes through SourceFd: the watcher owns the kqueue / inotify fd
         // directly via `AsFd`, and mio captures the raw fd number internally — the `BorrowedFd`
-        // lifetime is the call-expression scope, which is fine because `as_raw_fd()` returns a
-        // `Copy` `RawFd`.
+        // lifetime is the call-expression scope, which is fine because `as_raw_fd()` returns a `Copy`
+        // `RawFd`.
         let watcher_raw = watcher.as_fd().as_raw_fd();
         poll.registry().register(
             &mut SourceFd(&watcher_raw),
@@ -285,10 +285,10 @@ impl<W: FsWatcher> Reactor<W> {
 
     /// Mint a [`Registry::try_clone()`] handle for the [`super::Hub`].
     ///
-    /// Fallible — [`Registry::try_clone`] is a syscall that can fail under kernel pressure
-    /// (selector clone OOM). Callers translate the error to startup-fatal; this method exists so
-    /// the call site sees the fallibility explicitly rather than hiding it behind a tuple-return
-    /// contract the constructor would carry forever.
+    /// Fallible — [`Registry::try_clone`] is a syscall that can fail under kernel pressure (selector
+    /// clone OOM). Callers translate the error to startup-fatal; this method exists so the call site
+    /// sees the fallibility explicitly rather than hiding it behind a tuple-return contract the
+    /// constructor would carry forever.
     ///
     /// The returned [`Registry`] handle shares the underlying selector with the Reactor's [`Poll`]
     /// — registrations against either land in the same kernel-side state.
@@ -300,25 +300,25 @@ impl<W: FsWatcher> Reactor<W> {
         self.poll.registry().try_clone()
     }
 
-    /// Block on mio's Poll with `timeout`, drain every ready static Source non-blockingly, and
-    /// return the partitioned drained state.
+    /// Block on mio's Poll with `timeout`, drain every ready static Source non-blockingly, and return
+    /// the partitioned drained state.
     ///
     /// `timeout` follows mio's convention: `None` blocks forever; `Some(Duration::ZERO)` polls once
     /// non-blockingly; any positive duration is the upper wait bound.
     ///
     /// Every static-source drain helper is internally drain-to-empty. The mio reactor's
     /// edge-triggered convention REQUIRES drain-to-empty on every ready fd: a partial drain leaves
-    /// kernel-side state non-empty, the next arrival can't transition empty→ non-empty, and the
-    /// edge silently misses. Each `drain_*` helper loops internally until the underlying source
-    /// reports `WouldBlock` / `EAGAIN`.
+    /// kernel-side state non-empty, the next arrival can't transition empty→ non-empty, and the edge
+    /// silently misses. Each `drain_*` helper loops internally until the underlying source reports
+    /// `WouldBlock` / `EAGAIN`.
     ///
     /// Listener and per-conn readiness are surfaced as flags / token vectors on the returned
     /// [`DrainedTick`]; the caller delegates to [`super::Hub`] for accept / per-conn drain.
     ///
     /// # Errors
     ///
-    /// Propagates [`io::Error`] from `poll.poll` or any drain that reports a non-`WouldBlock`
-    /// syscall error. The caller treats any error as terminal for the Reactor (mio errors here are
+    /// Propagates [`io::Error`] from `poll.poll` or any drain that reports a non-`WouldBlock` syscall
+    /// error. The caller treats any error as terminal for the Reactor (mio errors here are
     /// programmer-error / kernel-pressure).
     pub(super) fn poll_and_drain(&mut self, timeout: Option<Duration>) -> io::Result<DrainedTick> {
         let mut out = DrainedTick::default();
@@ -332,14 +332,14 @@ impl<W: FsWatcher> Reactor<W> {
             }
             Err(e) => return Err(e),
         }
-        // Snapshot every ready event's `(token, readable, writable)` tuple into a local vector
-        // BEFORE invoking any `&mut self` drain helper. Each per-Source drain (`drain_watcher`
-        // etc.) needs `&mut self` to reach `self.watcher` / `self.signals` / channel receivers, but
+        // Snapshot every ready event's `(token, readable, writable)` tuple into a local vector BEFORE
+        // invoking any `&mut self` drain helper. Each per-Source drain (`drain_watcher` etc.) needs
+        // `&mut self` to reach `self.watcher` / `self.signals` / channel receivers, but
         // `self.events.iter()` holds an immutable borrow of `self.events` (a field of `self`).
         // Lifting the iteration into a snapshot releases that borrow before the drains run. `Token`
-        // is `Copy` and the readiness flags are bools, so this is bytewise cheap — the events
-        // buffer holds ≤64 entries (`Events::with_capacity(64)` at construction), so the allocation
-        // is bounded and small.
+        // is `Copy` and the readiness flags are bools, so this is bytewise cheap — the events buffer
+        // holds ≤64 entries (`Events::with_capacity(64)` at construction), so the allocation is
+        // bounded and small.
         let ready: Vec<(Token, bool, bool)> = self
             .events
             .iter()
@@ -385,11 +385,11 @@ impl<W: FsWatcher> Reactor<W> {
     ///
     /// # Why a deferred-queue return rather than inline engine step
     ///
-    /// `Input::WatchOpRejected` is a sensor-class barrier input that drives the engine's
-    /// claim-purge path; routing it through the deferred-inputs queue (per the same-tick replay
-    /// discipline) preserves the tick's drain ordering — the next tick's `replay_deferred_inputs`
-    /// call runs the rejection through `engine.step` BEFORE the mio poll re-blocks, so the engine's
-    /// claim-purge fires this tick's `forward` cycle.
+    /// `Input::WatchOpRejected` is a sensor-class barrier input that drives the engine's claim-purge
+    /// path; routing it through the deferred-inputs queue (per the same-tick replay discipline)
+    /// preserves the tick's drain ordering — the next tick's `replay_deferred_inputs` call runs the
+    /// rejection through `engine.step` BEFORE the mio poll re-blocks, so the engine's claim-purge
+    /// fires this tick's `forward` cycle.
     pub(super) fn apply_watch_ops(&mut self, ops: &[WatchOp]) -> Vec<(ResourceId, WatchFailure)> {
         let mut rejected = Vec::new();
         for op in ops {
@@ -412,8 +412,8 @@ impl<W: FsWatcher> Reactor<W> {
         rejected
     }
 
-    /// Drain the watcher fd to EAGAIN. Pushes each [`WatcherEvent`] into the matching
-    /// [`DrainedTick`] field.
+    /// Drain the watcher fd to EAGAIN. Pushes each [`WatcherEvent`] into the matching [`DrainedTick`]
+    /// field.
     ///
     /// # Errors
     ///
@@ -438,9 +438,9 @@ impl<W: FsWatcher> Reactor<W> {
         Ok(())
     }
 
-    /// Drain the config watcher fd to EAGAIN. Sets `out.config_event_pulse = true` if any
-    /// substantive event was observed; a `false` from `drain_ready` is a spurious wake or a
-    /// non-basename-matched parent event the watcher already filtered out.
+    /// Drain the config watcher fd to EAGAIN. Sets `out.config_event_pulse = true` if any substantive
+    /// event was observed; a `false` from `drain_ready` is a spurious wake or a non-basename-matched
+    /// parent event the watcher already filtered out.
     fn drain_config_watcher(&mut self, out: &mut DrainedTick) -> io::Result<()> {
         if let Some(cw) = self.config_watcher.as_mut()
             && cw.drain_ready()?
@@ -475,14 +475,14 @@ impl<W: FsWatcher> Reactor<W> {
     ///
     /// Mirror-shape of [`Self::drain_prober_responses`] on the Ok / Empty arms — both loop `try_recv`
     /// until the channel reports no more queued items. Diverges on the **Disconnected** arm: a
-    /// disconnect on this channel is the actuator-gone signal (see [`DrainedTick::actuator_gone`] for
-    /// the load-bearing rationale), so the drain sets the flag and breaks.
+    /// disconnect on this channel is the actuator-gone signal (see [`DrainedTick::actuator_gone`]
+    /// for the load-bearing rationale), so the drain sets the flag and breaks.
     ///
-    /// Queued completions drain BEFORE the flag is set — the loop continues until `try_recv`
-    /// reports either `Empty` (steady-state pause) or `Disconnected` (actuator's `Box<dyn
-    /// EffectCompleteSender>` adapter has dropped). A post-disconnect tick that observes any
-    /// leftover Ok arms first is the correct behavior: the actuator's late completions are still
-    /// valid engine input, and the tick body routes the shutdown decision through
+    /// Queued completions drain BEFORE the flag is set — the loop continues until `try_recv` reports
+    /// either `Empty` (steady-state pause) or `Disconnected` (actuator's `Box<dyn
+    /// EffectCompleteSender>` adapter has dropped). A post-disconnect tick that observes any leftover
+    /// Ok arms first is the correct behavior: the actuator's late completions are still valid engine
+    /// input, and the tick body routes the shutdown decision through
     /// [`super::EngineDriver::begin_shutdown`] after the standard drain pass anyway.
     ///
     /// Takes `&self` because [`crossbeam::channel::Receiver::try_recv`] only needs a shared borrow
@@ -517,16 +517,16 @@ impl<W: FsWatcher> Reactor<W> {
 }
 
 impl<W: FsWatcher> Drop for Reactor<W> {
-    /// Explicit `deregister` for every static Source ahead of the field-order drop that closes
-    /// their fds. mio's contract calls for "deregister before drop"; relying on the source's own
-    /// `Drop` to release the registration is a contract violation, even though in practice the
-    /// field-order drop reaches each fd before the selector closes.
+    /// Explicit `deregister` for every static Source ahead of the field-order drop that closes their
+    /// fds. mio's contract calls for "deregister before drop"; relying on the source's own `Drop`
+    /// to release the registration is a contract violation, even though in practice the field-order
+    /// drop reaches each fd before the selector closes.
     ///
     /// Errors are best-effort. `NotFound` is benign on an already-closed fd (a future cleanup path
     /// may close the fd before this Drop runs). A non-`NotFound` error here is a programmer-error
     /// worth knowing about but not worth panicking — Drop must not unwind. The log channel may
-    /// already be gone at this teardown phase, which is fine: the next process boot re-creates
-    /// every Source against a fresh selector regardless.
+    /// already be gone at this teardown phase, which is fine: the next process boot re-creates every
+    /// Source against a fresh selector regardless.
     fn drop(&mut self) {
         let registry = self.poll.registry();
         let watcher_raw = self.watcher.as_fd().as_raw_fd();
@@ -563,9 +563,9 @@ mod tests {
     use std::sync::Arc;
     use std::time::Instant;
 
-    /// `poll_and_drain(Some(ZERO))` returns immediately with no events queued. Pins the
-    /// non-blocking poll path. No wake fires and no Hub is constructed, so neither
-    /// [`Reactor::wake_handle`] nor [`Reactor::registry_clone`] is called.
+    /// `poll_and_drain(Some(ZERO))` returns immediately with no events queued. Pins the non-blocking
+    /// poll path. No wake fires and no Hub is constructed, so neither [`Reactor::wake_handle`] nor
+    /// [`Reactor::registry_clone`] is called.
     #[test]
     fn poll_and_drain_zero_timeout_returns_empty() {
         let watcher = MockFsWatcher::new();
@@ -675,9 +675,9 @@ mod tests {
             Reactor::new(watcher, None, signals, prober_rx, effect_rx).expect("reactor init");
         let waker = reactor.wake_handle();
 
-        // Push an Input into the prober channel — without a wake, the poll wouldn't see it (it
-        // polls fd-readiness, not channel-non-emptiness). The wake fires the TOKEN_WAKER edge, the
-        // drain helper try_recv's the message.
+        // Push an Input into the prober channel — without a wake, the poll wouldn't see it (it polls
+        // fd-readiness, not channel-non-emptiness). The wake fires the TOKEN_WAKER edge, the drain
+        // helper try_recv's the message.
         prober_tx
             .send(Input::TimerExpired {
                 profile: specter_core::ProfileId::default(),
@@ -728,8 +728,8 @@ mod tests {
     #[test]
     fn apply_watch_ops_surfaces_rejection_on_watcher_error() {
         let mut watcher = MockFsWatcher::new();
-        // EMFILE = 24 on every supported target; hardcoded to avoid a libc dev-dep in the bin's
-        // test surface.
+        // EMFILE = 24 on every supported target; hardcoded to avoid a libc dev-dep in the bin's test
+        // surface.
         let failure = WatchFailure::Pressure { errno: 24 };
         watcher.fail_next_watch(failure);
         let signals = register_signal_handlers().expect("signal pipe init");

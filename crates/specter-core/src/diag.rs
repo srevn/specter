@@ -1,8 +1,8 @@
 //! Engine diagnostics.
 //!
 //! Emitted alongside the dropped/clamped Inputs they explain. Variant set grows phase-by-phase as
-//! new drop paths land. Each variant is light-weight (a few small fields) and carries enough
-//! context to log meaningfully.
+//! new drop paths land. Each variant is light-weight (a few small fields) and carries enough context
+//! to log meaningfully.
 
 use crate::ids::{ProbeCorrelation, ProfileId, ResourceId, SubId, TimerId};
 use crate::input::{FsEvent, OverflowScope};
@@ -61,16 +61,16 @@ pub enum BurstHelper {
     /// only); this helper is single-purpose (mint correlation, clear residual, write phase, emit
     /// probe).
     TransitionToRebasing,
-    /// `Engine::transition_to_settling` — post-fire HashChannel re-sample spacing. Reached only
-    /// from the `Rebasing → Settling` retry loop-back (`dispatch_rebase_ok::Retry`); the post-fire
-    /// mirror of pre-fire's `retry_drives_batching`. The natural rebase entry is probe-first
-    /// (`Awaiting → Rebasing`), so there is no `Awaiting → Settling` advance.
+    /// `Engine::transition_to_settling` — post-fire HashChannel re-sample spacing. Reached only from
+    /// the `Rebasing → Settling` retry loop-back (`dispatch_rebase_ok::Retry`); the post-fire mirror
+    /// of pre-fire's `retry_drives_batching`. The natural rebase entry is probe-first (`Awaiting →
+    /// Rebasing`), so there is no `Awaiting → Settling` advance.
     TransitionToSettling,
     /// `Engine::absorb_event_into_fire_tail` — post-fire FsEvent absorb.
     AbsorbEventIntoFireTail,
     /// `Engine::restart_burst_from_fire_tail_residual` — post-rebase residual restart
-    /// (`Active(PostFire)` → `Active(PreFire(Batching))` typed move; the watched anchor is
-    /// preserved across the move, no refcount edge changes).
+    /// (`Active(PostFire)` → `Active(PreFire(Batching))` typed move; the watched anchor is preserved
+    /// across the move, no refcount edge changes).
     RestartBurstFromFireTailResidual,
 }
 
@@ -93,8 +93,8 @@ pub enum BurstHelper {
 ///
 /// None is reachable through legitimate filesystem state: the engine roots every Standard probe at
 /// a directory the Profile's snapshot lists, so each hop of the splice resolves through a listing
-/// of the snapshot it splices into. Reaching any of them signals an upstream target / Tree
-/// lifecycle regression.
+/// of the snapshot it splices into. Reaching any of them signals an upstream target / Tree lifecycle
+/// regression.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SpliceFailureCause {
     TargetOutsideAnchorSubtree,
@@ -111,9 +111,9 @@ pub enum SpliceFailureCause {
 /// - [`Self::ConfigDiffRemoved`]: the operator removed the `[[watch]]` block from config;
 ///   hot-reload's `subs.removed` arm in `on_config_diff` drives the detach via `detach_sub_inner`.
 /// - [`Self::ConfigDiffIdentityChanged`]: the operator changed the Sub's identity (anchor / scan
-///   config / `max_settle` / events) in config; the diff's `modified_identity` bucket routes
-///   through detach + attach, so the same operator name briefly leaves the registry. Distinct from
-///   the in-place `modified_params` arm (which emits [`Diagnostic::SubRebound`] without any
+///   config / `max_settle` / events) in config; the diff's `modified_identity` bucket routes through
+///   detach + attach, so the same operator name briefly leaves the registry. Distinct from the
+///   in-place `modified_params` arm (which emits [`Diagnostic::SubRebound`] without any
 ///   `SubDetached`). The bucket name is the precise term: `identity` is what changed; `name` and
 ///   `has_fired` continuity is what the in-place arm preserves.
 /// - [`Self::IpcDisabled`]: an operator runtime-disabled the Sub via the bin's IPC `disable` verb;
@@ -139,14 +139,14 @@ pub enum DetachReason {
 /// produced by a given dropped Input.
 ///
 /// A line about a Sub the engine holds names the template that minted it (`minted_by`, `None` for a
-/// declared Sub): a reader after the step cannot ask the registry, which the same step may have
-/// taken the Sub out of. A line about a Sub the engine does not hold names none.
+/// declared Sub): a reader after the step cannot ask the registry, which the same step may have taken
+/// the Sub out of. A line about a Sub the engine does not hold names none.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Diagnostic {
     /// `ProbeResponse` whose `(owner, correlation)` doesn't match the owner's in-flight `ProbeSlot`
-    /// correlation. Catches stale-id (post-detach), post-cancel arrivals, and out-of-order
-    /// responses. The `owner` field carries the [`ProfileId`] so operators can see which Profile
-    /// saw the stale response.
+    /// correlation. Catches stale-id (post-detach), post-cancel arrivals, and out-of-order responses.
+    /// The `owner` field carries the [`ProfileId`] so operators can see which Profile saw the stale
+    /// response.
     StaleProbeResponse {
         owner: ProfileId,
         correlation: ProbeCorrelation,
@@ -182,17 +182,17 @@ pub enum Diagnostic {
     /// [`Self::EffectCompleteForUnknownSub`] — that variant fires on a stray completion arrival,
     /// not on a detach miss.
     DetachUnknownSub { sub: SubId },
-    /// `Input::ConfigDiff`'s Sub `removed` list named a watch the engine has no record of —
-    /// typically a name whose prior attach failed ([`Self::AttachPathInvalid`]) so it never entered
-    /// the registry. Benign and informational: there is nothing to detach. The resolution shim
-    /// emits this rather than attempting a detach.
+    /// `Input::ConfigDiff`'s Sub `removed` list named a watch the engine has no record of — typically
+    /// a name whose prior attach failed ([`Self::AttachPathInvalid`]) so it never entered the
+    /// registry. Benign and informational: there is nothing to detach. The resolution shim emits
+    /// this rather than attempting a detach.
     ConfigDiffUnknownSub { name: CompactString },
     /// `Input::ConfigDiff`'s Sub `modified_params` bucket named a watch the engine has no record of
-    /// — typically a name whose prior attach failed ([`Self::AttachPathInvalid`]) so it never
-    /// entered the registry. The dispatcher cannot rebind a Sub that does not exist, so it degrades
-    /// the entry to a fresh attach (the same effect a future operator-driven attach would have on a
-    /// clean registry). This variant frames the *reason* for triage; the fallback attach emits its
-    /// own lifecycle diagnostics ([`Self::SubAttached`] on success, [`Self::AttachPathInvalid`] /
+    /// — typically a name whose prior attach failed ([`Self::AttachPathInvalid`]) so it never entered
+    /// the registry. The dispatcher cannot rebind a Sub that does not exist, so it degrades the entry
+    /// to a fresh attach (the same effect a future operator-driven attach would have on a clean
+    /// registry). This variant frames the *reason* for triage; the fallback attach emits its own
+    /// lifecycle diagnostics ([`Self::SubAttached`] on success, [`Self::AttachPathInvalid`] /
     /// [`Self::AttachResourceStale`] on failure) independently.
     ConfigDiffRebindFallbackAttach { name: CompactString },
     /// Probe returned `Vanished` during a `Seed` or `Standard` burst. The Engine's response differs
@@ -223,8 +223,8 @@ pub enum Diagnostic {
     /// so logs can disambiguate user opt-out from race.
     ///
     /// Anchor-on-Profile events bypass this filter unconditionally — lifecycle continuity (anchor
-    /// terminal events drive `on_anchor_terminal_event`; non-terminal anchor events drive the
-    /// burst) trumps the user's class opt-out.
+    /// terminal events drive `on_anchor_terminal_event`; non-terminal anchor events drive the burst)
+    /// trumps the user's class opt-out.
     EventClassDropped {
         resource: ResourceId,
         event: FsEvent,
@@ -238,14 +238,14 @@ pub enum Diagnostic {
     ///   (a Dir at the `max_depth` rim, a `MatchChain` terminus Dir). The snapshot folds only its
     ///   identity where the parent enumerated it, so member churn inside is invisible to every
     ///   verdict; or
-    /// - the event is **directory METADATA** (chmod / chown / touch) — directory metadata folds
-    ///   into no proof object (`dir_hash` deliberately excludes `root_meta.mtime`).
+    /// - the event is **directory METADATA** (chmod / chown / touch) — directory metadata folds into
+    ///   no proof object (`dir_hash` deliberately excludes `root_meta.mtime`).
     ///
     /// Driving a burst on such an event could only end in a `nothing_changed` verdict — which a
-    /// never-fired Sub converts into a spurious first fire — so the engine drops it before any
-    /// burst is driven or extended (post-fire absorbs included). Identity events are exempt: a
-    /// deleted `MatchChain` terminus folds to STRUCTURE at the boundary slot and must drive the
-    /// discovery reconcile's reap.
+    /// never-fired Sub converts into a spurious first fire — so the engine drops it before any burst
+    /// is driven or extended (post-fire absorbs included). Identity events are exempt: a deleted
+    /// `MatchChain` terminus folds to STRUCTURE at the boundary slot and must drive the discovery
+    /// reconcile's reap.
     ///
     /// Distinct from [`Self::EventClassDropped`]: there the *user's mask* opted out of the class;
     /// here the mask admits it but the proof object cannot see it. The Profile's own FDs never exist
@@ -256,13 +256,13 @@ pub enum Diagnostic {
         event: FsEvent,
         profile: ProfileId,
     },
-    /// `FsEvent` arrived for a Resource whose `watch_demand == 0` — race between `Unwatch` op and the
-    /// Sensor's kqueue drain. True "stale FD" race; the engine cannot route this event anywhere.
+    /// `FsEvent` arrived for a Resource whose `watch_demand == 0` — race between `Unwatch` op and
+    /// the Sensor's kqueue drain. True "stale FD" race; the engine cannot route this event anywhere.
     EventOnUnwatchedResource { resource: ResourceId },
-    /// `FsEvent` arrived for a Resource that is genuinely Watched (`watch_demand > 0`) but no
-    /// Profile (or descent, or recovery target) consumed it this step — typically a
-    /// `WatchRootParent` firing `StructureChanged` for an entry the engine doesn't track. Logged at
-    /// TRACE: this is benign normal-operation noise, not a race or bug.
+    /// `FsEvent` arrived for a Resource that is genuinely Watched (`watch_demand > 0`) but no Profile
+    /// (or descent, or recovery target) consumed it this step — typically a `WatchRootParent` firing
+    /// `StructureChanged` for an entry the engine doesn't track. Logged at TRACE: this is benign
+    /// normal-operation noise, not a race or bug.
     EventNoConsumer { resource: ResourceId },
     /// `Input::WatchOpRejected` arrived from the Sensor. Engine clamped `watch_demand := 0` on
     /// `resource` and emitted no further `Watch` op for it — recovery is on the parent's next
@@ -279,18 +279,18 @@ pub enum Diagnostic {
     /// gone. The usual consequence is a rewind: descent retreats to the next-existing ancestor of
     /// `prefix` and re-probes (repeated occurrences during scaffold tear-down are normal, and the
     /// FS-root bootstrap guarantees a rewind target for every non-root prefix). The one exception
-    /// is a vanished root prefix with no parent to descend from: the Profile parks instead,
-    /// narrated by a trailing [`Self::ProfileParked`] in the same step. So the operator-visible
-    /// distinction is in the stream — this variant alone is the self-healing rewind; this variant
-    /// *followed by* `ProfileParked` is the dead-ended abandon.
+    /// is a vanished root prefix with no parent to descend from: the Profile parks instead, narrated
+    /// by a trailing [`Self::ProfileParked`] in the same step. So the operator-visible distinction
+    /// is in the stream — this variant alone is the self-healing rewind; this variant *followed by*
+    /// `ProfileParked` is the dead-ended abandon.
     PendingPathProbeVanished {
         profile: ProfileId,
         prefix: ResourceId,
     },
     /// Pending-path descent probe returned [`crate::op::ProbeOutcome::Failed`] for `prefix`. The
-    /// Engine retains the pending state and waits for the next event at `prefix`
-    /// (`on_descent_event`) before retrying. `failure` carries the typed routing target; the
-    /// operator-visible errno reads off `failure.errno()`.
+    /// Engine retains the pending state and waits for the next event at `prefix` (`on_descent_event`)
+    /// before retrying. `failure` carries the typed routing target; the operator-visible errno reads
+    /// off `failure.errno()`.
     PendingPathProbeFailed {
         profile: ProfileId,
         prefix: ResourceId,
@@ -300,9 +300,9 @@ pub enum Diagnostic {
     /// present under it yet — the descent parks until the next event at the prefix
     /// (`on_descent_event`). Emitted only for *witnessed* descents (an observed anchor loss
     /// re-entering descent): there the park is a recovery in flight — typically a delete-then-write
-    /// save whose create hasn't landed — and silence would read as the recovery vanishing in a
-    /// debug tail. Attach-time descents park silently; awaiting a path that doesn't exist yet is
-    /// their steady state, and a per-probe emission would be noise.
+    /// save whose create hasn't landed — and silence would read as the recovery vanishing in a debug
+    /// tail. Attach-time descents park silently; awaiting a path that doesn't exist yet is their
+    /// steady state, and a per-probe emission would be noise.
     PendingPathAwaitingSegment {
         profile: ProfileId,
         prefix: ResourceId,
@@ -312,10 +312,10 @@ pub enum Diagnostic {
     /// transient-failure budget was spent. A signal-bearing probe (a prefix-event / overflow
     /// re-trigger or a raced-signal repay) is the sole observer of a structural signal that won't
     /// re-arrive on its own; a kernel-resource blip ([`ProbeFailure::Transient`]) at every retry
-    /// means the awaited segment's creation could not be observed. The descent stays Pending —
-    /// *not* wedged forever — and re-triggers on the next prefix `StructureChanged` or sensor
-    /// overflow, which earns a fresh budget; but until one arrives nothing re-probes, so this is
-    /// the loud terminal the operator reads instead of inferring a wedge from one stale
+    /// means the awaited segment's creation could not be observed. The descent stays Pending — *not*
+    /// wedged forever — and re-triggers on the next prefix `StructureChanged` or sensor overflow,
+    /// which earns a fresh budget; but until one arrives nothing re-probes, so this is the loud
+    /// terminal the operator reads instead of inferring a wedge from one stale
     /// [`Self::PendingPathProbeFailed`]. `retries` is the budget spent; `errno` the last transient
     /// errno (always a `Transient` class — `Denied` failures never retry).
     PendingPathRetriesExhausted {
@@ -327,13 +327,13 @@ pub enum Diagnostic {
     /// A pending-path descent reached its terminus: the awaited anchor materialized on disk, so the
     /// Profile left [`crate::ProfileState::Pending`] for `Idle → Active(Seed)` to establish a
     /// baseline. `anchor` is the now-live anchor slot. This is the single *positive* signal in the
-    /// descent lifecycle — every other Pending narration (`PendingPathProbeVanished` /
-    /// `…ProbeFailed` / `…AwaitingSegment` / `…RetriesExhausted`) reports a stall or a retreat, so
-    /// without it an operator tailing after an anchor loss sees the failure chain and then, on
-    /// recovery, silence. Covers all three descent entries (attach-time, observed-loss recovery,
-    /// park recovery) — the terminus is blind to which drove it. A witnessed descent additionally
-    /// owes a fire that surfaces as a later [`Self::SubFired`]; an unwitnessed one pins its
-    /// baseline silently, so this is the only mark it leaves.
+    /// descent lifecycle — every other Pending narration (`PendingPathProbeVanished` / `…ProbeFailed`
+    /// / `…AwaitingSegment` / `…RetriesExhausted`) reports a stall or a retreat, so without it an
+    /// operator tailing after an anchor loss sees the failure chain and then, on recovery, silence.
+    /// Covers all three descent entries (attach-time, observed-loss recovery, park recovery) — the
+    /// terminus is blind to which drove it. A witnessed descent additionally owes a fire that
+    /// surfaces as a later [`Self::SubFired`]; an unwitnessed one pins its baseline silently, so
+    /// this is the only mark it leaves.
     PendingPathMaterialized {
         profile: ProfileId,
         anchor: ResourceId,
@@ -341,8 +341,8 @@ pub enum Diagnostic {
     /// A Profile's active burst carried [`crate::BurstFinish::Reap`] (the last Sub had detached
     /// mid-burst), then a fresh `attach_sub` arrived at the same `(resource, config_hash)` before
     /// the burst completed — the directive is flipped back to [`crate::BurstFinish::ReturnToIdle`]
-    /// and the Profile remains alive under the new Sub set. Informational — not an error. Pairs
-    /// with [`Self::ProfileReaped`] (the reap actually ran).
+    /// and the Profile remains alive under the new Sub set. Informational — not an error. Pairs with
+    /// [`Self::ProfileReaped`] (the reap actually ran).
     ReapPendingCancelled { profile: ProfileId },
     /// A Profile was reaped — its [`crate::ProfileMap`] entry is gone, every watch contribution
     /// released. `via` distinguishes the trigger so operators can tell a steady-state detach
@@ -353,11 +353,11 @@ pub enum Diagnostic {
         profile: ProfileId,
         via: crate::ReapTrigger,
     },
-    /// A Profile entered [`crate::ProfileState::Parked`] — anchorless, awaiting recovery or
-    /// operator action. Emitted once per operational park entry (a path-fatal probe failure, a
-    /// kernel watch rejection purge, a descent-prefix purge / abandon, an observed loss with no
-    /// recovery parent); a park that is part of the Profile's own teardown in the same step is
-    /// silent (the reap narrates instead).
+    /// A Profile entered [`crate::ProfileState::Parked`] — anchorless, awaiting recovery or operator
+    /// action. Emitted once per operational park entry (a path-fatal probe failure, a kernel watch
+    /// rejection purge, a descent-prefix purge / abandon, an observed loss with no recovery parent);
+    /// a park that is part of the Profile's own teardown in the same step is silent (the reap
+    /// narrates instead).
     ///
     /// `recovery` is the cached `watch_root_parent` channel, if any: `Some(parent)` means the next
     /// `StructureChanged` at `parent` (or at the co-claimed anchor slot) re-enters recovery descent
@@ -394,25 +394,25 @@ pub enum Diagnostic {
     /// hot-reload batch can identify the bad entry without re-scanning the config.
     AttachPathInvalid { path: Arc<Path>, hint: &'static str },
     /// A resource-anchored attach request named a [`ResourceId`] with no live Tree slot (reaped,
-    /// never-existed, or a default sentinel). The engine drops the attach and surfaces the
-    /// offending id rather than trusting the stale claim and panicking downstream — the
-    /// resource-arm counterpart to [`Self::AttachPathInvalid`].
+    /// never-existed, or a default sentinel). The engine drops the attach and surfaces the offending
+    /// id rather than trusting the stale claim and panicking downstream — the resource-arm
+    /// counterpart to [`Self::AttachPathInvalid`].
     AttachResourceStale { resource: ResourceId },
-    /// A probe response's snapshot shape (`File` from `AnchorOk(_)` vs `Dir` from `SubtreeProven {
-    /// .. }`) disagrees with the Profile's cached [`crate::Profile::kind`]. Structurally
-    /// unreachable in v1 (the engine types each probe request to the Profile's kind and the
-    /// walker's outcome matches by construction), so an emission signals a walker regression. The
-    /// engine recovers by treating the anchor as lost and re-deriving from disk.
+    /// A probe response's snapshot shape (`File` from `AnchorOk(_)` vs `Dir` from `SubtreeProven
+    /// { .. }`) disagrees with the Profile's cached [`crate::Profile::kind`]. Structurally
+    /// unreachable in v1 (the engine types each probe request to the Profile's kind and the walker's
+    /// outcome matches by construction), so an emission signals a walker regression. The engine
+    /// recovers by treating the anchor as lost and re-deriving from disk.
     AnchorKindMismatch {
         profile: ProfileId,
         prior_kind: ResourceKind,
         response_kind: ResourceKind,
     },
-    /// `splice` could not navigate from the prior snapshot's anchor down to `target`; `cause`
-    /// demuxes the structural failure mode (see [`SpliceFailureCause`]). The engine contract is
-    /// "graft only into observed subtrees", so any emission is a contract breach: the engine keeps
-    /// its prior view and converges on the next probe. No cause is reachable through legitimate
-    /// state; each signals an upstream target / Tree lifecycle regression.
+    /// `splice` could not navigate from the prior snapshot's anchor down to `target`; `cause` demuxes
+    /// the structural failure mode (see [`SpliceFailureCause`]). The engine contract is "graft only
+    /// into observed subtrees", so any emission is a contract breach: the engine keeps its prior
+    /// view and converges on the next probe. No cause is reachable through legitimate state; each
+    /// signals an upstream target / Tree lifecycle regression.
     SpliceCrossedUncovered {
         profile: ProfileId,
         target: ResourceId,
@@ -421,9 +421,9 @@ pub enum Diagnostic {
     /// `FsEvent` arrived while the Profile was in [`crate::PostFirePhase::Awaiting`] or
     /// [`crate::PostFirePhase::Rebasing`] — the post-fire tail of a burst. The engine absorbs the
     /// event: no fresh burst, no settle re-arm, no `dirty` extension. The Rebasing probe captures
-    /// the disk state (including whatever triggered this event) into the new baseline, so the
-    /// change is folded into the fire-cycle's terminal rebase rather than driving a second burst
-    /// against an in-flight one. Informational; the event is not lost, merely deferred.
+    /// the disk state (including whatever triggered this event) into the new baseline, so the change
+    /// is folded into the fire-cycle's terminal rebase rather than driving a second burst against
+    /// an in-flight one. Informational; the event is not lost, merely deferred.
     EventAbsorbedByFireTail {
         profile: ProfileId,
         resource: ResourceId,
@@ -441,12 +441,12 @@ pub enum Diagnostic {
         profile: ProfileId,
         outstanding: u32,
     },
-    /// `AwaitGateDeadline` timer elapsed before all outstanding `EffectComplete`s arrived on a
-    /// zombie ([`crate::BurstFinish::Reap`]) burst — the only Sub detached mid-`Awaiting`, so the
-    /// burst has no consumer for a rebased baseline. The engine elides the rebase round-trip
-    /// (wasted work on a dying Profile) and routes through `finish_burst_to_idle`, which then
-    /// dispatches the deferred reap. Late completions land in [`Self::EffectCompleteForUnknownSub`]
-    /// (the Sub left the registry at detach).
+    /// `AwaitGateDeadline` timer elapsed before all outstanding `EffectComplete`s arrived on a zombie
+    /// ([`crate::BurstFinish::Reap`]) burst — the only Sub detached mid-`Awaiting`, so the burst
+    /// has no consumer for a rebased baseline. The engine elides the rebase round-trip (wasted work
+    /// on a dying Profile) and routes through `finish_burst_to_idle`, which then dispatches the
+    /// deferred reap. Late completions land in [`Self::EffectCompleteForUnknownSub`] (the Sub left
+    /// the registry at detach).
     ///
     /// The structural mirror of [`Self::AwaitGateDeadlineForceRebasing`] — same gate-deadline
     /// trigger, the [`crate::BurstFinish`] in effect at expiry picks the variant.
@@ -473,19 +473,19 @@ pub enum Diagnostic {
     /// pre-fire's quiet forced-ceiling path is silent (`forced` already propagates onto
     /// `Effect.forced`, visible downstream), so only the strong-signal arm earns a diagnostic.
     ///
-    /// Reachable only when the per-Profile hash channel was engaged — the burst owed quiescence
-    /// proof (Standard / triggered Seed / post-recovery Seed) AND
-    /// [`crate::Profile::events_witness_quiescence`] was `false` (events-incomplete mask).
-    /// "Engaged," not "fired": a no-drift post-recovery Seed engages the channel yet seals via
-    /// `SilentPin`, and a burst caught by an `absorb` window engages it yet commits silently
+    /// Reachable only when the per-Profile hash channel was engaged — the burst owed quiescence proof
+    /// (Standard / triggered Seed / post-recovery Seed) AND
+    /// [`crate::Profile::events_witness_quiescence`] was `false` (events-incomplete mask). "Engaged,"
+    /// not "fired": a no-drift post-recovery Seed engages the channel yet seals via `SilentPin`,
+    /// and a burst caught by an `absorb` window engages it yet commits silently
     /// ([`Self::QuiescenceAbsorbed`]) — so this is a "committed despite change" signal, independent
     /// of whether an Effect fired. For events-reliable Profiles and cold-Seed bursts the channel is
     /// bypassed and this variant is unreachable by the verdict fold (`hash_channel_disagreed` is
     /// always `false`).
     ///
     /// When the disagreement is the tail of a *persistent* event-silent retry streak, the dispatch
-    /// upgrades to [`Self::ChangeOutsideEventMask`] instead — the streak witnesses a mask
-    /// blindspot, not a slow writer caught by the deadline.
+    /// upgrades to [`Self::ChangeOutsideEventMask`] instead — the streak witnesses a mask blindspot,
+    /// not a slow writer caught by the deadline.
     QuiescenceCeilingForcedDespiteChange {
         profile: ProfileId,
         intent: BurstIntent,
@@ -508,10 +508,10 @@ pub enum Diagnostic {
     /// [`Self::ChangeOutsideEventMask`] upgrade (a `true` bit at the tail of a persistent
     /// event-silent retry streak), because no `Effect` carries `forced` downstream to record that
     /// the rebase was a ceiling fallback. This is the principled asymmetry with the pre-fire
-    /// counterpart [`Self::QuiescenceCeilingForcedDespiteChange`], which emits *only* on
-    /// disagreement and stays silent on the quiet path (there `forced` already rides
-    /// `Effect.forced`). `intent` distinguishes a Standard post-fire rebase from a Seed-drift one,
-    /// exactly as on [`Self::ProbeVanished`] / [`Self::ProbeFailed`].
+    /// counterpart [`Self::QuiescenceCeilingForcedDespiteChange`], which emits *only* on disagreement
+    /// and stays silent on the quiet path (there `forced` already rides `Effect.forced`). `intent`
+    /// distinguishes a Standard post-fire rebase from a Seed-drift one, exactly as on
+    /// [`Self::ProbeVanished`] / [`Self::ProbeFailed`].
     RebaseCeilingForced {
         profile: ProfileId,
         intent: BurstIntent,
@@ -529,15 +529,15 @@ pub enum Diagnostic {
     /// Both forced-ceiling terminals' mask-blindspot refinement: the hash channel observed concrete
     /// disagreement (`prior != response`) at the final sample — as on
     /// [`Self::QuiescenceCeilingForcedDespiteChange`] / [`Self::RebaseCeilingForced`] — at the tail
-    /// of `retries` consecutive *motion-observing* Retry windows during which **not one
-    /// mask-admitted event arrived** (any in-mask event resets the burst's streak counter; a
-    /// transient walker refusal or probe failure observed nothing and holds the counter rather than
-    /// inflating it). Settle windows the events stream swore were quiet kept hashing differently,
-    /// so the proof object is moving via change classes outside the Profile's subscribed `events`
-    /// mask; the streak is the witness. The canonical shape: `events = STRUCTURE` over files
-    /// written in place (mmap writers, touch storms) — mtime folds into `leaf_hash`, so every
-    /// sample differs while STRUCTURE stays silent. The remedy is config-side: widen `events` to
-    /// the classes that actually move the tree.
+    /// of `retries` consecutive *motion-observing* Retry windows during which **not one mask-admitted
+    /// event arrived** (any in-mask event resets the burst's streak counter; a transient walker
+    /// refusal or probe failure observed nothing and holds the counter rather than inflating it).
+    /// Settle windows the events stream swore were quiet kept hashing differently, so the proof
+    /// object is moving via change classes outside the Profile's subscribed `events` mask; the streak
+    /// is the witness. The canonical shape: `events = STRUCTURE` over files written in place (mmap
+    /// writers, touch storms) — mtime folds into `leaf_hash`, so every sample differs while STRUCTURE
+    /// stays silent. The remedy is config-side: widen `events` to the classes that actually move
+    /// the tree.
     ///
     /// Emitted **instead of** the generic ceiling diagnostic, at both terminals (the pre-fire
     /// `BurstDeadline` and the post-fire `RebaseCeiling` — `intent` plus the engine's dispatch site
@@ -561,11 +561,11 @@ pub enum Diagnostic {
     /// Informational — the dropped reactions cannot be reconstructed.
     PerFileDriftDroppedOnRecovery { profile: ProfileId },
     /// A `PerStableFile` Sub did not fire on a fresh Profile's first-ever fire: the Seed witnessed
-    /// activity (so the Profile's `SubtreeRoot` Subs fired), but a fresh Profile has no baseline, so
-    /// `emit_effects` builds no per-leaf diff and the per-file reactions have nothing to enumerate.
-    /// Emitted once per fresh-with-activity Seed fire that carries ≥1 `PerStableFile` Sub.
-    /// Informational — running the per-file command for every file in the initial tree is never the
-    /// intent; per-file reactions begin from the post-command baseline the fire establishes.
+    /// activity (so the Profile's `SubtreeRoot` Subs fired), but a fresh Profile has no baseline,
+    /// so `emit_effects` builds no per-leaf diff and the per-file reactions have nothing to
+    /// enumerate. Emitted once per fresh-with-activity Seed fire that carries ≥1 `PerStableFile`
+    /// Sub. Informational — running the per-file command for every file in the initial tree is never
+    /// the intent; per-file reactions begin from the post-command baseline the fire establishes.
     PerFileFireSkippedOnFreshSeed { profile: ProfileId },
     /// A Sub has been registered with the engine and assigned `sub`, on every insert — a declared
     /// Sub's and a minted one's alike.
@@ -597,10 +597,10 @@ pub enum Diagnostic {
         count: u32,
         minted_by: Option<SubId>,
     },
-    /// A burst folded instead of firing: an armed `absorb` window caught a would-have-fired
-    /// verdict, so the engine advanced the baseline silently (the rebase-family seal) rather than
-    /// running the Subs' reactions. The fold counterpart of [`Self::SubFired`] — one emission per
-    /// folded episode, at the verdict floor's `AbsorbFold` arm.
+    /// A burst folded instead of firing: an armed `absorb` window caught a would-have-fired verdict,
+    /// so the engine advanced the baseline silently (the rebase-family seal) rather than running
+    /// the Subs' reactions. The fold counterpart of [`Self::SubFired`] — one emission per folded
+    /// episode, at the verdict floor's `AbsorbFold` arm.
     ///
     /// Carries **no hash**: the metadata hash is meaningless across machines, and folding a remote
     /// replication is the whole point. `profile`-scoped, not `sub`-scoped, because a fold is
@@ -627,8 +627,8 @@ pub enum Diagnostic {
     /// Distinct from siblings:
     /// - [`Self::DetachUnknownSub`] — a *failed* detach (stale id); no Sub was removed, no
     ///   `SubDetached`.
-    /// - [`Self::DiscoverySubReaped`] — the template's line for a match it reaps, carrying the
-    ///   path; this variant is the reaped Sub's own `(sub, profile, reason)`.
+    /// - [`Self::DiscoverySubReaped`] — the template's line for a match it reaps, carrying the path;
+    ///   this variant is the reaped Sub's own `(sub, profile, reason)`.
     /// - [`Self::SubRebound`] — in-place `modified_params` rebind; `has_fired` and the per-Sub
     ///   history survive, no `SubDetached`. The `modified_identity` arm IS a detach + attach and
     ///   DOES emit `SubDetached` with [`DetachReason::ConfigDiffIdentityChanged`].
@@ -643,9 +643,9 @@ pub enum Diagnostic {
     /// `has_fired` included, so the next fire runs the new program and an unchanged tree does not
     /// re-fire. Symmetric with [`Self::SubAttached`]; pure operator narration.
     ///
-    /// A template's rebind reaches every Sub it minted in that one registry edge and makes one
-    /// line, naming the template: a count of the Subs it reached would repeat the minted set's size
-    /// at that instant, and a line per Sub would be noise at fan-out.
+    /// A template's rebind reaches every Sub it minted in that one registry edge and makes one line,
+    /// naming the template: a count of the Subs it reached would repeat the minted set's size at
+    /// that instant, and a line per Sub would be noise at fan-out.
     ///
     /// No `name` field: identity is by id, and the rebind invariant guarantees the prior
     /// `SubAttached`'s name is still in force.
@@ -656,13 +656,13 @@ pub enum Diagnostic {
     /// `rebind_sub_inner` was invoked with a stale [`SubId`]. The invariant is that the dispatcher
     /// resolves names through [`crate::SubRegistry::find_by_name`] in the same step as the rebind,
     /// so a stale id is structurally unexpected: the variant surfaces a routing breach rather than
-    /// a benign no-op. Distinct from [`Self::DetachUnknownSub`] (a stale-id detach attempt) and
-    /// from [`Self::EffectCompleteForUnknownSub`] (a stray completion arrival).
+    /// a benign no-op. Distinct from [`Self::DetachUnknownSub`] (a stale-id detach attempt) and from
+    /// [`Self::EffectCompleteForUnknownSub`] (a stray completion arrival).
     RebindUnknownSub { sub: SubId },
-    /// `template`'s pass matched `path` and minted a Sub for it. `kind` is the kind the Tree
-    /// stamped on the match's slot; `entry` is how the match entered the template's set — an
-    /// enumeration pins cold, an appearance owes its first fire — so the line answers "why did /
-    /// didn't this mint react".
+    /// `template`'s pass matched `path` and minted a Sub for it. `kind` is the kind the Tree stamped
+    /// on the match's slot; `entry` is how the match entered the template's set — an enumeration
+    /// pins cold, an appearance owes its first fire — so the line answers "why did / didn't this
+    /// mint react".
     DiscoveryMinted {
         template: SubId,
         path: Arc<Path>,
@@ -692,11 +692,11 @@ pub enum Diagnostic {
     /// matching more targets than typical (likely too broad, e.g. `/*` without further constraint).
     /// Once per template lifetime ([`crate::SubRegistry::narrate_once`]).
     DiscoveryFanoutThreshold { template: SubId, count: usize },
-    /// The Sub `template` minted at `path` was reaped: the pass's certified match set no longer
-    /// holds its match. A match that appears again is minted afresh, under a new [`SubId`]; a
-    /// *replaced* one never reaches here — its slot survives the replace, so the dedup finds the
-    /// Sub still attached and its own recovery descent fires. The Sub's [`Self::SubDetached`]
-    /// follows, under [`DetachReason::MatchVanished`].
+    /// The Sub `template` minted at `path` was reaped: the pass's certified match set no longer holds
+    /// its match. A match that appears again is minted afresh, under a new [`SubId`]; a *replaced*
+    /// one never reaches here — its slot survives the replace, so the dedup finds the Sub still
+    /// attached and its own recovery descent fires. The Sub's [`Self::SubDetached`] follows, under
+    /// [`DetachReason::MatchVanished`].
     DiscoverySubReaped {
         template: SubId,
         sub: SubId,
@@ -707,15 +707,15 @@ pub enum Diagnostic {
     /// the Subs it minted beneath it stand as they are. One per template and directory, at the
     /// discovery burst's ceiling.
     DiscoveryDenied { template: SubId, path: Arc<Path> },
-    /// A burst-lifecycle helper was invoked on a Profile whose state did not match the helper's
-    /// typed precondition (e.g., `transition_to_verifying` called on a Profile in
-    /// `ActivePostFire`). The helper bails before mutating any state; this variant surfaces the
-    /// routing breach so the originating dispatcher can be fixed.
+    /// A burst-lifecycle helper was invoked on a Profile whose state did not match the helper's typed
+    /// precondition (e.g., `transition_to_verifying` called on a Profile in `ActivePostFire`). The
+    /// helper bails before mutating any state; this variant surfaces the routing breach so the
+    /// originating dispatcher can be fixed.
     ///
     /// `helper` names which entry point bailed; `observed` reports the Profile's state at the call.
     /// Stale `ProfileId` (`profiles.get(_) == None`) does NOT emit this variant — that is a benign
-    /// post-detach race, surfaced only when an op targeting the missing slot rises through the
-    /// usual handlers.
+    /// post-detach race, surfaced only when an op targeting the missing slot rises through the usual
+    /// handlers.
     ///
     /// Structurally unreachable in v1 — every dispatcher gates on the state variant before reaching
     /// a helper — but the precondition gates the gate, so any future routing regression surfaces

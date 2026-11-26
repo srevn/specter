@@ -1,20 +1,20 @@
 //! Engine driver — the bin's main-thread loop, split across focused submodules with the spine here.
 //!
 //! [`EngineDriver`] owns the [`Engine`], the [`Loader`], a [`state::DriverState`] (process-level
-//! facts: start instants + reload counters + socket path), an operator-runtime disable override
-//! set, the actuator-coordination channels, the prober [`Arc`] clone, the deferred-input queue, and
-//! the two mio-reactor halves: [`reactor::Reactor`] (kernel-driven non-IPC sources) and
-//! [`ipc::Hub`] (the operator-IPC listener + per-conn map). This module holds the struct and its
-//! lifecycle ([`EngineDriver::new`], [`EngineDriver::run_initial_attach`], [`EngineDriver::run`])
-//! plus the cancel-first shutdown drain (`begin_shutdown`). The load-bearing work lives next to it:
+//! facts: start instants + reload counters + socket path), an operator-runtime disable override set,
+//! the actuator-coordination channels, the prober [`Arc`] clone, the deferred-input queue, and the
+//! two mio-reactor halves: [`reactor::Reactor`] (kernel-driven non-IPC sources) and [`ipc::Hub`]
+//! (the operator-IPC listener + per-conn map). This module holds the struct and its lifecycle
+//! ([`EngineDriver::new`], [`EngineDriver::run_initial_attach`], [`EngineDriver::run`]) plus the
+//! cancel-first shutdown drain (`begin_shutdown`). The load-bearing work lives next to it:
 //!
 //! - [`tick`] — one pass of the drain order (accept → sensor → timers → reload → config-settle →
 //!   effects → ipc → block). The hot loop; new inbound-path work lands there.
 //! - [`reload`] — the SIGHUP + auto-reload settle pipeline.
 //! - [`forward`] — ships a `StepOutput` downstream, maps a `Diagnostic` to tracing, and fans
 //!   diagnostics out to live IPC subscribers via [`ipc::Hub::dispatch_to_subscribers`].
-//! - [`state`] — driver-owned process facts (startup instants, reload counters, socket path)
-//!   consumed by the IPC `status` surface.
+//! - [`state`] — driver-owned process facts (startup instants, reload counters, socket path) consumed
+//!   by the IPC `status` surface.
 //! - [`reactor`] — owner of the mio reactor surface for kernel-driven non-IPC sources (watcher,
 //!   config-watcher, signal pipe, waker, channel receivers).
 //! - [`ipc`] — the daemon-side IPC concern: kernel-fd owner ([`ipc::Hub`]), per-conn state
@@ -55,8 +55,8 @@ pub(crate) use wake::{WakeHandle, WakingSink};
 
 /// Reason the driver loop exited. Returned from [`EngineDriver::run`].
 ///
-/// v1 has only the `Shutdown` variant — every path that could exit the loop without a shutdown
-/// signal (sensor channel disconnect) currently also routes through `TickOutcome::Shutdown` per
+/// v1 has only the `Shutdown` variant — every path that could exit the loop without a shutdown signal
+/// (sensor channel disconnect) currently also routes through `TickOutcome::Shutdown` per
 /// [`EngineDriver::tick`]. The enum exists so v2 (recovery / restart) has a structural seam without
 /// breaking the [`EngineDriver::run`] return type.
 #[derive(Debug, Eq, PartialEq)]
@@ -80,27 +80,27 @@ pub enum TickOutcome {
 
 /// Engine driver — see module rustdoc.
 ///
-/// **Generic over `W: FsWatcher`** so tests can substitute the sensor crate's `MockFsWatcher`
-/// (whose socketpair-backed `AsFd` surface lets reactor-integration tests run against a real
-/// `mio::Poll`). Production uses the platform [`DefaultWatcher`]; the type-parameter default keeps
-/// `app.rs` and call sites free of `<DefaultWatcher>` boilerplate (inference fills the type from
-/// the `Reactor<W>` passed to [`Self::new`]).
+/// **Generic over `W: FsWatcher`** so tests can substitute the sensor crate's `MockFsWatcher` (whose
+/// socketpair-backed `AsFd` surface lets reactor-integration tests run against a real `mio::Poll`).
+/// Production uses the platform [`DefaultWatcher`]; the type-parameter default keeps `app.rs` and
+/// call sites free of `<DefaultWatcher>` boilerplate (inference fills the type from the `Reactor<W>`
+/// passed to [`Self::new`]).
 ///
 /// **Field order is the drop order.** [`Engine`] FIRST so the probe tripwire (`specter_core::probe`)
 /// runs against a fully-armed engine until [`Self::begin_shutdown`] has drained it. [`ipc::Hub`]
 /// drops BEFORE [`reactor::Reactor`] so its explicit `Drop` impl can deregister the listener + every
-/// live conn stream against the still-live Poll selector; [`reactor::Reactor`] drops LAST so the mio
-/// reactor fds (watcher, signal pipe, waker) outlive every channel-sender clone the driver holds — a
-/// stray send-to-disconnected from a midway drop can't fire on a partially-torn-down reactor.
+/// live conn stream against the still-live Poll selector; [`reactor::Reactor`] drops LAST so the
+/// mio reactor fds (watcher, signal pipe, waker) outlive every channel-sender clone the driver holds
+/// — a stray send-to-disconnected from a midway drop can't fire on a partially-torn-down reactor.
 ///
-/// **Shutdown is co-owned with the actuator.** [`Self::run`] exits only when (a)
-/// `effect_complete_rx` observes [`crossbeam::channel::TryRecvError::Disconnected`] (the actuator
-/// thread exited — clean or crashed — and its `Box<dyn EffectCompleteSender>` adapter dropped the
-/// inner [`wake::WakingSink`], which closes its `Sender<Input>` clone via the
-/// [`wake::WakingSink::drop`] close-then-wake protocol), or (b) the operator escalates a second
-/// SIGINT/SIGTERM within [`crate::signals::HARD_EXIT_WINDOW`] and [`dispatch_signal_inner`] reaches
-/// the `HardExit` arm. The first SIGINT/SIGTERM pulses `shutdown_actuator_tx` and arms `first_term`
-/// (the IPC-mutating-verb gate); the driver keeps ticking — mutating IPC verbs refuse with
+/// **Shutdown is co-owned with the actuator.** [`Self::run`] exits only when (a) `effect_complete_rx`
+/// observes [`crossbeam::channel::TryRecvError::Disconnected`] (the actuator thread exited — clean
+/// or crashed — and its `Box<dyn EffectCompleteSender>` adapter dropped the inner
+/// [`wake::WakingSink`], which closes its `Sender<Input>` clone via the [`wake::WakingSink::drop`]
+/// close-then-wake protocol), or (b) the operator escalates a second SIGINT/SIGTERM within
+/// [`crate::signals::HARD_EXIT_WINDOW`] and [`dispatch_signal_inner`] reaches the `HardExit` arm.
+/// The first SIGINT/SIGTERM pulses `shutdown_actuator_tx` and arms `first_term` (the
+/// IPC-mutating-verb gate); the driver keeps ticking — mutating IPC verbs refuse with
 /// [`crate::ipc::protocol::WireErrorCode::ShuttingDown`]; effect completions and probe responses
 /// arriving during the actuator's SIGTERM → grace → SIGKILL → reap-drain pipeline continue to flow
 /// through [`EngineDriver::forward`]. [`crate::signals::SignalPipe`] lives inside
@@ -130,8 +130,8 @@ pub struct EngineDriver<W: FsWatcher = DefaultWatcher> {
     /// Two consumers:
     /// - The [`Self::tick`] block-timeout math feeds the deadline into `mio::Poll::poll`'s timeout
     ///   so the driver wakes precisely when the window expires.
-    /// - [`Self::apply_config_settle_expiry`] gates the lstat call on `now >= deadline` so the
-    ///   engine thread never lstats before the settle window has elapsed.
+    /// - [`Self::apply_config_settle_expiry`] gates the lstat call on `now >= deadline` so the engine
+    ///   thread never lstats before the settle window has elapsed.
     config_settle_until: Option<Instant>,
     /// Operator-IPC runtime disable overrides — names of Subs the operator disabled via `specter
     /// disable` and has not yet re-enabled. Empty at boot — the set is process-local and not
@@ -139,11 +139,11 @@ pub struct EngineDriver<W: FsWatcher = DefaultWatcher> {
     /// `list`/`show` projections (set membership); mutated by the IPC `disable` / `enable` handlers
     /// (which also filter the next reload's diff so a runtime-disabled Sub is not re-attached).
     disabled_runtime: BTreeSet<CompactString>,
-    /// Driver-side actuator-coordination channels — effects pipe + the three shutdown handshake
-    /// legs. Wired in by [`Self::new`] from `App::run`'s [`ActuatorIO::pair`] allocation;
+    /// Driver-side actuator-coordination channels — effects pipe + the three shutdown handshake legs.
+    /// Wired in by [`Self::new`] from `App::run`'s [`ActuatorIO::pair`] allocation;
     /// [`Self::dispatch_signal_with_exit_fn`] pulses `shutdown_actuator_tx` /
-    /// `hard_shutdown_actuator_tx` and waits on `hard_shutdown_done_rx`. [`Self::forward`]
-    /// dispatches every emitted `EffectOp` through `effects_tx`.
+    /// `hard_shutdown_actuator_tx` and waits on `hard_shutdown_done_rx`. [`Self::forward`] dispatches
+    /// every emitted `EffectOp` through `effects_tx`.
     actuator_io: ActuatorIO,
     /// Timestamp of the first SIGINT / SIGTERM the driver observed. `None` until the first signal
     /// lands; the next SIGINT / SIGTERM within [`crate::signals::HARD_EXIT_WINDOW`] escalates to
@@ -171,14 +171,15 @@ pub struct EngineDriver<W: FsWatcher = DefaultWatcher> {
     /// rejections would fail loud rather than silently grow.
     deferred_inputs: VecDeque<Input>,
     /// The operator-IPC kernel surface — bound listener + per-conn map + per-conn Token allocator +
-    /// a [`mio::Registry::try_clone()`] handle pointing at the [`reactor::Reactor`]'s Poll
-    /// selector. Owned by the driver for the lifetime of the daemon; constructed once in `App::run`
-    /// from the registry clone the Reactor handed back.
+    /// a [`mio::Registry::try_clone()`] handle pointing at the [`reactor::Reactor`]'s Poll selector.
+    /// Owned by the driver for the lifetime of the daemon; constructed once in `App::run` from the
+    /// registry clone the Reactor handed back.
     ///
     /// Field-order BEFORE `reactor` so the explicit `Drop` impl on [`ipc::Hub`] can deregister the
     /// listener + every live conn stream against the still-live Poll selector; once the Hub is gone,
-    /// its Registry clone drops, leaving the Reactor's own Poll holding the last Arc-reference to the
-    /// underlying selector. See [`ipc::hub`]'s module rustdoc for the Hub-internal field drop order.
+    /// its Registry clone drops, leaving the Reactor's own Poll holding the last Arc-reference to
+    /// the underlying selector. See [`ipc::hub`]'s module rustdoc for the Hub-internal field drop
+    /// order.
     ipc: Hub,
     /// The mio reactor surface for kernel-driven non-IPC sources — kqueue/inotify watcher,
     /// config-watcher, signal pipe, and the `Arc<Waker>` shared with the prober + actuator
@@ -186,9 +187,9 @@ pub struct EngineDriver<W: FsWatcher = DefaultWatcher> {
     /// in `App::run` and threaded through [`Self::new`].
     ///
     /// Field-order LAST so the static-source fds (watcher, signal pipe, waker) outlive every
-    /// channel-sender clone the driver holds — a stray send-to-disconnected from a midway drop
-    /// can't fire on a partially-torn-down Reactor. See [`reactor::Reactor`]'s module rustdoc for
-    /// the Reactor-internal field drop order.
+    /// channel-sender clone the driver holds — a stray send-to-disconnected from a midway drop can't
+    /// fire on a partially-torn-down Reactor. See [`reactor::Reactor`]'s module rustdoc for the
+    /// Reactor-internal field drop order.
     reactor: Reactor<W>,
 }
 
@@ -266,10 +267,10 @@ impl<W: FsWatcher> EngineDriver<W> {
     ///
     /// Each [`StepOutput`](specter_core::StepOutput) is forwarded as we go so the watcher / prober
     /// receive ops as the engine emits them — a single startup-sized `ConfigDiff` would batch the
-    /// entire attach into one output and stall the watcher behind the post-call `forward`.
-    /// Hot-reload (in `reload.rs`) deliberately uses the inverse pattern — a single batched
-    /// `Input::ConfigDiff` — because reload diffs are typically small. Revisit if those diffs grow
-    /// large enough to stall the watcher behind a single `forward`.
+    /// entire attach into one output and stall the watcher behind the post-call `forward`. Hot-reload
+    /// (in `reload.rs`) deliberately uses the inverse pattern — a single batched `Input::ConfigDiff`
+    /// — because reload diffs are typically small. Revisit if those diffs grow large enough to stall
+    /// the watcher behind a single `forward`.
     ///
     /// No bin-side reconciliation: the engine owns `name → id` resolution through its registry's
     /// `by_name` index. The `SubAttached` diagnostics are pure operator narration, logged via
@@ -278,14 +279,14 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// Returns [`ControlFlow::Break`] if any `forward` observed a downstream channel disconnect
     /// (actuator-thread death surfaces as `effects_tx` returning `Err(Disconnected)`). On `Break`
     /// we run [`Self::begin_shutdown`] before returning — an attached Sub leaves the Profile in a
-    /// Seed-Verifying state with an armed `ProbeSlot`, and a caller that just drops the driver
-    /// would trip `ProbeSlot::drop`'s linear-edge tripwire. Containing the probe drain inside
-    /// `run_initial_attach` keeps the lifecycle discipline encapsulated; the caller (`app.rs`)
-    /// stays a thin branch on the `ControlFlow` return.
+    /// Seed-Verifying state with an armed `ProbeSlot`, and a caller that just drops the driver would
+    /// trip `ProbeSlot::drop`'s linear-edge tripwire. Containing the probe drain inside
+    /// `run_initial_attach` keeps the lifecycle discipline encapsulated; the caller (`app.rs`) stays
+    /// a thin branch on the `ControlFlow` return.
     pub(crate) fn run_initial_attach(&mut self) -> ControlFlow<()> {
         let now = Instant::now();
-        // Snapshot the active spec list: `self.engine.step` needs `&mut self`, so the `&self`
-        // borrow on `loader.current_config` cannot be held across the loop.
+        // Snapshot the active spec list: `self.engine.step` needs `&mut self`, so the `&self` borrow
+        // on `loader.current_config` cannot be held across the loop.
         let watch_specs: Vec<_> = self
             .loader
             .current_config()
@@ -305,9 +306,9 @@ impl<W: FsWatcher> EngineDriver<W> {
 
     /// Loop wrapping [`Self::tick`] until shutdown.
     ///
-    /// MUST NOT be wrapped in `catch_unwind`: `ProbeSlot`'s in-unwind silence
-    /// (`specter_core::probe`) depends on a mid-`step` panic being fatal — catching it here would
-    /// let the daemon carry on with a probe-bearing state torn down mid-flight.
+    /// MUST NOT be wrapped in `catch_unwind`: `ProbeSlot`'s in-unwind silence (`specter_core::probe`)
+    /// depends on a mid-`step` panic being fatal — catching it here would let the daemon carry on
+    /// with a probe-bearing state torn down mid-flight.
     pub fn run(&mut self) -> ExitReason {
         loop {
             match self.tick() {
@@ -330,35 +331,35 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// second-within-window (hard-exit escalation) — only reachable from tests because production's
     /// `exit_fn` does not return.
     ///
-    /// Called from [`tick`]'s signal-drain pass: the Reactor's `TOKEN_SIGNAL` arm hands every
-    /// queued signum to this method in arrival order. No cross-thread coordination, no
-    /// global-handler racing — the dispatch runs on the same thread that owns the engine.
+    /// Called from [`tick`]'s signal-drain pass: the Reactor's `TOKEN_SIGNAL` arm hands every queued
+    /// signum to this method in arrival order. No cross-thread coordination, no global-handler racing
+    /// — the dispatch runs on the same thread that owns the engine.
     pub(crate) fn dispatch_signal(&mut self, sig: i32, now: Instant) -> ControlFlow<()> {
         self.dispatch_signal_with_exit_fn(sig, now, |code| std::process::exit(code))
     }
 
-    /// Test-friendly variant of [`Self::dispatch_signal`] that takes an injectable `exit_fn`
-    /// closure in place of [`std::process::exit`]. Production calls this with `|code|
+    /// Test-friendly variant of [`Self::dispatch_signal`] that takes an injectable `exit_fn` closure
+    /// in place of [`std::process::exit`]. Production calls this with `|code|
     /// std::process::exit(code)`; tests pass a closure that records the requested exit code so the
     /// test runner survives the hard-exit branch.
     ///
     /// The pure signal-classification work runs in [`dispatch_signal_inner`] against `&mut
-    /// self.first_term` and `&self.actuator_io`; this method then resolves the action's outer
-    /// effect (the SIGHUP arm calls [`Self::dispatch_reload`]; the first SIGINT/SIGTERM arm
-    /// continues — the driver stays alive through the actuator's grace and exits via the
-    /// actuator-gone signal on `effect_complete_rx`; the second-within-window arm escalates to
-    /// `exit_fn` and returns `Break` for test sanity). Splitting the work this way lets the inner
-    /// function take field references that don't conflict with the `&mut self` the reload arm needs
-    /// — the borrow checker is satisfied because the two borrows are disjoint in time.
+    /// self.first_term` and `&self.actuator_io`; this method then resolves the action's outer effect
+    /// (the SIGHUP arm calls [`Self::dispatch_reload`]; the first SIGINT/SIGTERM arm continues —
+    /// the driver stays alive through the actuator's grace and exits via the actuator-gone signal
+    /// on `effect_complete_rx`; the second-within-window arm escalates to `exit_fn` and returns
+    /// `Break` for test sanity). Splitting the work this way lets the inner function take field
+    /// references that don't conflict with the `&mut self` the reload arm needs — the borrow checker
+    /// is satisfied because the two borrows are disjoint in time.
     ///
     /// **`SignalAction::Shutdown` returns `Continue`.** The first termination signal pulses
     /// `shutdown_actuator_tx` and arms `first_term` (the IPC-mutating-verb gate; see
-    /// [`crate::ipc::protocol::WireErrorCode::ShuttingDown`]) but does NOT exit the loop. The
-    /// driver keeps ticking through the actuator's SIGTERM → grace → SIGKILL → reap-drain phases;
-    /// the actuator's eventual exit drops its `WakingSink`'s `Sender<Input>` clone, which surfaces
-    /// on the driver's next `try_recv` as Disconnected → `DrainedTick.actuator_gone = true` → tick
-    /// body routes through [`Self::begin_shutdown`]. `SignalPipe` lives inside the Reactor (inside
-    /// this driver), so the second-tap hard-exit handshake stays installed across the entire
+    /// [`crate::ipc::protocol::WireErrorCode::ShuttingDown`]) but does NOT exit the loop. The driver
+    /// keeps ticking through the actuator's SIGTERM → grace → SIGKILL → reap-drain phases; the
+    /// actuator's eventual exit drops its `WakingSink`'s `Sender<Input>` clone, which surfaces on
+    /// the driver's next `try_recv` as Disconnected → `DrainedTick.actuator_gone = true` → tick body
+    /// routes through [`Self::begin_shutdown`]. `SignalPipe` lives inside the Reactor (inside this
+    /// driver), so the second-tap hard-exit handshake stays installed across the entire
     /// actuator-grace window — no handshake is orphaned mid-grace.
     pub(crate) fn dispatch_signal_with_exit_fn<F: FnOnce(i32)>(
         &mut self,
@@ -416,9 +417,9 @@ impl<W: FsWatcher> EngineDriver<W> {
 /// the inner function's classification + actuator-coord pulse has run.
 ///
 /// The pure inner function returns this discriminator; the wrapping method
-/// ([`EngineDriver::dispatch_signal_with_exit_fn`]) then runs the lifecycle effect tied to each
-/// arm. This split keeps the inner function pure (only touches `first_term` + `actuator_io`) so
-/// unit tests can exercise every branch without constructing a full [`EngineDriver`].
+/// ([`EngineDriver::dispatch_signal_with_exit_fn`]) then runs the lifecycle effect tied to each arm.
+/// This split keeps the inner function pure (only touches `first_term` + `actuator_io`) so unit tests
+/// can exercise every branch without constructing a full [`EngineDriver`].
 #[derive(Debug, Eq, PartialEq)]
 enum SignalAction {
     /// Unknown signal. The dispatch caller returns [`ControlFlow::Continue`].
@@ -442,8 +443,8 @@ enum SignalAction {
 
 /// Pure dispatch core for [`EngineDriver::dispatch_signal_with_exit_fn`].
 ///
-/// Separated from the method so the borrow checker can hold `&mut first_term` + `&io`
-/// simultaneously without conflicting with the `&mut self` that the SIGHUP arm's outer effect
+/// Separated from the method so the borrow checker can hold `&mut first_term` + `&io` simultaneously
+/// without conflicting with the `&mut self` that the SIGHUP arm's outer effect
 /// ([`EngineDriver::dispatch_reload`]) needs — the inner function returns its action discriminator,
 /// then drops every borrow before the caller takes the `&mut self` it needs for the reload step.
 fn dispatch_signal_inner<F: FnOnce(i32)>(

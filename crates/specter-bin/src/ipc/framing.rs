@@ -6,34 +6,34 @@
 //! One JSON object per line, terminated by `\n`. Per-line length cap is [`MAX_LINE_BYTES`] — a line
 //! past that is structurally hostile and the reader path terminates the conn. Every send path on
 //! both client and server converges on this shape: the daemon's response writer, the diag fan-out,
-//! the back-pressure marker flush, the structured-busy reply on the accept cap, the client's
-//! request shipping, and the operator-side `tail -o json` echo. This module owns the envelope
-//! contract — the cap, the "build the wire-ready bytes" step, and the strict-parse gate on incoming
-//! object lines — so a future change to the framing discipline (length-prefix, batching, larger
-//! cap, etc.) lands here once.
+//! the back-pressure marker flush, the structured-busy reply on the accept cap, the client's request
+//! shipping, and the operator-side `tail -o json` echo. This module owns the envelope contract —
+//! the cap, the "build the wire-ready bytes" step, and the strict-parse gate on incoming object lines
+//! — so a future change to the framing discipline (length-prefix, batching, larger cap, etc.) lands
+//! here once.
 //!
 //! # Boundary strictness
 //!
-//! The request/response surface admits no unknown fields: [`parse_strict`] round-trip-validates
-//! every incoming JSON object against its own re-serialized form so a typoed operator JSON
+//! The request/response surface admits no unknown fields: [`parse_strict`] round-trip-validates every
+//! incoming JSON object against its own re-serialized form so a typoed operator JSON
 //! (`{"op":"subscribe","names":"build"}`) or a daemon-bug response carrying a stale field name
-//! reaches the caller as a parse error rather than silently dropping the value. The discipline
-//! lives here because internally-tagged enums ([`super::protocol::WireRequest`],
-//! [`super::protocol::ResponsePayload`], [`super::protocol::ShowResponse`]) cannot use serde
-//! derive's `deny_unknown_fields` — a long-standing serde-derive gap — so the gate is implemented
-//! at the wire boundary instead. Streamed [`super::wire::WireDiagnostic`] lines are deliberately
-//! exempt: an older `tail`/`wait` client reading from a newer daemon stays forward-compatible.
+//! reaches the caller as a parse error rather than silently dropping the value. The discipline lives
+//! here because internally-tagged enums ([`super::protocol::WireRequest`],
+//! [`super::protocol::ResponsePayload`], [`super::protocol::ShowResponse`]) cannot use serde derive's
+//! `deny_unknown_fields` — a long-standing serde-derive gap — so the gate is implemented at the wire
+//! boundary instead. Streamed [`super::wire::WireDiagnostic`] lines are deliberately exempt: an older
+//! `tail`/`wait` client reading from a newer daemon stays forward-compatible.
 //!
 //! # Infallible serialization discipline
 //!
 //! Every production send path threads a wire type whose `Serialize` impl cannot fail in practice —
-//! the carriers are derive-Serialize over plain-data fields, with no custom adapters that could
-//! panic or error mid-emit. [`InfallibleSerialize`] is the marker trait that captures the property
-//! at the type level; [`encode_line`] is the `Vec<u8>`-returning wrapper every production caller
-//! routes through. The fallible primitive [`serialize_line`] is module-private, so a future caller
-//! cannot reach the wire bytes without either marking their type `InfallibleSerialize` or lifting
-//! the primitive's visibility — both explicit, reviewed moves rather than a silent `.expect`-at-a-
-//! distance scattered across the binary.
+//! the carriers are derive-Serialize over plain-data fields, with no custom adapters that could panic
+//! or error mid-emit. [`InfallibleSerialize`] is the marker trait that captures the property at the
+//! type level; [`encode_line`] is the `Vec<u8>`-returning wrapper every production caller routes
+//! through. The fallible primitive [`serialize_line`] is module-private, so a future caller cannot
+//! reach the wire bytes without either marking their type `InfallibleSerialize` or lifting the
+//! primitive's visibility — both explicit, reviewed moves rather than a silent
+//! `.expect`-at-a-distance scattered across the binary.
 //!
 //! # Visibility
 //!
@@ -55,8 +55,8 @@ use std::io;
 /// response has the same backpressure footprint as a hostile read.
 pub(crate) const MAX_LINE_BYTES: usize = 256 * 1024;
 
-/// Serialize `value` as JSON and append a trailing `\n` so the bytes are wire-ready for the
-/// operator IPC protocol's LF-delimited framing.
+/// Serialize `value` as JSON and append a trailing `\n` so the bytes are wire-ready for the operator
+/// IPC protocol's LF-delimited framing.
 ///
 /// Module-private — production callers route through [`encode_line`], which carries the
 /// [`InfallibleSerialize`] bound that structurally rules out the error path for every wire type.
@@ -91,9 +91,9 @@ fn serialize_line<T: serde::Serialize>(value: &T) -> io::Result<Vec<u8>> {
 /// [`super::wire::WireDiagnostic`] (diag fan-out + client `tail -o json` re-emit),
 /// [`super::protocol::ResponsePayload`] (daemon response enqueue + over-cap busy reply), and
 /// [`super::protocol::WireRequest`] (client request shipping). Each impl is co-located with its type
-/// so the audit lives next to the structural floor it certifies; adding a new wire type that needs to
-/// reach [`encode_line`] is a paired edit (declare it, impl the marker) so a forgotten impl becomes a
-/// compile error at the call site, not a silent fallthrough to the fallible primitive.
+/// so the audit lives next to the structural floor it certifies; adding a new wire type that needs
+/// to reach [`encode_line`] is a paired edit (declare it, impl the marker) so a forgotten impl
+/// becomes a compile error at the call site, not a silent fallthrough to the fallible primitive.
 pub(crate) trait InfallibleSerialize: serde::Serialize {}
 
 /// Serialize `value` as a wire-ready LF-terminated JSON line.
@@ -123,19 +123,19 @@ pub(crate) fn encode_line<T: InfallibleSerialize>(value: &T) -> Vec<u8> {
 /// # Mechanism
 ///
 /// 1. Parse `bytes` to a [`serde_json::Value`] (admits any well-formed JSON).
-/// 2. Parse the same value to `T` via [`serde_json::from_value`] — surfaces missing required
-///    fields, type mismatches, and unknown variant tags through `T`'s normal deserialize gate.
+/// 2. Parse the same value to `T` via [`serde_json::from_value`] — surfaces missing required fields,
+///    type mismatches, and unknown variant tags through `T`'s normal deserialize gate.
 /// 3. Re-serialize the parsed `T` back to a `serde_json::Value`. The derived [`serde::Serialize`]
 ///    emits exactly the keys `T` recognises.
-/// 4. Recursively walk the original value against the round-trip: every key in the original must also
-///    exist in the round-trip. A key in the round-trip but missing from the original is benign (an
-///    `Option<_>::None` field that serialized to `null` versus an omitted field both deserialize
+/// 4. Recursively walk the original value against the round-trip: every key in the original must
+///    also exist in the round-trip. A key in the round-trip but missing from the original is benign
+///    (an `Option<_>::None` field that serialized to `null` versus an omitted field both deserialize
 ///    identically), so the asymmetric walk admits the abbreviated form without false-flagging it.
 ///
 /// # Why a round-trip helper rather than `#[serde(deny_unknown_fields)]`
 ///
-/// Serde derive's `deny_unknown_fields` is incompatible with internally tagged enums (`#[serde(tag
-/// = "...")]`): the attribute either fails to generate the [`Deserialize`](serde::Deserialize) impl
+/// Serde derive's `deny_unknown_fields` is incompatible with internally tagged enums (`#[serde(tag =
+/// "...")]`): the attribute either fails to generate the [`Deserialize`](serde::Deserialize) impl
 /// entirely (when placed on the enum) or treats the tag key itself as unknown on the inner variant
 /// payload's struct (when placed on the struct). The wire surface's three request/response carriers
 /// are all internally tagged, and the embedded structs ([`super::protocol::StatusResponse`], etc.)
@@ -152,9 +152,10 @@ pub(crate) fn encode_line<T: InfallibleSerialize>(value: &T) -> Vec<u8> {
 ///
 /// - First `from_slice` failure: malformed JSON.
 /// - `from_value` failure: missing fields, type mismatch, unknown variant tag.
-/// - Round-trip walk failure: unknown key in the original object not produced by `T`'s `Serialize` —
-///   surfaced as a [`serde::de::Error::custom`] message naming the unknown field and its path within
-///   the value (e.g. `unknown field \`names\` at \`\``, `unknown field \`extra\` at \`.rows\[0\]\``).
+/// - Round-trip walk failure: unknown key in the original object not produced by `T`'s `Serialize`
+///   — surfaced as a [`serde::de::Error::custom`] message naming the unknown field and its path
+///   within the value (e.g. `unknown field \`names\` at \`\``, `unknown field \`extra\` at
+///   \`.rows\[0\]\``).
 pub(crate) fn parse_strict<T>(bytes: &[u8]) -> Result<T, serde_json::Error>
 where
     T: serde::de::DeserializeOwned + serde::Serialize,
@@ -176,8 +177,8 @@ where
 ///
 /// The walk descends into matched object keys and matched array element pairs. Mismatched shapes
 /// (`Object` vs `Array`, or scalar vs collection) are not reachable in production — `parsed`'s
-/// re-serialized form mirrors the original's shape modulo `Option::None` differences — but the
-/// no-op fallback arm keeps the helper total.
+/// re-serialized form mirrors the original's shape modulo `Option::None` differences — but the no-op
+/// fallback arm keeps the helper total.
 fn reject_unknown_keys(
     orig: &serde_json::Value,
     rt: &serde_json::Value,

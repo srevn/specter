@@ -10,10 +10,10 @@
 //!
 //! 1. **Signal handlers first** — [`signals::register_signal_handlers`] installs `sa_sigaction` for
 //!    SIGHUP / SIGINT / SIGTERM before any other production action runs. The returned
-//!    [`signals::SignalPipe`] owns the signal-pipeline's internal pipe; every signal arriving
-//!    during init lands in that pipe and surfaces on the first reactor tick's `TOKEN_SIGNAL` drain.
-//!    Without this lift, SIGTERM during config load would fall through to the kernel default
-//!    (immediate process death) and bypass orderly shutdown.
+//!    [`signals::SignalPipe`] owns the signal-pipeline's internal pipe; every signal arriving during
+//!    init lands in that pipe and surfaces on the first reactor tick's `TOKEN_SIGNAL` drain. Without
+//!    this lift, SIGTERM during config load would fall through to the kernel default (immediate
+//!    process death) and bypass orderly shutdown.
 //! 2. **Config + observability** — fail-fast on parse or filter errors; tracing-subscriber
 //!    installation here makes every downstream init step routable through `tracing::*` rather than
 //!    `eprintln!`.
@@ -32,8 +32,8 @@
 //!    [`Reactor::wake_handle`]. The Hub's [`mio::Registry::try_clone()`] handle is minted by a
 //!    follow-up [`Reactor::registry_clone`] call against the same selector.
 //! 7. **Hub construction** — [`Hub::new`] consumes the bound listener and the Registry clone;
-//!    registers the listener against the shared selector and owns the per-conn map for every
-//!    accepted client.
+//!    registers the listener against the shared selector and owns the per-conn map for every accepted
+//!    client.
 //! 8. **Waking senders + worker spawns** — [`WakingProberResponseSender`] and
 //!    [`WakingEffectCompleteSender`] are constructed with [`WakingSink`]s holding
 //!    [`WakeHandle`](crate::driver::WakeHandle) clones minted via [`Reactor::wake_handle`]; the
@@ -83,8 +83,8 @@ pub fn run(args: DaemonArgs) -> ExitCode {
     // moves into the driver constructor; `log_path` moves into `CliLogOverrides`; `socket` is
     // borrowed by `resolve::resolve` (`as_deref`) at step 7; `log_level`, `log_destination`,
     // `concurrency`, `probe_concurrency`, and `no_config_watch` are `Copy`. The bare bindings avoid
-    // any `args.<field>.clone()` at the driver-constructor and merge_cli sites — the driver
-    // consumes `config` directly and the boot-time TOCTOU lstat reads back through
+    // any `args.<field>.clone()` at the driver-constructor and merge_cli sites — the driver consumes
+    // `config` directly and the boot-time TOCTOU lstat reads back through
     // [`EngineDriver::config_path`].
     let DaemonArgs {
         config,
@@ -151,8 +151,8 @@ pub fn run(args: DaemonArgs) -> ExitCode {
         }
     };
     // Emit the same `disabled_watches` summary as the config-loaded log so an operator booting
-    // Specter with a mostly-disabled config sees *which* entries are suppressed at startup, not
-    // just a watch count that omits them. `discovery` counts the dynamic entries of `watches` — the
+    // Specter with a mostly-disabled config sees *which* entries are suppressed at startup, not just
+    // a watch count that omits them. `discovery` counts the dynamic entries of `watches` — the
     // operator's "how many patterns" view.
     let disabled_watches = initial_config.disabled_names();
     tracing::info!(
@@ -165,10 +165,10 @@ pub fn run(args: DaemonArgs) -> ExitCode {
         config = %config.display(),
         "specter starting"
     );
-    // Advisory config findings (today: event masks that can't witness their scan shape's
-    // quiescence). The initial load (#2) runs before the subscriber exists, so the loaded value is
-    // interrogated here — `Config::warnings` is pull-computed for exactly this gap. Reloads
-    // re-narrate through `dispatch_reload`'s own pull.
+    // Advisory config findings (today: event masks that can't witness their scan shape's quiescence).
+    // The initial load (#2) runs before the subscriber exists, so the loaded value is interrogated
+    // here — `Config::warnings` is pull-computed for exactly this gap. Reloads re-narrate through
+    // `dispatch_reload`'s own pull.
     for issue in initial_config.warnings() {
         tracing::warn!(issue = %issue, "config warning");
     }
@@ -179,8 +179,8 @@ pub fn run(args: DaemonArgs) -> ExitCode {
     //    touches them.
     let loader = Loader::new(initial_config, log_cfg, initial_meta);
 
-    // 5. Kqueue on macOS / FreeBSD, inotify on Linux. The watcher moves into the Reactor below,
-    //    which registers its fd against [`mio::Poll`].
+    // 5. Kqueue on macOS / FreeBSD, inotify on Linux. The watcher moves into the Reactor below, which
+    //    registers its fd against [`mio::Poll`].
     let watcher = match default_watcher() {
         Ok(w) => w,
         Err(e) => {
@@ -205,17 +205,17 @@ pub fn run(args: DaemonArgs) -> ExitCode {
         }
     };
 
-    // 7. Operator IPC socket — resolve the path policy into the single committed bind path,
-    //    pre-check its parent directory, recover from a stale prior socket, then bind via
-    //    atomic-rename + chmod 0600 BEFORE Hub construction (the Hub takes ownership of the
-    //    listener fd). `resolve` reads `--socket`, then `$SPECTER_SOCK`, then the per-platform
-    //    convention through one env touchpoint (`resolve::env_os`); its committed path is exactly
-    //    the head of a client's probe cascade, so daemon and client rendezvous by construction.
-    //    `precheck_bind_parent` runs first so a missing runtime dir (a system unit without its
-    //    `RuntimeDirectory`, a bare container) fails with source-tagged, actionable advice rather
-    //    than a raw bind `ENOENT`. The `unlink_guard` armed here unlinks the socket on graceful
-    //    shutdown (via explicit `unlink_now` after the driver drops) and on panic (Drop runs
-    //    unconditionally), so the next boot never trips over our residue.
+    // 7. Operator IPC socket — resolve the path policy into the single committed bind path, pre-check
+    //    its parent directory, recover from a stale prior socket, then bind via atomic-rename + chmod
+    //    0600 BEFORE Hub construction (the Hub takes ownership of the listener fd). `resolve` reads
+    //    `--socket`, then `$SPECTER_SOCK`, then the per-platform convention through one env
+    //    touchpoint (`resolve::env_os`); its committed path is exactly the head of a client's probe
+    //    cascade, so daemon and client rendezvous by construction. `precheck_bind_parent` runs first
+    //    so a missing runtime dir (a system unit without its `RuntimeDirectory`, a bare container)
+    //    fails with source-tagged, actionable advice rather than a raw bind `ENOENT`. The
+    //    `unlink_guard` armed here unlinks the socket on graceful shutdown (via explicit `unlink_now`
+    //    after the driver drops) and on panic (Drop runs unconditionally), so the next boot never
+    //    trips over our residue.
     let bind = match resolve::resolve(socket.as_deref(), resolve::env_os) {
         Ok(resolution) => resolution.into_commit(),
         Err(e) => {
@@ -248,8 +248,8 @@ pub fn run(args: DaemonArgs) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    // The committed path threads on to `DriverState` (status, unlink) exactly as bound — the
-    // resolved `SocketSource` is a startup-log detail, not state the running daemon carries.
+    // The committed path threads on to `DriverState` (status, unlink) exactly as bound — the resolved
+    // `SocketSource` is a startup-log detail, not state the running daemon carries.
     let socket_path = bind.path;
 
     // 8. Channel allocation. Two wake'd channels for the prober pool and the actuator's completion
@@ -345,8 +345,8 @@ pub fn run(args: DaemonArgs) -> ExitCode {
             }
         };
 
-    // 13. Engine driver — main thread. `config` and `log_path` move into the driver here;
-    //     subsequent reads of the config path (the boot-time TOCTOU lstat at step #15) go through
+    // 13. Engine driver — main thread. `config` and `log_path` move into the driver here; subsequent
+    //     reads of the config path (the boot-time TOCTOU lstat at step #15) go through
     //     [`EngineDriver::config_path`].
     let cli_log_overrides = CliLogOverrides {
         level: log_level,
@@ -369,15 +369,15 @@ pub fn run(args: DaemonArgs) -> ExitCode {
     // 14. Initial attach against the boot-parsed config.
     //
     //     MUST precede the startup-TOCTOU close (#15): `dispatch_reload`'s contract is "engine and
-    //     loader are in sync; rotate them both forward atomically." Calling it before
-    //     initial-attach violates that precondition — the diff's `added` bucket would attach Subs
-    //     against an empty engine, rotate the loader to the post-TOCTOU config, then
-    //     `run_initial_attach` would walk the rotated loader and double-attach those Subs, tripping
-    //     `SubRegistry::insert`'s `debug_assert!`.
+    //     loader are in sync; rotate them both forward atomically." Calling it before initial-attach
+    //     violates that precondition — the diff's `added` bucket would attach Subs against an empty
+    //     engine, rotate the loader to the post-TOCTOU config, then `run_initial_attach` would walk
+    //     the rotated loader and double-attach those Subs, tripping `SubRegistry::insert`'s
+    //     `debug_assert!`.
     //
-    //     On `Break` (downstream `effects_tx` disconnect mid-attach), `run_initial_attach`
-    //     internally drains in-flight probes via `begin_shutdown` before returning — the lifecycle
-    //     discipline lives on the method, not on this caller.
+    //     On `Break` (downstream `effects_tx` disconnect mid-attach), `run_initial_attach` internally
+    //     drains in-flight probes via `begin_shutdown` before returning — the lifecycle discipline
+    //     lives on the method, not on this caller.
     let initial_attach_break = driver.run_initial_attach().is_break();
 
     // 15. Startup-TOCTOU close — the config can change between the initial `from_path_with_meta`
@@ -434,10 +434,10 @@ pub fn run(args: DaemonArgs) -> ExitCode {
     //
     //     `drop(driver)` runs the driver's field-order drop: `actuator_io` (its `effects_tx` clone)
     //     → `ipc` (Hub's Drop deregisters listener + conns from the still-live Poll selector) →
-    //     `reactor` (deregisters watcher / config-watcher / signal pipe; closes the Poll). The
-    //     waker drop decrements the `Arc<Waker>` refcount; the prober's wrapper still holds its
-    //     clone, but it's inert once Poll is gone (mio's `wake()` returns Err on a destroyed Poll,
-    //     which the wrapper ignores).
+    //     `reactor` (deregisters watcher / config-watcher / signal pipe; closes the Poll). The waker
+    //     drop decrements the `Arc<Waker>` refcount; the prober's wrapper still holds its clone,
+    //     but it's inert once Poll is gone (mio's `wake()` returns Err on a destroyed Poll, which
+    //     the wrapper ignores).
     //
     //     `effects_tx` dropping after the actuator already exited is moot — there's no receiver to
     //     disconnect. The Arc refcount on the `Arc<dyn Prober>` clone the driver held is released,
@@ -544,18 +544,18 @@ impl EffectCompleteSender for WakingEffectCompleteSender {
 /// fires.
 ///
 /// `engine_in` is the wake-bearing [`EffectCompleteSender`] — production passes a boxed
-/// [`WakingEffectCompleteSender`] constructed at `App::run` wiring time with a clone of the
-/// Reactor's [`WakeHandle`](crate::driver::WakeHandle) minted via [`Reactor::wake_handle`]. The
-/// actuator's controller borrows the sink via `&dyn` so it never names the engine's `Input`
-/// vocabulary on its own thread. The closure here owns the `Box<dyn>` for the actuator-thread
-/// lifetime and passes `&*engine_in` into `run`; on closure exit the Box drops cleanly.
+/// [`WakingEffectCompleteSender`] constructed at `App::run` wiring time with a clone of the Reactor's
+/// [`WakeHandle`](crate::driver::WakeHandle) minted via [`Reactor::wake_handle`]. The actuator's
+/// controller borrows the sink via `&dyn` so it never names the engine's `Input` vocabulary on its
+/// own thread. The closure here owns the `Box<dyn>` for the actuator-thread lifetime and passes
+/// `&*engine_in` into `run`; on closure exit the Box drops cleanly.
 ///
 /// `wiring.hard_shutdown_done_tx` is the back-channel the actuator pulses after phase 3 SIGKILL
 /// fanout; the driver's hard-exit path (running inside the reactor thread) waits on its paired
 /// receiver before `process::exit(130)` so the parent never aborts mid-fanout.
 ///
-/// Returns [`io::Error`] on `thread::Builder::spawn` failure; the caller translates to a
-/// startup-fail [`ExitCode`], same shape as every other init path in [`run`].
+/// Returns [`io::Error`] on `thread::Builder::spawn` failure; the caller translates to a startup-fail
+/// [`ExitCode`], same shape as every other init path in [`run`].
 fn spawn_actuator_thread(
     concurrency: NonZeroUsize,
     wiring: RunWiring,
@@ -590,8 +590,8 @@ mod tests {
 
     /// Constructing a [`WakingProberResponseSender`] manually + sending a [`ProbeResponse`] through
     /// it deposits the `Input::ProbeResponse` on the channel AND fires the paired `mio::Waker` so a
-    /// subsequent `Poll::poll` returns immediately with `TOKEN_WAKER` ready. Pins the
-    /// send-THEN-wake protocol the reactor depends on for cross-thread liveness.
+    /// subsequent `Poll::poll` returns immediately with `TOKEN_WAKER` ready. Pins the send-THEN-wake
+    /// protocol the reactor depends on for cross-thread liveness.
     #[test]
     fn waking_prober_response_sender_pulses_waker_after_send() {
         let mut poll = Poll::new().expect("mio Poll");
@@ -628,8 +628,8 @@ mod tests {
     }
 
     /// Mirror-shape proof for [`WakingEffectCompleteSender`]. The two adapters share one
-    /// [`WakeHandle`] in production; this test constructs a separate handle to keep the two
-    /// adapters' contracts independently testable.
+    /// [`WakeHandle`] in production; this test constructs a separate handle to keep the two adapters'
+    /// contracts independently testable.
     #[test]
     fn waking_effect_complete_sender_pulses_waker_after_send() {
         let mut poll = Poll::new().expect("mio Poll");

@@ -79,10 +79,10 @@ fn whole_subtree_samples_witness_offchain_inplace_write() {
     let scan_config = Arc::new(ScanConfig::from(SubtreeScan::builder().build()));
     let target: Arc<Path> = Arc::from(root.to_path_buf());
 
-    // The shape the engine emits for both the Seed walk and every events-incomplete Standard
-    // sample: anchor-rooted, WholeSubtree-obligated, unforced. Only the baseline varies — the Seed
-    // walk has none; the burst samples carry the stale pre-burst baseline (Retry never commits, so
-    // it stays stale across the whole loop).
+    // The shape the engine emits for both the Seed walk and every events-incomplete Standard sample:
+    // anchor-rooted, WholeSubtree-obligated, unforced. Only the baseline varies — the Seed walk has
+    // none; the burst samples carry the stale pre-burst baseline (Retry never commits, so it stays
+    // stale across the whole loop).
     let whole =
         |corr: u64, baseline: Option<Arc<specter_core::DirSnapshot>>| ProbeRequest::Subtree {
             owner: p,

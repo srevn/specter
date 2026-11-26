@@ -1,11 +1,11 @@
 //! `Resource` and friends.
 //!
 //! `Resource` lives inside `Tree`'s `SlotMap`. The structurally load-bearing fields (`parent`,
-//! `segment`, `children`) are `pub(crate)`; `profiles` is module-private (the typed-mutator
-//! paragraph below). Mutating any of them outside the routes that maintain the corresponding
-//! indices corrupts the Tree. Cross-crate read access is via the accessor methods (`parent()`,
-//! `children()`, `profiles()`); a slot's own segment string is read through [`crate::Tree::name`]
-//! (no standalone `segment()` accessor — the key type is a Tree-internal detail).
+//! `segment`, `children`) are `pub(crate)`; `profiles` is module-private (the typed-mutator paragraph
+//! below). Mutating any of them outside the routes that maintain the corresponding indices corrupts
+//! the Tree. Cross-crate read access is via the accessor methods (`parent()`, `children()`,
+//! `profiles()`); a slot's own segment string is read through [`crate::Tree::name`] (no standalone
+//! `segment()` accessor — the key type is a Tree-internal detail).
 //!
 //! `kind` is `pub(crate)` — external read sites disagree on what `Unknown` means (pattern bypass vs
 //! File-shape vs not-Dir). Forcing reads through [`Resource::kind`] (returns `Option<ResourceKind>`)
@@ -14,15 +14,15 @@
 //!
 //! `contributions` is `pub(crate)` — every engine-side mutation flows through the typed methods on
 //! `Resource` ([`Resource::insert_contribution`] / [`Resource::remove_contribution`] /
-//! [`Resource::clear_contributions`]). The mutators return the edge information the refcount
-//! helpers need (the prior mask on insert / remove, the prior count on `clear_*`), so the
-//! 0↔non-empty emission decision sits at the engine helper layer without leaking the underlying
-//! field shape. Read access for the demand summary goes through [`Resource::contributions`],
+//! [`Resource::clear_contributions`]). The mutators return the edge information the refcount helpers
+//! need (the prior mask on insert / remove, the prior count on `clear_*`), so the 0↔non-empty
+//! emission decision sits at the engine helper layer without leaking the underlying field shape.
+//! Read access for the demand summary goes through [`Resource::contributions`],
 //! [`Resource::watch_demand`], [`Resource::events_union`].
 //!
 //! `profiles` is module-private — a back-ref vector kept in lockstep with `ProfileMap.by_resource`
-//! (the engine's Profile side). A raw push / retain could desynchronise the two halves of that
-//! join, so the sole mutators are the typed [`Resource::insert_profile_anchor`] /
+//! (the engine's Profile side). A raw push / retain could desynchronise the two halves of that join,
+//! so the sole mutators are the typed [`Resource::insert_profile_anchor`] /
 //! [`Resource::remove_profile_anchor`]; each returns the empty ↔ non-empty retention-edge `bool`
 //! (the same edge-reporting convention as the contributions mutators). Read access is via
 //! [`Resource::profiles`]; the vector is also one of the three structural claimants on
@@ -62,8 +62,8 @@ pub enum ContribKey {
     /// Profile is in `Pending` descent with `current_prefix == resource`. Mask is `STRUCTURE`
     /// (descent prefix watch is for next-segment materialisation only).
     ProfileDescent(ProfileId),
-    /// Profile holds a covered-descendant claim at this Resource (`resource != Profile.resource` AND
-    /// `covers(Profile, resource, tree) == true` for a covered Dir, or under
+    /// Profile holds a covered-descendant claim at this Resource (`resource != Profile.resource`
+    /// AND `covers(Profile, resource, tree) == true` for a covered Dir, or under
     /// `Profile.has_per_file_fds` for a covered Leaf). Mask is `Profile.events`. Per-resource fan-out
     /// is 1-to-N across the snapshot but each (Resource, Profile) pair contributes at most one entry.
     ProfileDescendant(ProfileId),
@@ -81,8 +81,8 @@ pub struct Resource {
     /// count: the segment dies with the slot, so there is no second arena to keep in lockstep.
     pub(crate) segment: CompactString,
     /// Path from the root chain down to this slot, materialised once at construction.
-    /// **Function-of-data, by construction**: the equality `path == join(root..=self segments)`
-    /// holds because `(parent, segment)` are write-once — set only in [`Resource::new`] and never
+    /// **Function-of-data, by construction**: the equality `path == join(root..=self segments)` holds
+    /// because `(parent, segment)` are write-once — set only in [`Resource::new`] and never
     /// reparented (a rename mints a fresh slot under a new `ResourceId`; the chain is append-only).
     /// So `path` cannot drift from the chain it projects.
     ///
@@ -90,21 +90,21 @@ pub struct Resource {
     /// is an `Arc::clone` refcount bump — never a parent-walk or re-allocation — and the same
     /// allocation ships read-only across the engine→sensor actor boundary.
     pub(crate) path: Arc<Path>,
-    /// Direct children keyed by segment string. Each key equals the child's own `segment`.
-    /// `BTreeMap` ⇒ iteration is lexicographic by segment — deterministic and local to this
-    /// directory, with no dependency on global Tree attach history ([`crate::Tree::children_ids`]).
+    /// Direct children keyed by segment string. Each key equals the child's own `segment`. `BTreeMap`
+    /// ⇒ iteration is lexicographic by segment — deterministic and local to this directory, with no
+    /// dependency on global Tree attach history ([`crate::Tree::children_ids`]).
     pub(crate) children: BTreeMap<CompactString, ResourceId>,
     /// Profile back-ref — the right side of the `ProfileMap.by_resource` join, one entry per
     /// `(config_hash, ProfileId)` Profile anchored at this slot. The engine's `ProfileMap::attach`
     /// inserts (via [`Resource::insert_profile_anchor`]) and `ProfileMap::detach` removes (via
     /// [`Resource::remove_profile_anchor`]), keeping this vector and `ProfileMap.by_resource` in
-    /// lockstep. Module-private so a raw push / retain can't break that lockstep. Inline cap 1
-    /// covers the typical case: most Resources have at most one Profile anchored at them;
-    /// cross-`ScanConfig` sharing on one slot is rare.
+    /// lockstep. Module-private so a raw push / retain can't break that lockstep. Inline cap 1 covers
+    /// the typical case: most Resources have at most one Profile anchored at them; cross-`ScanConfig`
+    /// sharing on one slot is rare.
     profiles: SmallVec<[(u64, ProfileId); 1]>,
     /// Probed kind of this slot. `ResourceKind::Unknown` is the pre-classification placeholder —
-    /// fresh slots created by `Tree::ensure_root` / `Tree::ensure_child`, `Tree::vacate`-reset
-    /// slots, and descent scaffolds all start here. The engine writes the classified kind via
+    /// fresh slots created by `Tree::ensure_root` / `Tree::ensure_child`, `Tree::vacate`-reset slots,
+    /// and descent scaffolds all start here. The engine writes the classified kind via
     /// [`crate::Tree::set_kind`] once a probe response or reconcile pass observes the inode. Read
     /// via [`Resource::kind`] (returns `Option<ResourceKind>`, with `Unknown` as `None`) or
     /// [`Resource::kind_or_file`] (Unknown → File, the backend-mask convention).
@@ -116,8 +116,8 @@ pub struct Resource {
     /// [`crate::Tree::vacate`]) breaks the 0↔non-empty Watch / Unwatch invariant.
     ///
     /// **Source of truth.** Coverage and Profile state are never walked to recompute the union; the
-    /// map is directly read. Each call site that bumps or releases a contribution passes the
-    /// explicit [`ContribKey`], so removal is O(log k) by key, not O(registry).
+    /// map is directly read. Each call site that bumps or releases a contribution passes the explicit
+    /// [`ContribKey`], so removal is O(log k) by key, not O(registry).
     ///
     /// `pub(crate)` — the legitimate external mutators are the typed methods on `Resource`
     /// ([`Resource::insert_contribution`], [`Resource::remove_contribution`],
@@ -155,8 +155,8 @@ impl ResourceKind {
     /// "Effective" kind for backend-mask decisions: [`Self::Unknown`] collapses to [`Self::File`].
     ///
     /// Single declaration of the "treat unclassified slots as File-shape" convention shared by:
-    /// - `sensor::kqueue::translate::class_set_to_fflags` (CONTENT / METADATA branches register
-    ///   file bits on Unknown).
+    /// - `sensor::kqueue::translate::class_set_to_fflags` (CONTENT / METADATA branches register file
+    ///   bits on Unknown).
     /// - `sensor::kqueue::normalize::kevent_to_fs_event` (NOTE_LINK / NOTE_WRITE on Unknown surface
     ///   as File-shape FsEvents).
     /// - `engine::transitions::fs_event_to_class` (terminal events on Unknown classify as CONTENT).
@@ -220,8 +220,8 @@ impl Resource {
 
     /// Slot retention rule: `Tree::try_reap` removes the slot iff this returns `false`.
     ///
-    /// Retention is **structural** — a slot stays alive while *something* claims it. Three
-    /// canonical claimants:
+    /// Retention is **structural** — a slot stays alive while *something* claims it. Three canonical
+    /// claimants:
     ///
     /// - `children` — a descendant slot's `parent` edge points here.
     /// - `profiles` — one or more Profiles are anchored at this slot.
@@ -287,8 +287,8 @@ impl Resource {
         self.kind().is_some() || self.is_watched()
     }
 
-    /// OR-fold of every contributor's `ClassSet` mask — the per-Resource events mask the sensor
-    /// sees on `WatchOp::Watch`. `ClassSet::EMPTY` when the Resource has no contributors.
+    /// OR-fold of every contributor's `ClassSet` mask — the per-Resource events mask the sensor sees
+    /// on `WatchOp::Watch`. `ClassSet::EMPTY` when the Resource has no contributors.
     ///
     /// The fold is O(k) over the contributions map; k is bounded by typical multi-Profile fan-out
     /// (single-digit).
@@ -328,9 +328,9 @@ impl Resource {
 
     /// Register a `(config_hash, pid)` Profile anchor at this slot, keeping `Resource.profiles` in
     /// lockstep with `ProfileMap.by_resource`. Idempotent: a `(config_hash, pid)` pair already
-    /// present is left untouched and reports no edge. `ProfileMap::attach`'s upstream
-    /// `debug_assert!` already rules out the double-attach path in production; the dedup check is
-    /// cheap on the inline-cap-1 `SmallVec`.
+    /// present is left untouched and reports no edge. `ProfileMap::attach`'s upstream `debug_assert!`
+    /// already rules out the double-attach path in production; the dedup check is cheap on the
+    /// inline-cap-1 `SmallVec`.
     ///
     /// Returns `true` iff this call traversed the empty → non-empty retention edge (the slot just
     /// gained its first Profile anchor), matching the contribution mutators' edge-reporting
@@ -349,9 +349,9 @@ impl Resource {
     }
 
     /// Drop the `(config_hash, pid)` Profile anchor at this slot, leaving every co-resident `(_,
-    /// _)` pair in place (filter, not clear). Idempotent: an absent pair, or an already-empty
-    /// vector (reachable post-[`crate::Tree::vacate`] or on a double detach), is a no-op that
-    /// reports no edge.
+    /// _)` pair in place (filter, not clear). Idempotent: an absent pair, or an already-empty vector
+    /// (reachable post-[`crate::Tree::vacate`] or on a double detach), is a no-op that reports no
+    /// edge.
     ///
     /// Returns `true` iff this call traversed the non-empty → empty retention edge (the slot just
     /// lost its last Profile anchor) — the symmetric inverse of [`Self::insert_profile_anchor`]'s
@@ -394,9 +394,10 @@ impl Resource {
     /// verification expects `Unknown` as the engine's intentional wildcard, so
     /// [`crate::WatchOp::Watch`] construction sites pass it through unchanged.
     ///
-    /// All other engine-side sites should prefer [`Resource::kind`] (Option, `None` for unprobed) or
-    /// [`Resource::kind_or_file`] (collapses unprobed to File-shape). The accessor exists to make "I
-    /// want the raw value as a wildcard" an explicit choice distinguishable from a stale-bypass bug.
+    /// All other engine-side sites should prefer [`Resource::kind`] (Option, `None` for unprobed)
+    /// or [`Resource::kind_or_file`] (collapses unprobed to File-shape). The accessor exists to make
+    /// "I want the raw value as a wildcard" an explicit choice distinguishable from a stale-bypass
+    /// bug.
     #[must_use]
     pub const fn kind_raw(&self) -> ResourceKind {
         self.kind
@@ -416,9 +417,9 @@ impl Resource {
     /// Insert or overwrite the contribution at `key` with `mask`. Returns the prior mask iff `key`
     /// was already present.
     ///
-    /// Engine helpers use the return value (along with [`Self::events_union`] before/after) to
-    /// detect the 0→1 existence edge and union-widening transitions that drive `WatchOp::Watch`
-    /// emission. Tests may use it to assert overwrite semantics.
+    /// Engine helpers use the return value (along with [`Self::events_union`] before/after) to detect
+    /// the 0→1 existence edge and union-widening transitions that drive `WatchOp::Watch` emission.
+    /// Tests may use it to assert overwrite semantics.
     pub fn insert_contribution(&mut self, key: ContribKey, mask: ClassSet) -> Option<ClassSet> {
         self.contributions.insert(key, mask)
     }

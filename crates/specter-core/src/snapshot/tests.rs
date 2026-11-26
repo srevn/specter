@@ -67,9 +67,9 @@ fn dir_subtree(c: &ChildEntry) -> &Arc<DirSnapshot> {
     }
 }
 
-/// Build a chain `anchor → a → b → c → ...` in the given Tree, returning the leaf id along with
-/// each level's id. Each segment becomes a `User` role; this matches what `Tree::ensure_path` does
-/// for the leaf, and is fine for tests that don't rely on the role distinction.
+/// Build a chain `anchor → a → b → c → ...` in the given Tree, returning the leaf id along with each
+/// level's id. Each segment becomes a `User` role; this matches what `Tree::ensure_path` does for
+/// the leaf, and is fine for tests that don't rely on the role distinction.
 fn ensure_chain(tree: &mut Tree, segments: &[&str]) -> Vec<ResourceId> {
     let mut ids = Vec::with_capacity(segments.len());
     let mut cur: Option<ResourceId> = None;
@@ -101,8 +101,8 @@ fn dir_snapshot_new_empty_well_formed() {
 
 #[test]
 fn dir_snapshot_clone_preserves_dir_hash() {
-    // Eager construction makes `dir_hash` a plain field on the snapshot; auto-derived `Clone`
-    // copies the field. This test pins that the derived clone preserves the data-derived hash.
+    // Eager construction makes `dir_hash` a plain field on the snapshot; auto-derived `Clone` copies
+    // the field. This test pins that the derived clone preserves the data-derived hash.
     let d = make_dir(meta(1, 100, 1), 0, BTreeMap::new());
     let h = d.dir_hash();
     let cloned = (*d).clone();
@@ -175,10 +175,10 @@ fn dir_hash_idempotent_across_calls() {
 #[test]
 fn dir_hash_invariant_under_root_meta_mtime() {
     // `root_meta.mtime` is intentionally absent from the dir_hash fold: filter-aware identity must
-    // be independent of the directory's own lstat-mtime, which the kernel bumps for any
-    // dirent-block change (including filtered-out entries the user-configured filter removes from
-    // `entries`). Two snapshots whose `(captured_with, inode, device, entries)` agree must hash
-    // equal regardless of mtime.
+    // be independent of the directory's own lstat-mtime, which the kernel bumps for any dirent-block
+    // change (including filtered-out entries the user-configured filter removes from `entries`).
+    // Two snapshots whose `(captured_with, inode, device, entries)` agree must hash equal regardless
+    // of mtime.
     let a = make_dir(meta(1, 100, 1), 0, BTreeMap::new());
     let b = make_dir(meta(2, 100, 1), 0, BTreeMap::new());
     assert_eq!(a.dir_hash(), b.dir_hash());
@@ -373,8 +373,8 @@ fn leaf_hash_distinguishes_device() {
 }
 
 /// Golden hash — pins the 128-bit `leaf_hash` encoding (kind tag, size, mtime, inode, device fold).
-/// Drift here changes every cached `leaf_hash` this binary computes; update only this constant
-/// after a deliberate review.
+/// Drift here changes every cached `leaf_hash` this binary computes; update only this constant after
+/// a deliberate review.
 #[test]
 fn leaf_hash_known_good_golden() {
     let l = LeafEntry::synthetic(
@@ -394,8 +394,8 @@ const GOLDEN_LEAF_HASH: u128 = 0x8b04_357b_6b61_4546_6947_f1f3_280d_d31b;
 // `from_metadata_or_inherit` reuses `baseline.leaf_hash` only on a full (kind, size, mtime, fs_id)
 // match. Every `LeafEntry` is built through `from_parts` (or `synthetic`), so `leaf_hash ==
 // compute_leaf_hash(fields)` holds for the baseline too — on an identity match the inherited value
-// is byte-identical to recomputation by the type invariant, not by test. The `&Metadata` entry
-// point cannot be exercised fs-free in `core`; the end-to-end walker inherit path is covered in
+// is byte-identical to recomputation by the type invariant, not by test. The `&Metadata` entry point
+// cannot be exercised fs-free in `core`; the end-to-end walker inherit path is covered in
 // `specter-sensor::prober::tests` (`cache_transfer_*`).
 // ---------------------------------------------------------------------------
 
@@ -826,8 +826,8 @@ fn splice_one_level_deep_off_path_arc_ptr_eq() {
     let anchor = ids[0];
     let a = ids[1];
 
-    // Sibling subtree "off_path"; we'll splice at `a` and assert the sibling's Arc inside the
-    // rebuilt root is the *same* Arc as before.
+    // Sibling subtree "off_path"; we'll splice at `a` and assert the sibling's Arc inside the rebuilt
+    // root is the *same* Arc as before.
     let off_path = make_dir(meta(99, 99, 0), 0, BTreeMap::new());
     let prior_a = make_dir(meta(2, 2, 0), 0, BTreeMap::new());
     let mut root_entries = BTreeMap::new();
@@ -835,8 +835,8 @@ fn splice_one_level_deep_off_path_arc_ptr_eq() {
     root_entries.insert(name("off_path"), dir(99, 0, Some(Arc::clone(&off_path))));
     let root = make_dir(meta(1, 1, 0), 0, root_entries);
 
-    // Replacement at `a` carries a child the prior didn't — observably different snapshots,
-    // distinct dir_hash.
+    // Replacement at `a` carries a child the prior didn't — observably different snapshots, distinct
+    // dir_hash.
     let mut replacement_entries = BTreeMap::new();
     replacement_entries.insert(
         name("file"),
@@ -999,10 +999,10 @@ fn splice_replacement_changes_dir_hash_uncached_recompute_correct() {
 #[test]
 fn splice_target_outside_observed_returns_crossed_uncovered() {
     // Target is in the Tree but outside the prior anchor's subtree, so splice returns
-    // SpliceResult::CrossedUncovered rather than wholesale-replacing with `replacement` (which
-    // would corrupt the root). The caller keeps its own Arc handle to the prior view (this test
-    // cloned it before passing to splice), preserving Profile.current's anchor-rooted invariant.
-    // Caller (graft) emits Diagnostic::SpliceCrossedUncovered.
+    // SpliceResult::CrossedUncovered rather than wholesale-replacing with `replacement` (which would
+    // corrupt the root). The caller keeps its own Arc handle to the prior view (this test cloned it
+    // before passing to splice), preserving Profile.current's anchor-rooted invariant. Caller (graft)
+    // emits Diagnostic::SpliceCrossedUncovered.
     let mut tree = Tree::new();
     let ids = ensure_chain(&mut tree, &["anchor"]);
     let anchor = ids[0];
@@ -1038,8 +1038,8 @@ fn splice_target_chain_through_uncovered_returns_crossed_uncovered() {
     // Snapshot has anchor → a, but a's subtree is None (uncovered). The splice path reaches the
     // uncovered intermediate and cannot navigate further. New behavior:
     // SpliceResult::CrossedUncovered. The caller keeps its own Arc handle to the prior view, so the
-    // engine can preserve Profile.current across the breach; caller emits Diagnostic so the
-    // contract violation is observable.
+    // engine can preserve Profile.current across the breach; caller emits Diagnostic so the contract
+    // violation is observable.
     let mut tree = Tree::new();
     let ids = ensure_chain(&mut tree, &["anchor", "a", "b"]);
     let anchor = ids[0];
@@ -1351,9 +1351,9 @@ fn diff_tree_same_name_kind_change() {
 
 #[test]
 fn diff_tree_same_name_kind_change_dir_with_descendants() {
-    // Baseline: /foo (File). Current: /foo (Dir with two children). The kind-change arm must
-    // recurse into the new Dir's subtree so the descendants surface to the engine's per-stable-file
-    // emission path.
+    // Baseline: /foo (File). Current: /foo (Dir with two children). The kind-change arm must recurse
+    // into the new Dir's subtree so the descendants surface to the engine's per-stable-file emission
+    // path.
     let new_dir = make_dir(
         meta(2, 8, 0),
         0,
@@ -1569,9 +1569,9 @@ fn diff_tree_dir_replace_at_different_inode_emits_descendants() {
 }
 
 /// Same-name `"dir"` whose coverage flips Covered→Uncovered at the **same** `fs_id`. The matching
-/// `fs_id` makes `diff_same_name` reach its unreachable-flip arm; the Covered side carries one
-/// child so the outer `dir_hash` differs (Covered-non-empty vs Uncovered) and the walk descends
-/// into `"dir"` instead of short-circuiting at the root. Constructor-level only — the walker's
+/// `fs_id` makes `diff_same_name` reach its unreachable-flip arm; the Covered side carries one child
+/// so the outer `dir_hash` differs (Covered-non-empty vs Uncovered) and the walk descends into
+/// `"dir"` instead of short-circuiting at the root. Constructor-level only — the walker's
 /// config-frozen / fs_id-changing gates make this state v1-unreachable on a real probe.
 fn coverage_flip_same_fs_id_pair() -> (TreeSnapshot, TreeSnapshot) {
     let inner = make_dir(
@@ -1612,9 +1612,9 @@ fn diff_same_name_coverage_flip_degrades_to_delete_create_in_release() {
     let d = diff_tree(&a, &b);
     let deleted: Vec<_> = d.deleted.iter().map(|e| e.segment.as_str()).collect();
     let created: Vec<_> = d.created.iter().map(|e| e.segment.as_str()).collect();
-    // Conservative over-approximation: the flipped slot plus the Covered side's observed
-    // descendants surface as Deleted; the Uncovered side contributes only the slot (no descendants
-    // were observed). Never collapses to a Rename, never aborts.
+    // Conservative over-approximation: the flipped slot plus the Covered side's observed descendants
+    // surface as Deleted; the Uncovered side contributes only the slot (no descendants were
+    // observed). Never collapses to a Rename, never aborts.
     assert_eq!(deleted, vec!["dir", "dir/k"]);
     assert_eq!(created, vec!["dir"]);
     assert!(
@@ -1666,8 +1666,8 @@ fn segments(entries: &[EntryRef]) -> Vec<&str> {
 
 /// A denied directory never enters a diff: at one name, a pair holding a denied entry diffs exactly
 /// as it would with that side absent. The other side stages as usual — the branch that opened, a
-/// denied directory replaced, a directory or a leaf replaced by a denied one — and a denied
-/// directory that appears, goes, or stays denied stages nothing.
+/// denied directory replaced, a directory or a leaf replaced by a denied one — and a denied directory
+/// that appears, goes, or stays denied stages nothing.
 #[test]
 fn a_denied_entry_diffs_as_an_absent_one() {
     let file = ChildEntry::Leaf(leaf(EntryKind::File, 1, 1, 6, 0));
@@ -1939,8 +1939,8 @@ fn diff_tree_created_lists_in_lex_order() {
 #[test]
 fn diff_dir_pair_created_is_depth_first_preorder_not_flat_lex() {
     // Contract pin (audit Test-gap #1): `created` is stable depth-first pre-order — a directory
-    // entry, then its whole subtree, then the directory's lexical siblings — NOT a flat
-    // lexicographic sort of `parent/child` paths.
+    // entry, then its whole subtree, then the directory's lexical siblings — NOT a flat lexicographic
+    // sort of `parent/child` paths.
     //
     // `{"d": Dir{"file"}, "d.txt": Leaf}` is the minimal divergent fixture: depth-first pre-order
     // yields ["d", "d/file", "d.txt"], while a flat-lex sort would place "d.txt" before "d/file"
@@ -2321,8 +2321,8 @@ fn arb_simple_entries() -> impl Strategy<Value = BTreeMap<CompactString, ChildEn
     proptest::collection::vec(("[a-z]{1,4}", arb_leaf()), 0..6).prop_map(|v| {
         let mut m = BTreeMap::new();
         for (i, (s, l)) in v.into_iter().enumerate() {
-            // Disambiguate: BTreeMap drops duplicates; the proptest may generate the same name
-            // twice. Index-prefix to keep the name unique while preserving lex sortability.
+            // Disambiguate: BTreeMap drops duplicates; the proptest may generate the same name twice.
+            // Index-prefix to keep the name unique while preserving lex sortability.
             m.insert(CompactString::new(format!("{i}_{s}")), ChildEntry::Leaf(l));
         }
         m
@@ -2504,8 +2504,8 @@ proptest! {
         prop_assert_eq!(got.dir_hash(), replacement.dir_hash());
     }
 
-    /// G7-trivial property: if replacement.dir_hash() == prior.subtree_at(target).dir_hash(),
-    /// splice returns the prior unchanged (Arc::ptr_eq with the input root).
+    /// G7-trivial property: if replacement.dir_hash() == prior.subtree_at(target).dir_hash(), splice
+    /// returns the prior unchanged (Arc::ptr_eq with the input root).
     #[test]
     fn prop_splice_idempotent_with_equal_dir_hash(
         meta_secs in 1u64..50,

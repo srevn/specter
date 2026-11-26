@@ -3,10 +3,10 @@
 //! The actuator's surface is intentionally narrow: a single [`SubprocessActuator`] consumes
 //! [`specter_core::Effect`]s over a channel, coalesces by [`specter_core::DedupKey`] (`Latest`-only
 //! in v1), gates spawns on a global semaphore (default `2 × num_cpus`) and a per-Sub semaphore
-//! (hardcoded `1`), spawns children via `std::process::Command`, materializes the diff tmp file
-//! when the [`specter_core::Effect`] carries a [`specter_core::Diff`], reaps children in
-//! per-process wait threads, and ships effect completions back to the engine through an
-//! [`EffectCompleteSender`] wired in at constructor time.
+//! (hardcoded `1`), spawns children via `std::process::Command`, materializes the diff tmp file when
+//! the [`specter_core::Effect`] carries a [`specter_core::Diff`], reaps children in per-process wait
+//! threads, and ships effect completions back to the engine through an [`EffectCompleteSender`] wired
+//! in at constructor time.
 //!
 //! Failure policy is `Ignore`-only in v1: non-zero exit, signal, or spawn failure all surface as
 //! [`specter_core::EffectOutcome::Failed`]; the engine refuses to re-baseline on Failed. Shutdown
@@ -23,11 +23,11 @@
 #![warn(unsafe_code)]
 
 // The actuator's production surface (fork+exec, pipe(2), waitpid, signal delivery) is unix-only;
-// every internal module would otherwise carry `#[cfg(unix)]`. A single crate-root gate is the
-// honest expression of the target constraint and removes drift: a new module added later cannot
-// silently lose its `#[cfg(unix)]` marker, because the crate fails to compile on non-unix outright.
-// The `bin` already fails to link on non-unix (it calls `default_spawner`), so this is a
-// transparent failure shift — not a new constraint.
+// every internal module would otherwise carry `#[cfg(unix)]`. A single crate-root gate is the honest
+// expression of the target constraint and removes drift: a new module added later cannot silently
+// lose its `#[cfg(unix)]` marker, because the crate fails to compile on non-unix outright. The `bin`
+// already fails to link on non-unix (it calls `default_spawner`), so this is a transparent failure
+// shift — not a new constraint.
 #[cfg(not(unix))]
 compile_error!("specter-actuator requires a unix target (linux / macOS / freebsd)");
 
@@ -52,16 +52,16 @@ pub use spawner::{ChildSignaler, ChildWaiter, EnvVar, SpawnHandles, Spawner};
 
 // The actuator's completion envelope and sender-error vocabulary both live on `specter-core`
 // (`EffectCompletion` is the engine-facing envelope; `SendError` is the workspace-shared sender
-// vocabulary shared with the sensor). Re-exported here so callers naming
-// `actuator::EffectCompletion` / `actuator::SendError` reach them through this crate's path.
+// vocabulary shared with the sensor). Re-exported here so callers naming `actuator::EffectCompletion`
+// / `actuator::SendError` reach them through this crate's path.
 pub use specter_core::{EffectCompletion, SendError};
 
 /// Sink for effect completions produced by the actuator.
 ///
 /// The actuator crate owns *what* it delivers (one [`EffectCompletion`] envelope per completed
 /// effect). The bin owns *where* it lands — the engine's [`specter_core::Input::EffectComplete`]
-/// channel. This trait is the seam: implementors translate the actuator's completion vocabulary
-/// into whatever transport the bin holds.
+/// channel. This trait is the seam: implementors translate the actuator's completion vocabulary into
+/// whatever transport the bin holds.
 ///
 /// # Threading
 ///
@@ -86,9 +86,9 @@ pub trait EffectCompleteSender: Send + Sync + 'static {
 
 /// Construct the platform's default spawner as a `Box<dyn Spawner>`.
 ///
-/// `Box<dyn>` matches the existing `&dyn Spawner` calling convention in the actuator's state
-/// machine — one vtable hop per spawn, on a rare (op/sec scale) hot path. A future non-Unix backend
-/// slots in by providing an alternative spawner constructor here.
+/// `Box<dyn>` matches the existing `&dyn Spawner` calling convention in the actuator's state machine
+/// — one vtable hop per spawn, on a rare (op/sec scale) hot path. A future non-Unix backend slots
+/// in by providing an alternative spawner constructor here.
 #[must_use]
 pub fn default_spawner() -> Box<dyn Spawner> {
     Box::new(OsSpawner::new())

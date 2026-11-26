@@ -1,19 +1,19 @@
 //! wd-reuse race mitigation.
 //!
-//! When `inotify_rm_watch(wd=N)` is called, the kernel queues `IN_IGNORED` on the per-instance
-//! event queue and frees `N` on the per-instance `idr`. A subsequent `inotify_add_watch` may return
-//! the same `N` *before* userspace observes the queued `IN_IGNORED`. Without protection, pre-rm
-//! events on the old inode would mis-attribute to the freshly attached resource — a silent
-//! state-corruption a `Removed` event on the wrong slot is the symptom of.
+//! When `inotify_rm_watch(wd=N)` is called, the kernel queues `IN_IGNORED` on the per-instance event
+//! queue and frees `N` on the per-instance `idr`. A subsequent `inotify_add_watch` may return the
+//! same `N` *before* userspace observes the queued `IN_IGNORED`. Without protection, pre-rm events
+//! on the old inode would mis-attribute to the freshly attached resource — a silent state-corruption
+//! a `Removed` event on the wrong slot is the symptom of.
 //!
 //! The watcher closes this race via a `draining_wds: BTreeSet<c_int>`: `unwatch` marks the wd as
 //! draining BEFORE `rm_watch`, the drain loop drops events on draining wds, and `IN_IGNORED`
 //! consumption clears the flag. The kernel's FIFO event order makes this correct under healthy
 //! invariants.
 //!
-//! These tests pin the invariant observationally: a rapid `unwatch(r1) → watch(r2, same_path)`
-//! cycle must never deliver an event to `r1` (the unwatched id) and must always attribute fresh
-//! events to `r2` (the live id), even when the kernel reuses the wd.
+//! These tests pin the invariant observationally: a rapid `unwatch(r1) → watch(r2, same_path)` cycle
+//! must never deliver an event to `r1` (the unwatched id) and must always attribute fresh events to
+//! `r2` (the live id), even when the kernel reuses the wd.
 
 #![allow(clippy::iter_with_drain)]
 #![cfg(target_os = "linux")]
@@ -79,9 +79,9 @@ fn rapid_unwatch_watch_cycle_attributes_to_new_resource() {
         let r_old = sm.insert(());
         w.watch(r_old, &path, ResourceKind::File, ClassSet::CONTENT)
             .expect("initial watch");
-        // Unwatch immediately — pre-rm events queued on r_old's wd are possible if a concurrent
-        // write lands here, but with no intervening disk op, the kernel queue is empty by the time
-        // we hit the rm.
+        // Unwatch immediately — pre-rm events queued on r_old's wd are possible if a concurrent write
+        // lands here, but with no intervening disk op, the kernel queue is empty by the time we hit
+        // the rm.
         w.unwatch(r_old);
 
         let r_new = sm.insert(());
@@ -107,9 +107,9 @@ fn rapid_unwatch_watch_cycle_attributes_to_new_resource() {
         );
 
         w.unwatch(r_new);
-        // Brief drain to let any final `IN_IGNORED` settle before the next cycle's `unwatch`.
-        // Without this, `draining_wds` could accumulate. The watcher tolerates accumulation but the
-        // test wants a clean per-cycle baseline.
+        // Brief drain to let any final `IN_IGNORED` settle before the next cycle's `unwatch`. Without
+        // this, `draining_wds` could accumulate. The watcher tolerates accumulation but the test
+        // wants a clean per-cycle baseline.
         let _ = drain_for(&mut w, Duration::from_millis(20));
     }
 
@@ -146,16 +146,16 @@ fn pre_rm_event_on_old_wd_is_dropped_not_misattributed() {
         .expect("post-rm re-watch");
 
     // Drain pending events. The pre-rm queued event must NOT surface as `r_new`'s `ContentChanged`.
-    // The `IN_IGNORED` for r_old's wd will also be in the queue — the watcher consumes it and
-    // clears the draining flag.
+    // The `IN_IGNORED` for r_old's wd will also be in the queue — the watcher consumes it and clears
+    // the draining flag.
     let evs = drain_for(&mut w, Duration::from_millis(200));
     assert!(
         evs.iter().all(|(rid, _)| *rid != r_old),
         "no event should reference unwatched r_old; got {evs:?}"
     );
-    // We don't assert `evs is empty` — the kernel may also surface a late event from the
-    // post-rewatch state if internal scheduling reorders. The test's contract is "no
-    // mis-attribution to r_old or r_new from r_old's queued events".
+    // We don't assert `evs is empty` — the kernel may also surface a late event from the post-rewatch
+    // state if internal scheduling reorders. The test's contract is "no mis-attribution to r_old or
+    // r_new from r_old's queued events".
 
     // Trigger a guaranteed event on the live r_new and verify attribution.
     std::fs::write(&path, "fresh-event").unwrap();

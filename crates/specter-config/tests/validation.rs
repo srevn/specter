@@ -61,10 +61,10 @@ fn issue_kind_path_contains_parent_dir() {
     assert_kinds(toml, &[IssueKind::PathContainsParentDir]);
 }
 
-/// `/<regular-file>/missing` surfaces ENOTDIR from the kernel — a non-`NotFound` `io::Error` —
-/// which routes through [`PathError::Inaccessible`] to [`IssueKind::PathInaccessible`]. Exercises
-/// the same arm `chmod 0` (EACCES) hits, without the root-skip gymnastics; the EACCES surface is
-/// verified manually (we can't drop privileges inside a test process).
+/// `/<regular-file>/missing` surfaces ENOTDIR from the kernel — a non-`NotFound` `io::Error` — which
+/// routes through [`PathError::Inaccessible`] to [`IssueKind::PathInaccessible`]. Exercises the same
+/// arm `chmod 0` (EACCES) hits, without the root-skip gymnastics; the EACCES surface is verified
+/// manually (we can't drop privileges inside a test process).
 #[cfg(unix)]
 #[test]
 fn issue_kind_path_inaccessible() {
@@ -183,9 +183,9 @@ fn issue_kind_invalid_enum_event_class() {
 }
 
 /// Disabled entries flow through every validator unchanged: a structural error in a disabled entry
-/// surfaces at load time rather than silently at re-enable time. Path is the most common typo
-/// shape; one anchoring case is enough — the validator dispatcher runs the full pipeline regardless
-/// of `enabled`.
+/// surfaces at load time rather than silently at re-enable time. Path is the most common typo shape;
+/// one anchoring case is enough — the validator dispatcher runs the full pipeline regardless of
+/// `enabled`.
 #[test]
 fn disabled_entry_does_not_waive_validation() {
     let toml = "[[watch]]\nname = \"a\"\npath = \"src\"\n\
@@ -208,8 +208,8 @@ fn duplicate_name_across_enabled_and_disabled_rejected() {
 /// Dynamic-prefix canonicalisation, the composition payoff: a dynamic pattern's literal prefix is
 /// symlink-resolved at lowering exactly like a static path, so a dynamic watch and a static watch
 /// over the *same* symlinked tree anchor the same Tree branch (they compose). The divergent-anchor
-/// advisory that the verbatim regime needed has nothing left to report — the only remaining
-/// advisory channel is the events-incomplete mask.
+/// advisory that the verbatim regime needed has nothing left to report — the only remaining advisory
+/// channel is the events-incomplete mask.
 #[cfg(unix)]
 #[test]
 fn dynamic_prefix_canonicalises_and_composes_with_static() {
@@ -242,8 +242,8 @@ fn dynamic_prefix_canonicalises_and_composes_with_static() {
         "the static sibling resolves to the same target — they compose",
     );
 
-    // Nothing diverges, so the once-divergent advisory is silent; the default mask witnesses
-    // CONTENT, so the events advisory stays silent too.
+    // Nothing diverges, so the once-divergent advisory is silent; the default mask witnesses CONTENT,
+    // so the events advisory stays silent too.
     assert!(
         cfg.warnings().is_empty(),
         "canonical anchors produce no advisory: {:?}",
@@ -272,11 +272,11 @@ fn dynamic_prefix_inaccessible_is_fatal() {
     assert_eq!(errors[0].field, "path");
 }
 
-/// [`Config::warnings`], the events-incomplete advisory: a mask that cannot witness its scan
-/// shape's quiescence classes engages the hash-channel safety net (two consecutive agreeing full
-/// subtree walks per fire), which is supported but expensive — the warning surfaces the cost. The
-/// checked mask is the one the firing Profiles run under, a static or a dynamic entry's own
-/// `events`. The scope-conditional default mask carries CONTENT and stays silent.
+/// [`Config::warnings`], the events-incomplete advisory: a mask that cannot witness its scan shape's
+/// quiescence classes engages the hash-channel safety net (two consecutive agreeing full subtree
+/// walks per fire), which is supported but expensive — the warning surfaces the cost. The checked
+/// mask is the one the firing Profiles run under, a static or a dynamic entry's own `events`. The
+/// scope-conditional default mask carries CONTENT and stays silent.
 #[test]
 fn warnings_flag_events_incomplete_mask() {
     let toml = format!(

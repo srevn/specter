@@ -1,9 +1,9 @@
-//! Oracle (a): the driver's same-tick recency coalescing is *outcome-equivalent* to processing
-//! every queued event.
+//! Oracle (a): the driver's same-tick recency coalescing is *outcome-equivalent* to processing every
+//! queued event.
 //!
-//! `EngineDriver::drain_sensor` collapses a within-tick run of a same-`(ResourceId, FsEvent)`
-//! recency hint to its first occurrence, flushing the dedup horizon at every barrier (identity
-//! FsEvent or any non-FsEvent). This test mirrors that exact rule, then feeds the FULL list and the
+//! `EngineDriver::drain_sensor` collapses a within-tick run of a same-`(ResourceId, FsEvent)` recency
+//! hint to its first occurrence, flushing the dedup horizon at every barrier (identity FsEvent or
+//! any non-FsEvent). This test mirrors that exact rule, then feeds the FULL list and the
 //! RULE-COALESCED list into two engines built identically, drives both through one real Standard
 //! burst lifecycle (settle → pre-fire verify), and asserts they reach the same observable outcome:
 //! same probe target (the LCA of the accumulated dirty set — the quantity that would diverge if a
@@ -83,8 +83,8 @@ fn input_of(ev: Ev, root: ResourceId, a: ResourceId, b: ResourceId) -> Input {
 }
 
 /// The production collapse rule, mirrored from `EngineDriver::drain_sensor`: keep the first
-/// occurrence of each `(resource, event)` recency hint; drop later same-key duplicates; every
-/// barrier clears the horizon and is itself always kept.
+/// occurrence of each `(resource, event)` recency hint; drop later same-key duplicates; every barrier
+/// clears the horizon and is itself always kept.
 fn coalesce(inputs: &[Input]) -> Vec<Input> {
     let mut seen: BTreeSet<(ResourceId, FsEvent)> = BTreeSet::new();
     let mut out = Vec::with_capacity(inputs.len());
@@ -104,9 +104,9 @@ fn coalesce(inputs: &[Input]) -> Vec<Input> {
     out
 }
 
-/// A fresh engine with a recursive subtree-root Sub on Dir `src`, seeded to a pinned `Idle`
-/// baseline of `{a, b}` covered Files. Returns the engine, profile, the three live resources, the
-/// baseline snapshot, and the post-seed instant.
+/// A fresh engine with a recursive subtree-root Sub on Dir `src`, seeded to a pinned `Idle` baseline
+/// of `{a, b}` covered Files. Returns the engine, profile, the three live resources, the baseline
+/// snapshot, and the post-seed instant.
 fn seeded() -> (
     Engine,
     specter_core::ProfileId,
@@ -136,8 +136,8 @@ fn seeded() -> (
 }
 
 /// Step every input at one shared `now` (one tick), force the Batching settle, capture the emitted
-/// probe's target, then run the pre-fire verify to a terminal `Idle`. Returns the observable
-/// outcome: `(probe target, terminal state discriminant, settled baseline hash)`.
+/// probe's target, then run the pre-fire verify to a terminal `Idle`. Returns the observable outcome:
+/// `(probe target, terminal state discriminant, settled baseline hash)`.
 fn drive(inputs: &[Input]) -> (Option<PathBuf>, ProfileStateDiscriminant, Option<u128>) {
     let (mut e, pid, _root, _a, _b, snap, seed_done) = seeded();
     let now = seed_done + Duration::from_millis(1);

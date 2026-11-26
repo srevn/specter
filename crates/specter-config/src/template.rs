@@ -12,10 +12,10 @@ const NS_SPECTER: &str = "${specter.";
 /// job is to distinguish a well-formed env reference from arbitrary `$`-bearing shell syntax.
 const NS_ENV: &str = "${env.";
 
-/// `:-` is the boundary between an `${env.NAME}` and an optional literal default. Mirrors POSIX
-/// shell `${VAR:-default}` for operator familiarity. The default is a frozen literal — nested
-/// placeholders are rejected at the lexer (no `${env.HOME:-${env.USER}}`); operators wanting
-/// composition wrap with shell.
+/// `:-` is the boundary between an `${env.NAME}` and an optional literal default. Mirrors POSIX shell
+/// `${VAR:-default}` for operator familiarity. The default is a frozen literal — nested placeholders
+/// are rejected at the lexer (no `${env.HOME:-${env.USER}}`); operators wanting composition wrap
+/// with shell.
 const ENV_DEFAULT_SEP: &str = ":-";
 
 /// Failures the lexer can surface from inside a recognised namespace placeholder.
@@ -121,8 +121,8 @@ impl std::error::Error for TemplateError {}
 ///   identifier. Strict by default: missing env var with no default ⇒ the plan fails
 ///   (`EffectOutcome::Failed`). Explicit lenient opt-in via `${env.HOME:-}` (empty default) or
 ///   `${env.HOME:-/tmp}`.
-/// - `$$` — escapes a literal `$`. The only way to write a single `$` that the spawned shell will not
-///   interpret as the start of an env var name; doubles up shell `$$` (PID expansion) as `$$$$`.
+/// - `$$` — escapes a literal `$`. The only way to write a single `$` that the spawned shell will
+///   not interpret as the start of an env var name; doubles up shell `$$` (PID expansion) as `$$$$`.
 ///
 /// Every other `$`-bearing sequence is a literal: `$HOME`, `$path`, `$5`, `${VAR}`, `${specter}`
 /// (no dot), `${SPECTER.path}` (uppercase), `${capture.foo}` (unrecognised namespace) all pass
@@ -134,9 +134,9 @@ pub fn parse_arg(s: &str) -> Result<ArgTemplate, TemplateError> {
     let bytes = s.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        // Fast-forward to the next `$`. Bytes are pure ASCII for `$` and `{`, so byte-level
-        // scanning is correct without char boundary checks; non-ASCII content lives in `buf` as
-        // bytes which re-assemble into valid UTF-8 because we never split a code point.
+        // Fast-forward to the next `$`. Bytes are pure ASCII for `$` and `{`, so byte-level scanning
+        // is correct without char boundary checks; non-ASCII content lives in `buf` as bytes which
+        // re-assemble into valid UTF-8 because we never split a code point.
         if bytes[i] != b'$' {
             // Push as a single char to preserve UTF-8 boundaries.
             let ch_start = i;
@@ -212,8 +212,8 @@ fn dispatch_namespace(kind: NamespaceKind, body: &str) -> Result<ArgPart, Templa
 
 /// Validate `name` against the Specter namespace grammar and resolve it to a catalog [`Placeholder`].
 ///
-/// `[a-z0-9_]+` and a catalog entry. Any deviation surfaces a typed error so the validator can
-/// render a useful operator-facing message.
+/// `[a-z0-9_]+` and a catalog entry. Any deviation surfaces a typed error so the validator can render
+/// a useful operator-facing message.
 fn parse_specter_name(name: &str) -> Result<Placeholder, TemplateError> {
     if name.is_empty() {
         return Err(TemplateError::EmptyPlaceholderName);
@@ -235,8 +235,8 @@ fn parse_specter_name(name: &str) -> Result<Placeholder, TemplateError> {
 /// Parse an `${env.…}` body: split on `:-` to separate `<NAME>` from an optional literal default,
 /// validate each side, and produce [`ArgPart::EnvVar`].
 ///
-/// `:-` is recognised on its first occurrence and consumed as the name/default split. A default
-/// body containing a second `:-` is rejected by [`validate_env_default`] as
+/// `:-` is recognised on its first occurrence and consumed as the name/default split. A default body
+/// containing a second `:-` is rejected by [`validate_env_default`] as
 /// [`TemplateError::EnvDefaultContainsSeparator`] — defaults are representable as a literal byte
 /// sequence with `:-` reserved. `}` cannot appear inside a default because the closing brace
 /// terminates the placeholder before this function ever sees it; a default that wants `}` is
@@ -286,10 +286,10 @@ fn validate_env_name(name: &str) -> Result<(), TemplateError> {
 ///
 /// 1. The literal `:-` separator substring. The first `:-` is already consumed by `parse_env_body`
 ///    as the name/default split. A second occurrence anywhere in the default body would invite the
-///    ambiguity "is that part of the default or did the operator mean to split again?", so we
-///    reject outright. `${env.X:-a:-b}` ⇒ [`TemplateError::EnvDefaultContainsSeparator`].
-/// 2. `$` and `{`. Both hint at nested substitution / a stray opener — feedback to the operator
-///    that defaults are literal-only.
+///    ambiguity "is that part of the default or did the operator mean to split again?", so we reject
+///    outright. `${env.X:-a:-b}` ⇒ [`TemplateError::EnvDefaultContainsSeparator`].
+/// 2. `$` and `{`. Both hint at nested substitution / a stray opener — feedback to the operator that
+///    defaults are literal-only.
 /// 3. Any control character (`is_control()`). An unintended `\n` or `\t` would silently make it into
 ///    argv and (worse) into log lines if the default ever appears in a diagnostic; rendering as a
 ///    Rust-source escape (via Display's `escape_default`) keeps the operator-facing error readable.
@@ -521,8 +521,8 @@ mod tests {
 
     #[test]
     fn literal_around_placeholder_yields_three_parts() {
-        // The adjacent-literal coalescing invariant: one literal before, one placeholder, one
-        // literal after — exactly three parts.
+        // The adjacent-literal coalescing invariant: one literal before, one placeholder, one literal
+        // after — exactly three parts.
         assert_eq!(
             parts(&parse_arg("abc${specter.path}xyz").unwrap()),
             vec![lit("abc"), ph(Placeholder::Path), lit("xyz")]
@@ -739,8 +739,8 @@ mod tests {
     #[test]
     fn env_var_default_rejects_nested_dollar() {
         // `${env.HOME:-${env.USER}}` — the default contains `$`, which we reject for unambiguity.
-        // The closing `}` after `USER` terminates the outer placeholder, so the lexer sees `default
-        // = "${env.USER"`.
+        // The closing `}` after `USER` terminates the outer placeholder, so the lexer sees `default =
+        // "${env.USER"`.
         let err = parse_arg("${env.HOME:-${env.USER}}").unwrap_err();
         assert_eq!(
             err,
@@ -766,8 +766,8 @@ mod tests {
     }
 
     /// `${env.X:-a:-b}` — the first `:-` consumed as the name/default split leaves `default =
-    /// "a:-b"`. A second `:-` inside the default body invites ambiguity ("was `b` meant as a
-    /// trailing field?"), rejected outright by the strict v1 grammar.
+    /// "a:-b"`. A second `:-` inside the default body invites ambiguity ("was `b` meant as a trailing
+    /// field?"), rejected outright by the strict v1 grammar.
     #[test]
     fn env_var_default_rejects_separator_substring() {
         let err = parse_arg("${env.X:-a:-b}").unwrap_err();
@@ -800,8 +800,8 @@ mod tests {
         }
     }
 
-    /// Display rendering for control chars uses `escape_default` so the error message stays
-    /// readable in a log stream. A literal newline in the message would otherwise wreck downstream
+    /// Display rendering for control chars uses `escape_default` so the error message stays readable
+    /// in a log stream. A literal newline in the message would otherwise wreck downstream
     /// line-oriented parsing.
     #[test]
     fn invalid_env_default_display_escapes_control_chars() {

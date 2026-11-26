@@ -115,8 +115,9 @@ fn third_door_event_at_co_watched_parked_anchor_must_not_fire_unanchored() {
 }
 
 /// An overflow on a watch-rejection park re-enters recovery descent — never the Idle arm's cold
-/// re-Seed, which would fabricate a baseline for a tree the Profile no longer observes and close the
-/// recovery channel. Driving the descent to its terminus re-installs the claim and the kernel watch.
+/// re-Seed, which would fabricate a baseline for a tree the Profile no longer observes and close
+/// the recovery channel. Driving the descent to its terminus re-installs the claim and the kernel
+/// watch.
 #[test]
 fn overflow_reseed_of_park_reanchors_or_descends() {
     let mut e = Engine::new();
@@ -311,8 +312,8 @@ fn attach_join_onto_parked_profile_rearms_recovery() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// A re-attach (different config) over a parked Profile's never-observed scaffold chain must
-/// classify Pending (disk-honest), not Materialized-with-a-kernel-watch-on-a-nonexistent-path.
+/// A re-attach (different config) over a parked Profile's never-observed scaffold chain must classify
+/// Pending (disk-honest), not Materialized-with-a-kernel-watch-on-a-nonexistent-path.
 #[test]
 fn reattach_over_never_observed_scaffold_classifies_pending() {
     let mut e = Engine::new();
@@ -507,8 +508,8 @@ fn transient_forced_seed_idle_is_not_kidnapped_into_descent() {
 /// The descent terminus' bundled `Pending → (Idle, Held, classified)` write is a carrier-count edge
 /// under the pure-state `is_nonsteady` (`Pending` counted, `Idle` not);
 /// `ProfileMap::materialize_anchor` reconciles it. The debug full-recount tripwire in the
-/// event-carriers scan runs on the next delivered event, so a skipped reconcile fails loudly
-/// exactly where the stale count would first mislead.
+/// event-carriers scan runs on the next delivered event, so a skipped reconcile fails loudly exactly
+/// where the stale count would first mislead.
 #[test]
 fn descent_terminus_keeps_carrier_count_exact_on_next_event() {
     let mut e = Engine::new();
@@ -613,8 +614,8 @@ fn parked_rejoin_rearms_recovery_for_channel_bearing_park() {
 }
 
 /// An overflow gives a channel-less park exactly one recovery-descent attempt — re-deriving the
-/// prefix from the Tree and re-trying the kernel watch the purge could not — and a re-rejected
-/// watch re-parks: converges, no loop within a step.
+/// prefix from the Tree and re-trying the kernel watch the purge could not — and a re-rejected watch
+/// re-parks: converges, no loop within a step.
 #[test]
 fn overflow_on_channel_less_park_descends_once_and_rejection_reparks() {
     let mut e = Engine::new();

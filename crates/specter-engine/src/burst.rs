@@ -1,9 +1,9 @@
 //! Burst lifecycle helpers.
 //!
-//! These helpers are the single source of **category (a): variant/phase transitions** — a phase
-//! body, a Burst construction, or a return-to-Idle. Centralizing the timer scheduling, refcount
-//! edges, and phase-variant rewrites here prevents drift between the transition-row handlers and
-//! the post-`EffectComplete` re-probe path.
+//! These helpers are the single source of **category (a): variant/phase transitions** — a phase body,
+//! a Burst construction, or a return-to-Idle. Centralizing the timer scheduling, refcount edges,
+//! and phase-variant rewrites here prevents drift between the transition-row handlers and the
+//! post-`EffectComplete` re-probe path.
 //!
 //! They are **not** the only writers of `PreFireBurst` / `PostFireBurst` — by construction, not
 //! drift. Two other categories own their own single source:
@@ -11,11 +11,11 @@
 //! - **(b) Single-field load-bearing-invariant edges**: a typed edge-method on the field's owner in
 //!   `specter-core` (the method *is* the floor — total fn, no public setter).
 //!   `note_effect_completion` is the surviving member; a phase helper here would only enforce it at
-//!   a distance. The rebase-loop ceiling lifecycle (the `ceiling: CeilingState` sum) lives in
-//!   cat-a: its `Armed` / `Reached` writes are each co-located with a distinct post-fire phase
-//!   decision (`arm_rebase_loop_ceiling` at the rebase loop's start, `force_pending_post_fire` at
-//!   ceiling-expiry / gate-deadline recovery), not a single-field invariant maintained at a
-//!   distance. The `Draining → Verifying` reconfirm is a fresh query, not a maintained count.
+//!   a distance. The rebase-loop ceiling lifecycle (the `ceiling: CeilingState` sum) lives in cat-a:
+//!   its `Armed` / `Reached` writes are each co-located with a distinct post-fire phase decision
+//!   (`arm_rebase_loop_ceiling` at the rebase loop's start, `force_pending_post_fire` at
+//!   ceiling-expiry / gate-deadline recovery), not a single-field invariant maintained at a distance.
+//!   The `Draining → Verifying` reconfirm is a fresh query, not a maintained count.
 //! - **(c) The sanctioned cross-crate emission reader**: [`Engine::emit_owner_probe`] (in `probe`)
 //!   reads the pre-fire Standard burst's `dirty` to project its captured paths to the `Chains`
 //!   obligation. A pure `&self` state→wire projection, not a writer and not a drain — `dirty`
@@ -33,9 +33,9 @@
 //!   (`QuiescenceVerdict::Retry`) / `transition_to_verifying` (settle-timer expiry, burst-deadline,
 //!   Draining → Verifying reconfirm) / `transition_to_draining` — pre-fire phase swaps (mutate
 //!   `PreFireBurst`).
-//! - `reschedule_batching` (settle-timer re-point, phase class unchanged) / `force_pending`
-//!   (`forced` flag on burst-deadline) — timer-expiry single-field `PreFireBurst` mutators; the
-//!   caller keeps the timer math and the phase-routing decision.
+//! - `reschedule_batching` (settle-timer re-point, phase class unchanged) / `force_pending` (`forced`
+//!   flag on burst-deadline) — timer-expiry single-field `PreFireBurst` mutators; the caller keeps
+//!   the timer math and the phase-routing decision.
 //! - `transition_to_awaiting` — `Active(PreFire(_))` → `Active(PostFire(_))`, the sole site that
 //!   crosses the fire boundary (via `PreFireBurst::into_post_fire`).
 //! - `arm_rebase_loop_ceiling` (writes `post.ceiling = CeilingState::Armed(t)` at the `Awaiting →
@@ -44,28 +44,28 @@
 //!   mutators on the `CeilingState` sum, the symmetric mirror of pre-fire's `force_pending`. Each
 //!   has exactly one production write site, both in this module; the grep `self\.ceiling = ` lands
 //!   exactly the two writers plus the burst-fresh default in `PostFireBurst::new`.
-//! - `transition_to_settling` (Rebasing → Settling, the `Retry` loop-back) /
-//!   `transition_to_rebasing` (Awaiting → Rebasing natural + gate-deadline-recovery, or Settling →
-//!   Rebasing settle-expiry / ceiling) — post-fire phase swaps (mutate `PostFireBurst`), the
-//!   symmetric mirror of pre-fire's `retry_drives_batching` / `transition_to_verifying`.
+//! - `transition_to_settling` (Rebasing → Settling, the `Retry` loop-back) / `transition_to_rebasing`
+//!   (Awaiting → Rebasing natural + gate-deadline-recovery, or Settling → Rebasing settle-expiry /
+//!   ceiling) — post-fire phase swaps (mutate `PostFireBurst`), the symmetric mirror of pre-fire's
+//!   `retry_drives_batching` / `transition_to_verifying`.
 //! - `reschedule_settling` (settle-timer re-point on absorbed events, phase class unchanged) —
 //!   single-field `PostFireBurst.phase` mutator, the symmetric mirror of pre-fire's
 //!   `reschedule_batching`.
 //! - `absorb_event_into_fire_tail` — FsEvent during post-fire (notes into
 //!   `PostFireBurst.final_window_residual` and stamps `last_event_time`, the symmetric mirror of
 //!   pre-fire's `event_drives_batching` write).
-//! - `restart_burst_from_fire_tail_residual` — `Active(PostFire)` → `Active(PreFire(Batching))`
-//!   typed move at rebase-ok when a `ReturnToIdle` burst carries a non-empty residual
-//!   (origin-agnostic — Seed-origin restarts too). No refcount edges: the typed move preserves the
-//!   watched anchor, neither installing nor releasing a contribution.
+//! - `restart_burst_from_fire_tail_residual` — `Active(PostFire)` → `Active(PreFire(Batching))` typed
+//!   move at rebase-ok when a `ReturnToIdle` burst carries a non-empty residual (origin-agnostic —
+//!   Seed-origin restarts too). No refcount edges: the typed move preserves the watched anchor,
+//!   neither installing nor releasing a contribution.
 //! - `finish_burst_to_idle` — Active → Idle; then sweeps the Draining Profiles and reconfirms each
 //!   whose fresh covered-descendant query has gone false. Discriminates `PreFire` / `PostFire` at
 //!   the take.
 //!
 //! The two batching helpers exist as a deliberate split rather than one helper with a runtime flag:
-//! each caller has **static knowledge** of whether a probe is in flight (only
-//! `event_drives_batching` may need to emit `ProbeOp::Cancel`). Encoding that knowledge as helper
-//! identity makes a stray Cancel on the just-responded path structurally impossible.
+//! each caller has **static knowledge** of whether a probe is in flight (only `event_drives_batching`
+//! may need to emit `ProbeOp::Cancel`). Encoding that knowledge as helper identity makes a stray
+//! Cancel on the just-responded path structurally impossible.
 //!
 //! Probe emission flows through two structural primitives:
 //!
@@ -77,16 +77,16 @@
 //!   unconditionally and bypass this helper. `transition_to_verifying` resolves the target through
 //!   it and constructs [`PreFirePhase::Verifying`] with the target on the variant payload for the
 //!   choke to read back.
-//! - [`Engine::emit_owner_probe`] (in `probe`) — the single emission choke. Each burst-launch
-//!   helper is `mint → arm → emit_owner_probe(owner)`, with every post-gate state resolution loud
+//! - [`Engine::emit_owner_probe`] (in `probe`) — the single emission choke. Each burst-launch helper
+//!   is `mint → arm → emit_owner_probe(owner)`, with every post-gate state resolution loud
 //!   (`unreachable!()` on the gate-proven-impossible miss) and the arm guarded at its re-acquire
-//!   edge (`ProbeSlot::arm`) and destroy edge (`Drop` tripwire); the choke resolves the owner's
-//!   state once, reads the correlation back off the armed slot, kind-dispatches, and materializes
-//!   the per-carrier proof obligation as a pure `&self` read (the pre-fire Standard burst's `dirty`
+//!   edge (`ProbeSlot::arm`) and destroy edge (`Drop` tripwire); the choke resolves the owner's state
+//!   once, reads the correlation back off the armed slot, kind-dispatches, and materializes the
+//!   per-carrier proof obligation as a pure `&self` read (the pre-fire Standard burst's `dirty`
 //!   captured paths as `Chains`; `WholeSubtree` for Seed and the post-fire Rebase — no accumulator
-//!   drain, the fire-tail residual reset is owned by `transition_to_rebasing`). Unclassified
-//!   anchors take the Subtree arm — the walker returns `Vanished` on kind mismatch and the engine
-//!   recovers via descent.
+//!   drain, the fire-tail residual reset is owned by `transition_to_rebasing`). Unclassified anchors
+//!   take the Subtree arm — the walker returns `Vanished` on kind mismatch and the engine recovers
+//!   via descent.
 
 use crate::Engine;
 use smallvec::SmallVec;
@@ -104,19 +104,19 @@ use std::time::Instant;
 impl Engine {
     /// Precondition gate for the Active(PreFire(_)) burst helpers. Returns `true` iff `profile_id`
     /// is live AND in `Active(PreFire(_))`; on a state mismatch emits
-    /// [`Diagnostic::InvalidBurstTransition`] and returns `false`. A stale `ProfileId` (no live
-    /// slot) is a benign post-detach race and returns `false` silently — the diagnostic is reserved
-    /// for genuine state-machine routing breaches.
+    /// [`Diagnostic::InvalidBurstTransition`] and returns `false`. A stale `ProfileId` (no live slot)
+    /// is a benign post-detach race and returns `false` silently — the diagnostic is reserved for
+    /// genuine state-machine routing breaches.
     ///
     /// **Why a single gate rather than ad-hoc match-and-return.** Every pre-fire helper opens by
     /// reading the Profile's state; the prior shape used a `let ... else { return; }` projection
     /// that silently dropped misrouted calls. Routing the precondition through this gate keeps the
-    /// silent-return semantics on stale ids (the engine already handles slot reaping at the
-    /// dispatch level) while surfacing routing breaches as a typed diagnostic — operators see the
-    /// helper name + observed state and can map straight back to the caller.
+    /// silent-return semantics on stale ids (the engine already handles slot reaping at the dispatch
+    /// level) while surfacing routing breaches as a typed diagnostic — operators see the helper
+    /// name + observed state and can map straight back to the caller.
     ///
-    /// **Pairs with [`Self::require_active_post_fire`] / [`Self::require_idle`]** — these three
-    /// cover every helper with a typed entry precondition. `finish_burst_to_idle` is intentionally
+    /// **Pairs with [`Self::require_active_post_fire`] / [`Self::require_idle`]** — these three cover
+    /// every helper with a typed entry precondition. `finish_burst_to_idle` is intentionally
     /// idempotent (handles Idle / Pending as silent no-op) and bypasses the gate, as do the
     /// timer-expiry single-field mutators [`Self::reschedule_batching`] / [`Self::force_pending`]:
     /// their callers are reached only through `is_timer_referenced`, so the non-pre-fire arm is
@@ -219,8 +219,8 @@ impl Engine {
     ///   signal vouching for a change. There is no triggering event to record into `dirty`, so
     ///   `dirty.is_empty()` holds at first verify, and `seed_owes_first_fire` projects to `false` ⇒
     ///   the first `Authoritative` response pins the baseline silently. There is no event activity
-    ///   to debounce against either, so opening a `Batching` phase would amortise nothing — the
-    ///   cold path arms `Verifying` at burst construction and emits the cold walk immediately.
+    ///   to debounce against either, so opening a `Batching` phase would amortise nothing — the cold
+    ///   path arms `Verifying` at burst construction and emits the cold walk immediately.
     ///   `last_event_time = None` is the first-class construction state: no event drove this burst,
     ///   no settle deadline to source.
     /// - **`Some((resource, path))` ⇔ triggered re-Seed.** Witnessed kernel activity stands behind
@@ -239,16 +239,16 @@ impl Engine {
     /// `forced = true`) so the late `Authoritative` response dispatches as a forced fire — the same
     /// bounded-fallback path the triggered Seed reaches. No new ceiling primitive.
     ///
-    /// **Intercept correctness (cold path).** An `FsEvent` arriving during the cold walk's
-    /// round-trip routes through `drive_burst → event_drives_batching`, which Cancels the in-flight
-    /// verify slot (the late walker response then fails `profile_probe_gate` and drops as
-    /// `StaleProbeResponse`), schedules a fresh `settle_timer`, writes `last_event_time =
-    /// Some(now)`, notes the event into `dirty`, and re-enters `Batching`. No new code path:
-    /// `Verifying → Batching` is already supported; the only novelty is that the *initial* phase
-    /// was `Verifying` without a prior `Batching`. One walk is wasted on intercept — sub-ms on
-    /// quiet trees (the common cold-attach case), bounded by the response-vs-event race window.
-    /// The savings on the no-intercept path (cold attach over a quiet subtree drops from 2·settle
-    /// to 0·settle, 2 walks to 1) make this the right trade.
+    /// **Intercept correctness (cold path).** An `FsEvent` arriving during the cold walk's round-trip
+    /// routes through `drive_burst → event_drives_batching`, which Cancels the in-flight verify slot
+    /// (the late walker response then fails `profile_probe_gate` and drops as `StaleProbeResponse`),
+    /// schedules a fresh `settle_timer`, writes `last_event_time = Some(now)`, notes the event into
+    /// `dirty`, and re-enters `Batching`. No new code path: `Verifying → Batching` is already
+    /// supported; the only novelty is that the *initial* phase was `Verifying` without a prior
+    /// `Batching`. One walk is wasted on intercept — sub-ms on quiet trees (the common cold-attach
+    /// case), bounded by the response-vs-event race window. The savings on the no-intercept path
+    /// (cold attach over a quiet subtree drops from 2·settle to 0·settle, 2 walks to 1) make this
+    /// the right trade.
     ///
     /// **Two named constructors, deliberately not one `intent` param.** The call site always knows
     /// whether it wants a Seed (no trusted prior — anchor + `WholeSubtree` always) or a Standard
@@ -261,8 +261,8 @@ impl Engine {
     /// **Callers.** Three unconditionally-cold sites, one witness-selected site, one
     /// unconditionally-triggered site:
     /// - `on_sensor_overflow` Idle path — reseed every Profile in the overflow scope (cold).
-    /// - `on_sensor_overflow` Active path — after `finish_burst_to_idle` flushes the in-flight
-    ///   burst (cold).
+    /// - `on_sensor_overflow` Active path — after `finish_burst_to_idle` flushes the in-flight burst
+    ///   (cold).
     /// - `attach_sub_inner`'s template join-reseed — a discovery template joining an Idle discovery
     ///   Profile drives one fresh certified walk (cold; the joiner's mints enter by its own miss,
     ///   never by this burst's intent).
@@ -286,9 +286,9 @@ impl Engine {
         }
         // Every legitimate Idle entry holds the anchor claim: `seed_at_anchor` installs it before
         // seeding, and a burst-end Idle never released it. An anchorless Profile is `Parked` (which
-        // `require_idle` rejected above), so a claim-less Profile here is a consumer that
-        // re-derived "which Idle?" wrongly — the next forgotten consumer trips in CI instead of
-        // fabricating a baseline.
+        // `require_idle` rejected above), so a claim-less Profile here is a consumer that re-derived
+        // "which Idle?" wrongly — the next forgotten consumer trips in CI instead of fabricating a
+        // baseline.
         debug_assert!(
             self.profiles
                 .get(profile_id)
@@ -325,8 +325,8 @@ impl Engine {
         // on the Seed path, not defensive padding: parked paths testify to witnessed-but-unfired
         // activity, so they rightly make this Seed proof-owing (`owes_proof_from` reads
         // `!dirty.is_empty()`) and a never-fired one first-fire-owing (`seed_owes_first_fire`) —
-        // preserving the testimony across an Abandon → anchor-loss → recovery chain. A genuinely cold
-        // attach has no parked evidence (fresh Profile), so the restart-safe `SilentPin` is
+        // preserving the testimony across an Abandon → anchor-loss → recovery chain. A genuinely
+        // cold attach has no parked evidence (fresh Profile), so the restart-safe `SilentPin` is
         // untouched. Drained before noting the trigger, so the live event is the last writer.
         let mut dirty = self
             .profiles
@@ -338,8 +338,8 @@ impl Engine {
                 // Cold attach / reseed. Mint a correlation, construct-arm the `Verifying` slot inside
                 // the phase variant. I5 holds by representability: no prior phase means no slot could
                 // hold a competing correlation, and the loud `ProbeSlot::arm` re-acquire assert is
-                // unreachable on a fresh variant. No event drove this burst — `dirty` holds only the
-                // drained standing obligation (empty on a genuinely cold attach, routing the
+                // unreachable on a fresh variant. No event drove this burst — `dirty` holds only
+                // the drained standing obligation (empty on a genuinely cold attach, routing the
                 // Authoritative response to `SilentPin`; non-empty when a parked residue makes the
                 // reseed fire-owing). `last_event_time = None` — no settle deadline to source.
                 debug_assert!(
@@ -387,8 +387,8 @@ impl Engine {
                     last_event_time,
                     fold_latched,
                 )),
-                // Fresh burst — directive starts at `ReturnToIdle`. Flips to `Reap` only on
-                // mid-burst `mark_active_for_reap`.
+                // Fresh burst — directive starts at `ReturnToIdle`. Flips to `Reap` only on mid-burst
+                // `mark_active_for_reap`.
                 BurstFinish::ReturnToIdle,
             ),
         );
@@ -404,8 +404,8 @@ impl Engine {
     }
 
     /// Start a Standard burst: schedule settle + `burst_deadline`. No Probe — that fires on
-    /// `settle_timer` expiry via `transition_to_verifying`. No ancestor bookkeeping: the `Draining →
-    /// Verifying` reconfirm is a fresh query ([`crate::coverage::has_active_standard_descendant`])
+    /// `settle_timer` expiry via `transition_to_verifying`. No ancestor bookkeeping: the `Draining
+    /// → Verifying` reconfirm is a fresh query ([`crate::coverage::has_active_standard_descendant`])
     /// over the live tree, so a burst start contributes nothing to maintain.
     ///
     /// `event_resource` + `event_path` are the `FsEvent`'s source slot and its path captured
@@ -413,10 +413,10 @@ impl Engine {
     /// quiescence ([`Profile::event_chains_prove_quiescence`]) — are both the basis for the next
     /// probe's scope (their component-LCA, resolved to a live id) and the source of its
     /// `ProofObligation::Chains` (the chains the walker must freshly observe — refusing mtime-skip
-    /// — so the response can certify quiescence). Sourcing both from the path makes a reaped
-    /// trigger unable to collapse the obligation. On an events-incomplete Profile the emission is
-    /// anchor + `WholeSubtree` instead and `dirty` still accumulates (it remains the
-    /// `owes_proof_from` activity witness and the diagnostic basis).
+    /// — so the response can certify quiescence). Sourcing both from the path makes a reaped trigger
+    /// unable to collapse the obligation. On an events-incomplete Profile the emission is anchor +
+    /// `WholeSubtree` instead and `dirty` still accumulates (it remains the `owes_proof_from`
+    /// activity witness and the diagnostic basis).
     pub(crate) fn start_standard_burst(
         &mut self,
         profile_id: ProfileId,
@@ -447,10 +447,10 @@ impl Engine {
 
         // Every pre-fire burst birth begins from the drained standing obligation: paths a prior
         // non-consuming terminal parked rightly re-enter the proof here — the dirty-LCA widens over
-        // them and the obligation chains cover them, so the formerly-unread region cannot
-        // mtime-skip against the stale baseline (an events-incomplete Profile reads `WholeSubtree`
-        // and consumes them structurally). Drained before noting the trigger, so the live event is
-        // the last writer.
+        // them and the obligation chains cover them, so the formerly-unread region cannot mtime-skip
+        // against the stale baseline (an events-incomplete Profile reads `WholeSubtree` and consumes
+        // them structurally). Drained before noting the trigger, so the live event is the last
+        // writer.
         let mut dirty = self
             .profiles
             .get_mut(profile_id)
@@ -475,8 +475,8 @@ impl Engine {
                     Some(now),
                     fold_latched,
                 )),
-                // Fresh burst — directive starts at `ReturnToIdle`. Flips to `Reap` only on
-                // mid-burst `mark_active_for_reap`.
+                // Fresh burst — directive starts at `ReturnToIdle`. Flips to `Reap` only on mid-burst
+                // `mark_active_for_reap`.
                 BurstFinish::ReturnToIdle,
             ),
         );
@@ -486,26 +486,26 @@ impl Engine {
     /// in-flight verify (iff the prior phase was `Verifying`), notes `(event_resource, event_path)`
     /// into `dirty` (the captured-path basis for the next verify's probe scope and its
     /// `ProofObligation::Chains`), updates `last_event_time`, arms a fresh settle timer **only when
-    /// re-entering Batching from Verifying or Draining**, and writes `phase = Batching {
-    /// settle_timer }`. `intent`, `forced`, `burst_deadline`, and `last_certified_hash` (the
-    /// carrier preserves the prior sample — a net-zero change across an event is still a valid
-    /// hash-channel pair for the next Verifying response, active iff `!events_witness_quiescence`)
-    /// are preserved. Carrying the sample across the event is frame-safe: a carrier-active burst
-    /// fails [`Profile::event_chains_prove_quiescence`], so its probes are anchor-rooted — the new
-    /// event may move the dirty-LCA, but never the frame the channel's samples hash.
+    /// re-entering Batching from Verifying or Draining**, and writes `phase = Batching { settle_timer
+    /// }`. `intent`, `forced`, `burst_deadline`, and `last_certified_hash` (the carrier preserves
+    /// the prior sample — a net-zero change across an event is still a valid hash-channel pair for
+    /// the next Verifying response, active iff `!events_witness_quiescence`) are preserved. Carrying
+    /// the sample across the event is frame-safe: a carrier-active burst fails
+    /// [`Profile::event_chains_prove_quiescence`], so its probes are anchor-rooted — the new event
+    /// may move the dirty-LCA, but never the frame the channel's samples hash.
     ///
     /// Why this is one of two batching mutators rather than a single helper with a flag: the caller
     /// has static knowledge that the engine has not just received a probe response. If the prior
     /// phase was `Verifying`, a verify is in flight and we must Cancel it. If the prior phase was
-    /// `Batching` or `Draining`, no probe is in flight. Encoding that as a runtime flag is a
-    /// category error — the caller always knows the right answer.
+    /// `Batching` or `Draining`, no probe is in flight. Encoding that as a runtime flag is a category
+    /// error — the caller always knows the right answer.
     ///
     /// **Settle-timer reuse.** In steady-state Batching the live settle timer's heap entry is
     /// preserved; the per-event update is just `last_event_time = Some(now)`. The on-expiry handler
     /// (`Engine::on_settle_expired`) reschedules a fresh entry at `last_event_time + settle` if
     /// events arrived since, otherwise transitions to Verifying. So the heap takes at most one push
-    /// per `last_event_time + settle` boundary — roughly `ceil(burst_duration / settle)`
-    /// settle-timer entries per burst, not one per `FsEvent`.
+    /// per `last_event_time + settle` boundary — roughly `ceil(burst_duration / settle)` settle-timer
+    /// entries per burst, not one per `FsEvent`.
     ///
     /// Re-entries from `Verifying` or `Draining` have no live settle timer to reuse and therefore
     /// schedule a fresh entry. `Batching` re-entries skip the schedule.
@@ -522,8 +522,8 @@ impl Engine {
         }
         // Re-borrow for captures + the phase projection used to decide whether a fresh settle timer
         // is needed below. The precondition gate already emitted a diagnostic on any state mismatch
-        // (e.g., a PostFire that should have routed through `absorb_event_into_fire_tail`); the
-        // inner projection is the borrow-checker discipline for reading `pre.phase`.
+        // (e.g., a PostFire that should have routed through `absorb_event_into_fire_tail`); the inner
+        // projection is the borrow-checker discipline for reading `pre.phase`.
         let Some(p) = self.profiles.get(profile_id) else {
             return;
         };
@@ -532,11 +532,11 @@ impl Engine {
         };
         let settle = p.settle;
 
-        // Read phase before mutating self via `cancel_owner_probe`. The Cancel emission doesn't
-        // touch `burst.phase`, but it does take `&mut self` and so invalidates the borrow on
-        // `burst`. Decide here whether the existing Batching settle timer (if any) carries over, or
-        // whether we mint a fresh one for a Verifying/Draining re-entry. The decision is
-        // structural: a live Batching has its own timer slot; Verifying/Draining have none.
+        // Read phase before mutating self via `cancel_owner_probe`. The Cancel emission doesn't touch
+        // `burst.phase`, but it does take `&mut self` and so invalidates the borrow on `burst`.
+        // Decide here whether the existing Batching settle timer (if any) carries over, or whether
+        // we mint a fresh one for a Verifying/Draining re-entry. The decision is structural: a live
+        // Batching has its own timer slot; Verifying/Draining have none.
         let needs_fresh_timer = matches!(
             pre.phase,
             PreFirePhase::Verifying { .. } | PreFirePhase::Draining
@@ -590,23 +590,23 @@ impl Engine {
     ///   the probe failed entirely (FD pressure), the epistemic twin of the `Undischarged` Retry:
     ///   it observed nothing, so it re-batches identically (static `observed_motion = false`).
     ///
-    /// `observed_motion` gates the streak: only windows that *observed* sample-to-sample motion
-    /// count toward the mask-blindspot witness ([`PreFireBurst::retry_streak`]) — a refusal or a
-    /// failed probe says nothing about the tree, so it holds the streak rather than inflating it
-    /// (an EMFILE stretch must not masquerade as motion outside the mask).
+    /// `observed_motion` gates the streak: only windows that *observed* sample-to-sample motion count
+    /// toward the mask-blindspot witness ([`PreFireBurst::retry_streak`]) — a refusal or a failed
+    /// probe says nothing about the tree, so it holds the streak rather than inflating it (an EMFILE
+    /// stretch must not masquerade as motion outside the mask).
     ///
     /// Either way the verify slot was already disarmed at the top of `on_profile_probe_response`;
     /// no Cancel needed. Arms a fresh settle timer and writes `phase = Batching { settle_timer }`.
     ///
     /// **`dirty` preserved; no re-commit.** The next verify re-targets and re-obligates per the
-    /// emission predicate ([`Profile::event_chains_prove_quiescence`]) — an events-complete
-    /// Standard burst the component-LCA of the preserved `dirty` captured paths +
-    /// `ProofObligation::Chains` over those paths (the walker must freshly re-observe the dirty
-    /// chains, refusing mtime-skip); a Seed or events-incomplete Standard burst the anchor +
-    /// `ProofObligation::WholeSubtree` (every frame re-read, no skip). This path does **not**
-    /// `apply_snapshot` — an unread region must never become `Profile.current` (the dedup / Seed
-    /// baseline). The next verify either certifies authoritatively (fire-or-pin) or remains
-    /// undischarged (re-enter this helper) until the `BurstDeadline` surfaces the terminal.
+    /// emission predicate ([`Profile::event_chains_prove_quiescence`]) — an events-complete Standard
+    /// burst the component-LCA of the preserved `dirty` captured paths + `ProofObligation::Chains`
+    /// over those paths (the walker must freshly re-observe the dirty chains, refusing mtime-skip);
+    /// a Seed or events-incomplete Standard burst the anchor + `ProofObligation::WholeSubtree` (every
+    /// frame re-read, no skip). This path does **not** `apply_snapshot` — an unread region must never
+    /// become `Profile.current` (the dedup / Seed baseline). The next verify either certifies
+    /// authoritatively (fire-or-pin) or remains undischarged (re-enter this helper) until the
+    /// `BurstDeadline` surfaces the terminal.
     ///
     /// **Reachability.** This helper runs *only* on the non-terminal retry arms above; an `FsEvent`
     /// arriving during the verify routes through `event_drives_batching`, which Cancels and disarms
@@ -660,11 +660,11 @@ impl Engine {
     /// `last_event_time + settle` and routes the resulting `TimerId` here. The phase *class* is
     /// unchanged — only the timer correlation moves.
     ///
-    /// **Not `retry_drives_batching` minus the pin.** That helper re-enters Batching from
-    /// `Verifying` and pins `last_event_time = now` (the verify just responded). This path is
-    /// *already* `Batching` and must **not** touch `last_event_time`: pinning it would push the
-    /// very deadline the caller's just-made quiet-window decision is rescheduling toward, defeating
-    /// the check that chose to reschedule.
+    /// **Not `retry_drives_batching` minus the pin.** That helper re-enters Batching from `Verifying`
+    /// and pins `last_event_time = now` (the verify just responded). This path is *already*
+    /// `Batching` and must **not** touch `last_event_time`: pinning it would push the very deadline
+    /// the caller's just-made quiet-window decision is rescheduling toward, defeating the check that
+    /// chose to reschedule.
     ///
     /// **Timer math stays with the caller.** `on_settle_expired` owns the `now − last_event_time <
     /// settle` quiet-window decision and the `TimerHeap::schedule` call; this helper owns only the
@@ -690,9 +690,10 @@ impl Engine {
     }
 
     /// Set `PreFireBurst.forced` on `BurstDeadline` expiry. The single-source mutator for the
-    /// force-fire flag: once the max-settle deadline elapses, the next probe emission must bypass the
-    /// walker's coarse-mtime skip and deliver freshest data — `forced` lives on the `PreFireBurst`
-    /// and `emit_owner_probe` reads it back off the armed `Verifying` slot at emit time.
+    /// force-fire flag: once the max-settle deadline elapses, the next probe emission must bypass
+    /// the walker's coarse-mtime skip and deliver freshest data — `forced` lives on the
+    /// `PreFireBurst` and `emit_owner_probe` reads it back off the armed `Verifying` slot at emit
+    /// time.
     ///
     /// **Field write only — the phase decision stays with the caller.** `handle_burst_deadline`
     /// re-reads the phase after this call to decide whether to drive a verify *now* (`Batching |
@@ -703,9 +704,9 @@ impl Engine {
     ///
     /// **Gate-free by design.** Same rationale as [`Self::reschedule_batching`]: the caller is
     /// reached only through `is_timer_referenced`, which returns false for `BurstDeadline` in
-    /// `Awaiting` / `Rebasing`, so only pre-fire phases arrive. The non-pre-fire arm silently
-    /// no-ops (preserving the prior inline `else { return; }`) rather than emitting a spurious
-    /// routing diagnostic.
+    /// `Awaiting` / `Rebasing`, so only pre-fire phases arrive. The non-pre-fire arm silently no-ops
+    /// (preserving the prior inline `else { return; }`) rather than emitting a spurious routing
+    /// diagnostic.
     pub(crate) fn force_pending(&mut self, profile_id: ProfileId) {
         if let Some(pre) = self
             .profiles
@@ -724,26 +725,27 @@ impl Engine {
     /// entry has already been removed from the heap by `pop_expired` upstream — the phase-variant
     /// overwrite below drops the engine's reference, not a heap entry. The `BurstDeadline` arm
     /// (force-fire path) leaves the live settle_timer in the heap when overwriting `burst.phase`;
-    /// that stale entry lazy-drops on its original deadline. The `Draining → Verifying` reconfirm arm
-    /// has no settle_timer to orphan (Draining never armed one).
+    /// that stale entry lazy-drops on its original deadline. The `Draining → Verifying` reconfirm
+    /// arm has no settle_timer to orphan (Draining never armed one).
     ///
-    /// **Target.** Resolved via [`pre_fire_target`] — File anchors target the anchor
-    /// unconditionally; bursts failing [`Profile::event_chains_prove_quiescence`] (Seed, or
-    /// events-incomplete Standard) target the anchor regardless of phase; events-complete Standard
-    /// bursts target the deepest directory on the way to the component-LCA of `dirty`'s captured
-    /// paths that `current` lists. The same rule covers the Draining → Verifying reconfirm: `dirty`
-    /// is preserved across the burst's pre-fire lifetime (only `note`d into), so the component-LCA
-    /// on the reconfirm matches the one at the original Verifying entry; the descent reads the
-    /// listing the verdict committed in between.
+    /// **Target.** Resolved via [`pre_fire_target`] — File anchors target the anchor unconditionally;
+    /// bursts failing [`Profile::event_chains_prove_quiescence`] (Seed, or events-incomplete
+    /// Standard) target the anchor regardless of phase; events-complete Standard bursts target the
+    /// deepest directory on the way to the component-LCA of `dirty`'s captured paths that `current`
+    /// lists. The same rule covers the Draining → Verifying reconfirm: `dirty` is preserved across
+    /// the burst's pre-fire lifetime (only `note`d into), so the component-LCA on the reconfirm
+    /// matches the one at the original Verifying entry; the descent reads the listing the verdict
+    /// committed in between.
     ///
     /// **Emission.** This helper writes the `Verifying` variant — armed slot and target shipped as
     /// one struct-variant payload — then calls [`Engine::emit_owner_probe`], the single choke that
     /// reads the correlation back off the slot, materializes the proof obligation off the persisting
     /// burst keyed on the same predicate as the target (`ProofObligation::Chains` from `dirty`'s
     /// captured paths when the chains prove quiescence, `WholeSubtree` otherwise — read immutably,
-    /// **not** drained: the burst outlives this probe across re-batching), and reads `forced` (so the
-    /// walker bypasses mtime-skip on a force-fire). New events arriving during `Verifying` are noted
-    /// into `dirty` (via `event_drives_batching`) and reshape the obligation on the next emission.
+    /// **not** drained: the burst outlives this probe across re-batching), and reads `forced` (so
+    /// the walker bypasses mtime-skip on a force-fire). New events arriving during `Verifying` are
+    /// noted into `dirty` (via `event_drives_batching`) and reshape the obligation on the next
+    /// emission.
     pub(crate) fn transition_to_verifying(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
         if !self.require_active_pre_fire(profile_id, BurstHelper::TransitionToVerifying, out) {
             return;
@@ -758,13 +760,13 @@ impl Engine {
              profile = {profile_id:?})",
         );
 
-        // Resolve the probe target, routed through `Profile::pre_fire_burst` (the pre-fire read
-        // path) rather than an inline `state()` re-match. `&self.tree` and `&self.profiles` are
-        // disjoint immutable field borrows and the call yields a `Copy` `ResourceId`, so both end
-        // with this statement — leaving `mint_probe_correlation` (`&mut self`) free. The read is
-        // *loud*: `require_active_pre_fire` proved `Active(PreFire)` and nothing mutates profile
-        // state between the gate and here, so a `None` is a broken state machine, not a silent
-        // no-probe wedge.
+        // Resolve the probe target, routed through `Profile::pre_fire_burst` (the pre-fire read path)
+        // rather than an inline `state()` re-match. `&self.tree` and `&self.profiles` are disjoint
+        // immutable field borrows and the call yields a `Copy` `ResourceId`, so both end with this
+        // statement — leaving `mint_probe_correlation` (`&mut self`) free. The read is *loud*:
+        // `require_active_pre_fire` proved `Active(PreFire)` and nothing mutates profile state
+        // between the gate and here, so a `None` is a broken state machine, not a silent no-probe
+        // wedge.
         let tree = &self.tree;
         let Some(target) = self
             .profiles
@@ -796,8 +798,8 @@ impl Engine {
         // One write: the armed slot and target ship as a single variant payload, so a half-written
         // `Verifying` is unconstructable. The choke later materializes the proof obligation (`Chains`
         // from `dirty`'s captured paths when `event_chains_prove_quiescence` holds, `WholeSubtree`
-        // otherwise — the predicate that just resolved the target) and `forced` off this armed slot —
-        // the transition threads neither, and `dirty` is read there immutably, never drained.
+        // otherwise — the predicate that just resolved the target) and `forced` off this armed slot
+        // — the transition threads neither, and `dirty` is read there immutably, never drained.
         pre.phase = PreFirePhase::Verifying {
             slot: ProbeSlot::armed(correlation),
             target,
@@ -816,8 +818,8 @@ impl Engine {
     /// `Arc<TreeSnapshot>` is duplicated on the phase variant.
     ///
     /// The sole caller (`gated_fire`, on the deferred fire branch) is reached only from the Verifying
-    /// probe response (slot disarmed before dispatch), so the prior phase is always `Verifying`. The
-    /// unit `Draining` has no `ProbeSlot::Drop` tripwire like its slot-bearing peers; the
+    /// probe response (slot disarmed before dispatch), so the prior phase is always `Verifying`.
+    /// The unit `Draining` has no `ProbeSlot::Drop` tripwire like its slot-bearing peers; the
     /// `debug_assert!` is the symmetric backstop ([`Self::reschedule_batching`]'s analogue).
     pub(crate) fn transition_to_draining(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
         if !self.require_active_pre_fire(profile_id, BurstHelper::TransitionToDraining, out) {
@@ -848,10 +850,10 @@ impl Engine {
     /// arrivals decrement it; reaching zero advances to `Rebasing` (or, when the burst carries
     /// [`BurstFinish::Reap`], finishes the burst directly).
     ///
-    /// **Gate timer.** Schedules an `AwaitGateDeadline` at `now + max_settle * 4` as a recovery
-    /// hatch for actuator hangs. The multiplier (v1 default) gives a generous budget — the timer is
-    /// not meant to cap normal command runs, only to keep the engine from wedging if the actuator
-    /// never reports back. Operator-tunable knobs are out of scope for v1.
+    /// **Gate timer.** Schedules an `AwaitGateDeadline` at `now + max_settle * 4` as a recovery hatch
+    /// for actuator hangs. The multiplier (v1 default) gives a generous budget — the timer is not
+    /// meant to cap normal command runs, only to keep the engine from wedging if the actuator never
+    /// reports back. Operator-tunable knobs are out of scope for v1.
     ///
     /// **`burst_deadline` hand-off.** The pre-fire `BurstDeadline` timer (scheduled at burst start)
     /// stays in the heap but is no longer structurally relevant — `is_timer_referenced` filters it
@@ -860,11 +862,11 @@ impl Engine {
     /// payload that would leak.
     ///
     /// **Scheduling order vs the fire move.** The gate timer is scheduled after the entry gate and
-    /// a live-id `max_settle` read but before the `map_state` fire move — so a stale id
-    /// early-returns *before* scheduling and never orphans a timer. The fire move is then
-    /// infallible for a live id (`map_state` always installs the closure's result; there is no
-    /// "swap to Idle then fail to install" two-step), so an orphaned gate timer is structurally
-    /// impossible here. A stray one would lazy-drop via `is_timer_referenced` regardless.
+    /// a live-id `max_settle` read but before the `map_state` fire move — so a stale id early-returns
+    /// *before* scheduling and never orphans a timer. The fire move is then infallible for a live
+    /// id (`map_state` always installs the closure's result; there is no "swap to Idle then fail to
+    /// install" two-step), so an orphaned gate timer is structurally impossible here. A stray one
+    /// would lazy-drop via `is_timer_referenced` regardless.
     pub(crate) fn transition_to_awaiting(
         &mut self,
         profile_id: ProfileId,
@@ -876,9 +878,10 @@ impl Engine {
             return;
         }
         // `max_settle` is identity (folds into `config_hash`), so it is variant-independent — the
-        // entry gate already proved `Active(PreFire(_))`, and no shape re-check guards this read. The
-        // stale-id arm is dead after the gate (single-threaded step, nothing reaps between); kept as
-        // the cheap early-out that also avoids scheduling an orphan gate timer for a vanished id.
+        // entry gate already proved `Active(PreFire(_))`, and no shape re-check guards this read.
+        // The stale-id arm is dead after the gate (single-threaded step, nothing reaps between);
+        // kept as the cheap early-out that also avoids scheduling an orphan gate timer for a vanished
+        // id.
         let Some(max_settle) = self.profiles.get(profile_id).map(Profile::max_settle) else {
             return;
         };
@@ -892,13 +895,13 @@ impl Engine {
             TimerKind::AwaitGateDeadline,
         );
 
-        // Typed fire move PreFire → PostFire. `into_post_fire` consumes the pre-fire burst by
-        // value, so the transform primitive `map_state` extracts the prior and installs the
-        // post-fire result in one reconcile — no swap-to-Idle-then-reinstall dance. `finish` rides
-        // across the fire boundary unchanged (a Reap set mid-batching survives the fire, honoured
-        // by `finish_burst_to_idle` at PostFire end). The non-PreFire arm is post-gate-impossible:
-        // it `debug_assert`s loudly and degrades by reinstalling the prior unchanged, never
-        // panicking a release daemon — the same should-never discipline as the timer handlers.
+        // Typed fire move PreFire → PostFire. `into_post_fire` consumes the pre-fire burst by value,
+        // so the transform primitive `map_state` extracts the prior and installs the post-fire result
+        // in one reconcile — no swap-to-Idle-then-reinstall dance. `finish` rides across the fire
+        // boundary unchanged (a Reap set mid-batching survives the fire, honoured by
+        // `finish_burst_to_idle` at PostFire end). The non-PreFire arm is post-gate-impossible: it
+        // `debug_assert`s loudly and degrades by reinstalling the prior unchanged, never panicking
+        // a release daemon — the same should-never discipline as the timer handlers.
         self.profiles.map_state(profile_id, |prior| match prior {
             ProfileState::Active(ActiveBurst::PreFire(pre), finish) => (
                 ProfileState::Active(
@@ -920,8 +923,8 @@ impl Engine {
         // `map_state`'s `Option<()>` is dropped: `None` is a stale id, dead after the entry gate.
     }
 
-    /// Arm the post-fire rebase-loop ceiling at the natural `Awaiting → Rebasing` entry — the
-    /// rebase loop's bound, scheduled once per loop.
+    /// Arm the post-fire rebase-loop ceiling at the natural `Awaiting → Rebasing` entry — the rebase
+    /// loop's bound, scheduled once per loop.
     ///
     /// Schedules a [`TimerKind::RebaseCeiling`] timer at `now + max_settle` and writes
     /// `PostFireBurst.ceiling = CeilingState::Armed(timer)` inline — the sole
@@ -931,16 +934,16 @@ impl Engine {
     /// writers plus the burst-fresh default in `PostFireBurst::new`.
     ///
     /// **Sole caller.** [`Engine::on_effect_complete`]'s `LastReached + ReturnToIdle` arm (the
-    /// natural `Awaiting → Rebasing` entry, `outstanding` just hit zero). Invoked **before**
-    /// calling [`Self::transition_to_rebasing`], so the ceiling is armed at the loop's *start* —
-    /// its scope covers the whole `Rebasing ⇄ Settling` loop, not each sample.
+    /// natural `Awaiting → Rebasing` entry, `outstanding` just hit zero). Invoked **before** calling
+    /// [`Self::transition_to_rebasing`], so the ceiling is armed at the loop's *start* — its scope
+    /// covers the whole `Rebasing ⇄ Settling` loop, not each sample.
     ///
     /// `handle_gate_deadline`'s non-zombie arm does NOT call this helper — gate-deadline-recovery
     /// has already waited 4× max_settle and the [`CeilingState::Reached`] latch guarantees the next
     /// response commits unconditionally, so no loop bound is needed. It calls
-    /// [`Self::force_pending_post_fire`] + [`Self::transition_to_rebasing`] directly (skip ceiling
-    /// + Settling), the symmetric mirror of pre-fire's `handle_burst_deadline → force_pending →
-    /// drive Verifying now`.
+    /// [`Self::force_pending_post_fire`] + [`Self::transition_to_rebasing`] directly (skip ceiling +
+    /// Settling), the symmetric mirror of pre-fire's `handle_burst_deadline → force_pending → drive
+    /// Verifying now`.
     ///
     /// **Gate-free by design.** The call site has verified `Active(PostFire(Awaiting))` before
     /// reaching the helper; the `if let` is the stale-id tolerance, mirroring
@@ -969,31 +972,31 @@ impl Engine {
         }
     }
 
-    /// Latch the rebase-loop terminal — writes `post.ceiling = CeilingState::Reached`. The
-    /// post-fire mirror of [`Self::force_pending`] on the pre-fire side; the single-source
+    /// Latch the rebase-loop terminal — writes `post.ceiling = CeilingState::Reached`. The post-fire
+    /// mirror of [`Self::force_pending`] on the pre-fire side; the single-source
     /// [`CeilingState::Armed`] / [`CeilingState::NotStarted`] → [`CeilingState::Reached`] writer.
     ///
     /// Once latched, the next probe emission bypasses the walker's coarse-mtime skip (the ceiling
     /// projects to the walker's obligation), the in-flight response folds through
     /// [`specter_core::quiescence_verdict`] with `forced = true`, and `dispatch_rebase_ok` reads
     /// `Stable(StableReason::Forced { hash_channel_disagreed })` (commit + diagnose if the channel
-    /// disagreed; commit silent otherwise) or [`specter_core::QuiescenceVerdict::Abandon`] (abandon
-    /// + diagnose) off the verdict.
+    /// disagreed; commit silent otherwise) or [`specter_core::QuiescenceVerdict::Abandon`] (abandon +
+    /// diagnose) off the verdict.
     ///
     /// **One write, was two.** The prior two-field shape (`forced = true; rebase_ceiling = None`)
     /// carried an algorithmic invariant — `(rebase_ceiling = Some, forced = true)` was unreachable
-    /// — that the [`CeilingState`] sum makes structurally unrepresentable. The single write
-    /// collapses both the natural ceiling-expiry path (the prior timer reference, already consumed
-    /// by `pop_expired`, is dropped at the same write) and the gate-deadline-recovery path (no
-    /// in-heap ceiling timer was ever armed — the [`CeilingState::NotStarted`] →
-    /// [`CeilingState::Reached`] direct edge).
+    /// — that the [`CeilingState`] sum makes structurally unrepresentable. The single write collapses
+    /// both the natural ceiling-expiry path (the prior timer reference, already consumed by
+    /// `pop_expired`, is dropped at the same write) and the gate-deadline-recovery path (no in-heap
+    /// ceiling timer was ever armed — the [`CeilingState::NotStarted`] → [`CeilingState::Reached`]
+    /// direct edge).
     ///
     /// **Field write only — the phase decision stays with the caller.**
     /// [`Engine::handle_rebase_ceiling`] re-reads the phase after this call to decide whether to
     /// drive a Rebasing verify *now* (Settling — no probe in flight) or wait (Rebasing — a probe is
     /// already in flight and will dispatch with the latched ceiling observed).
-    /// [`Engine::handle_gate_deadline`]'s non-zombie arm always drives `transition_to_rebasing`
-    /// after this call (the Settling path is skipped — we already waited 4× max_settle).
+    /// [`Engine::handle_gate_deadline`]'s non-zombie arm always drives `transition_to_rebasing` after
+    /// this call (the Settling path is skipped — we already waited 4× max_settle).
     ///
     /// **Gate-free by design.** Same rationale as [`Self::force_pending`]: the callers are reached
     /// only through `is_timer_referenced`, which returns false for `RebaseCeiling` in non-`PostFire`
@@ -1009,16 +1012,16 @@ impl Engine {
         }
     }
 
-    /// The post-fire baseline-capture probe's emission edge — single-purpose: mint correlation,
-    /// clear residual, write phase, emit probe. This helper **never arms the ceiling** (that is
+    /// The post-fire baseline-capture probe's emission edge — single-purpose: mint correlation, clear
+    /// residual, write phase, emit probe. This helper **never arms the ceiling** (that is
     /// [`Self::arm_rebase_loop_ceiling`], at the loop's start); it is reached by four paths over
     /// two prior phases:
     ///
     /// - `Awaiting → Rebasing`, **natural / unforced** — [`Engine::on_effect_complete`]'s
     ///   `LastReached + ReturnToIdle` arm. The command's effects just drained, so go probe-first
-    ///   (no driving FS event — the Cold-Seed mirror). The caller armed the loop ceiling
-    ///   immediately before (`Armed`, not `Reached`), so the response folds normally and a
-    ///   HashChannel Profile still proves quiescence over N≥2 samples.
+    ///   (no driving FS event — the Cold-Seed mirror). The caller armed the loop ceiling immediately
+    ///   before (`Armed`, not `Reached`), so the response folds normally and a HashChannel Profile
+    ///   still proves quiescence over N≥2 samples.
     /// - `Awaiting → Rebasing`, **gate-deadline / forced** — [`Engine::handle_gate_deadline`]'s
     ///   non-zombie arm. The actuator hung 4× max_settle; the caller latched
     ///   [`CeilingState::Reached`] via [`Self::force_pending_post_fire`] first, so this response
@@ -1033,8 +1036,8 @@ impl Engine {
     /// bit is read off the ceiling at the verdict fold, not threaded through this helper.
     ///
     /// **Probe slot.** A fresh correlation is minted and the `Rebasing` phase is written already
-    /// armed with it, in one move — the slot *is* the phase. I5 holds by representability: the
-    /// prior phase is `Settling` or `Awaiting`, neither of which holds a probe slot (`Settling`'s
+    /// armed with it, in one move — the slot *is* the phase. I5 holds by representability: the prior
+    /// phase is `Settling` or `Awaiting`, neither of which holds a probe slot (`Settling`'s
     /// correlation token is its `settle_timer`; `Awaiting`'s is its `gate_deadline`). The probe the
     /// loop's previous Rebasing entry emitted was disarmed at its response's
     /// `on_profile_probe_response`, before the loop-back routed through `transition_to_settling`.
@@ -1042,9 +1045,9 @@ impl Engine {
     /// target on its variant) and reads the correlation back off the slot.
     ///
     /// **`baseline_subtree` is shipped but not skip-trusted.** The probe ships `Profile.current` as
-    /// `baseline_subtree`, but its obligation is `WholeSubtree` (the command just mutated the tree —
-    /// no trustworthy prior), so the walker re-reads the whole anchor subtree regardless of mtime and
-    /// the response certifies the *post-command* tree. An idempotent command still pays the walk;
+    /// `baseline_subtree`, but its obligation is `WholeSubtree` (the command just mutated the tree
+    /// — no trustworthy prior), so the walker re-reads the whole anchor subtree regardless of mtime
+    /// and the response certifies the *post-command* tree. An idempotent command still pays the walk;
     /// that cost is the price of soundness (an in-place descendant edit need not bump an ancestor
     /// mtime, so a chains/mtime skip would re-clone a stale subtree and certify a false quiet).
     ///
@@ -1053,8 +1056,8 @@ impl Engine {
     /// is not an obligation source — the walk observes the tree regardless — only the final-window
     /// restart seed: clearing per entry means an `Authoritative` terminal sees only events from the
     /// *final* probe round-trip and restarts solely for that genuine race, not for every
-    /// tree-touching command. Earlier-round absorbs are not lost; the next `WholeSubtree` read
-    /// folded them into the verdict.
+    /// tree-touching command. Earlier-round absorbs are not lost; the next `WholeSubtree` read folded
+    /// them into the verdict.
     ///
     /// **Non-Active early return.** Every caller has verified `Active(PostFire)` (phase `Awaiting`
     /// for the natural completion and the gate-deadline-recovery skip, `Settling` for the
@@ -1098,18 +1101,18 @@ impl Engine {
         post.reset_residual();
         post.phase = PostFirePhase::Rebasing(ProbeSlot::armed(correlation));
 
-        // The choke reads the correlation back off the `Rebasing` slot, targets the anchor
-        // (`forced` is pre-fire-only ⇒ `false`), and ships the `WholeSubtree` obligation — no
-        // accumulator drain.
+        // The choke reads the correlation back off the `Rebasing` slot, targets the anchor (`forced`
+        // is pre-fire-only ⇒ `false`), and ships the `WholeSubtree` obligation — no accumulator
+        // drain.
         self.emit_owner_probe(profile_id, out);
     }
 
     /// `Rebasing → Settling`. Post-fire mirror of pre-fire's `retry_drives_batching`: a
     /// `QuiescenceVerdict::Retry` rebase response (HashChannel disagreement or transient walker
-    /// refusal, the ceiling not yet fired) loops the burst back through a settle-sized spacing
-    /// window before the next `WholeSubtree` sample. The natural rebase entry is probe-first
-    /// (`Awaiting → Rebasing`), so this is the *only* post-fire `Settling` entry — the spacing half
-    /// of the bounded `Rebasing ⇄ Settling` loop, not a debounce of the fire's own events.
+    /// refusal, the ceiling not yet fired) loops the burst back through a settle-sized spacing window
+    /// before the next `WholeSubtree` sample. The natural rebase entry is probe-first (`Awaiting →
+    /// Rebasing`), so this is the *only* post-fire `Settling` entry — the spacing half of the bounded
+    /// `Rebasing ⇄ Settling` loop, not a debounce of the fire's own events.
     ///
     /// **Two callers.** `dispatch_rebase_ok::Retry` (hash-channel disagreement, `observed_motion:
     /// true`; walker refusal, `false`) and the post-fire [`specter_core::ProbeFailure::Transient`]
@@ -1136,8 +1139,8 @@ impl Engine {
     /// `retry_drives_batching` pin: removes the `Instant` monotonicity dependency from
     /// [`Engine::handle_post_fire_settle_expired`]'s reschedule check. The freshly-scheduled
     /// `settle_timer` fires at `now + settle`, and the expiry handler sees `expiry_now − now ≥
-    /// settle` (true by construction) and transitions cleanly — independent of any clock skew
-    /// between this call and any prior `last_event_time`.
+    /// settle` (true by construction) and transitions cleanly — independent of any clock skew between
+    /// this call and any prior `last_event_time`.
     pub(crate) fn transition_to_settling(
         &mut self,
         profile_id: ProfileId,
@@ -1181,15 +1184,15 @@ impl Engine {
     /// for the settle-expiry reschedule, the post-fire mirror of [`Self::reschedule_batching`].
     ///
     /// When an `FsEvent` was absorbed by [`Self::absorb_event_into_fire_tail`] after the live
-    /// `settle_timer` was scheduled but before it fires, `handle_post_fire_settle_expired`
-    /// schedules a fresh `PostFireSettle` timer at `last_event_time + settle` and routes the
-    /// resulting `TimerId` here. The phase *class* is unchanged — only the timer correlation moves.
+    /// `settle_timer` was scheduled but before it fires, `handle_post_fire_settle_expired` schedules
+    /// a fresh `PostFireSettle` timer at `last_event_time + settle` and routes the resulting
+    /// `TimerId` here. The phase *class* is unchanged — only the timer correlation moves.
     ///
     /// **Not `transition_to_settling` minus the schedule.** That helper enters Settling from
     /// `Rebasing` (the `Retry` loop-back) and pins `last_event_time = now`. This path is *already*
     /// `Settling` and must **not** touch `last_event_time`: pinning it would push the very deadline
-    /// the caller's just-made quiet-window decision is rescheduling toward, defeating the check
-    /// that chose to reschedule.
+    /// the caller's just-made quiet-window decision is rescheduling toward, defeating the check that
+    /// chose to reschedule.
     ///
     /// **Timer math stays with the caller.** `handle_post_fire_settle_expired` owns the `now −
     /// last_event_time < settle` quiet-window decision and the `TimerHeap::schedule` call; this
@@ -1221,22 +1224,22 @@ impl Engine {
     /// **Cancel-first entry precondition.** No caller may reach here with `Profile(profile_id)`'s
     /// `ProbeSlot` still armed — the burst-end `map_state` consumes the prior burst (its Active arm
     /// discards the burst payload), and an armed Verifying/Rebasing slot reaching that drop trips
-    /// `ProbeSlot`'s linearity tripwire. Debug-asserted at entry; the proof that all callers
-    /// satisfy it lives at the assert.
+    /// `ProbeSlot`'s linearity tripwire. Debug-asserted at entry; the proof that all callers satisfy
+    /// it lives at the assert.
     ///
-    /// **Draining-exit driver.** After the focal Profile is Idle, sweep *every*
-    /// currently-`Draining` Profile and re-evaluate the pure query
-    /// [`crate::coverage::has_active_standard_descendant`]; drive each whose query is now false
-    /// through `transition_to_verifying` in the same step. The reconfirm condition can only flip
-    /// false at *some* descendant's burst finish, so re-checking all Draining Profiles at every
-    /// finish is sufficient — and, unlike walking the finishing Profile's covering chain, it cannot
-    /// strand a Draining ancestor that a mid-burst topology move took off that chain. The exit is
-    /// then bounded-latency (it waits for the gating descendant's own guaranteed, deadline-bounded
-    /// finish), never a permanent strand. The reconfirm verify's verdict folds through
-    /// [`specter_core::quiescence_verdict`] against the fresh response, independent of the
-    /// splice-mutated `Profile.current` — the verdict floor reads `(ProofAuthority, forced)`, not
-    /// the per-Profile current snapshot. Same-step ordering means the `StepOutput` reflects the
-    /// cascade: child's burst end → parent reconfirm Probe in one `step` call.
+    /// **Draining-exit driver.** After the focal Profile is Idle, sweep *every* currently-`Draining`
+    /// Profile and re-evaluate the pure query [`crate::coverage::has_active_standard_descendant`];
+    /// drive each whose query is now false through `transition_to_verifying` in the same step. The
+    /// reconfirm condition can only flip false at *some* descendant's burst finish, so re-checking
+    /// all Draining Profiles at every finish is sufficient — and, unlike walking the finishing
+    /// Profile's covering chain, it cannot strand a Draining ancestor that a mid-burst topology move
+    /// took off that chain. The exit is then bounded-latency (it waits for the gating descendant's
+    /// own guaranteed, deadline-bounded finish), never a permanent strand. The reconfirm verify's
+    /// verdict folds through [`specter_core::quiescence_verdict`] against the fresh response,
+    /// independent of the splice-mutated `Profile.current` — the verdict floor reads
+    /// `(ProofAuthority, forced)`, not the per-Profile current snapshot. Same-step ordering means
+    /// the `StepOutput` reflects the cascade: child's burst end → parent reconfirm Probe in one
+    /// `step` call.
     ///
     /// **Burst-finish directive.** If the prior state's [`BurstFinish`] is [`BurstFinish::Reap`]
     /// (the last Sub was detached mid-burst), `Engine::reap_profile` runs in the same step after
@@ -1272,8 +1275,8 @@ impl Engine {
              overflow-reap path; take_owner_probe on the response or \
              overflow-reseed path); profile = {profile_id:?}",
         );
-        // Consume the prior burst via `map_state` and read its `BurstFinish` directive out.
-        // `intent` is not read here — the Draining sweep below is intent-agnostic.
+        // Consume the prior burst via `map_state` and read its `BurstFinish` directive out. `intent`
+        // is not read here — the Draining sweep below is intent-agnostic.
         //
         // The Active arm installs `Idle` *inside* the transform, so the focal Profile is `Idle` for
         // the rest of the helper — the load-bearing exclusion from its own
@@ -1298,17 +1301,17 @@ impl Engine {
             return;
         };
 
-        // Intent-agnostic Draining sweep. The reconfirm condition
-        // `has_active_standard_descendant(A)` can only flip false at *some* descendant's burst
-        // finish; rather than walk the finishing Profile's (possibly topology-moved) covering
-        // chain, re-evaluate the pure query for *every* currently-Draining Profile. The focal
-        // Profile is already Idle (above), so it is correctly excluded from its own predicate. Pass
-        // 1 is pure reads (`&Tree` + `&ProfileMap`, all shared — borrow-clean against the inner
-        // `&self.profiles` re-borrow); Draining is a rare, tiny phase (typically 0–1 Profiles).
-        // Pass 2 takes `&mut self` for the unchanged downstream reconfirm:
-        // `transition_to_verifying` mints a fresh correlation and emits Probe; the response routes
-        // via the burst's preserved `intent` (Seed or Standard) through `dispatch_quiescence_ok`,
-        // comparing against the Profile's `current` (set when it entered Draining).
+        // Intent-agnostic Draining sweep. The reconfirm condition `has_active_standard_descendant(A)`
+        // can only flip false at *some* descendant's burst finish; rather than walk the finishing
+        // Profile's (possibly topology-moved) covering chain, re-evaluate the pure query for *every*
+        // currently-Draining Profile. The focal Profile is already Idle (above), so it is correctly
+        // excluded from its own predicate. Pass 1 is pure reads (`&Tree` + `&ProfileMap`, all shared
+        // — borrow-clean against the inner `&self.profiles` re-borrow); Draining is a rare, tiny
+        // phase (typically 0–1 Profiles). Pass 2 takes `&mut self` for the unchanged downstream
+        // reconfirm: `transition_to_verifying` mints a fresh correlation and emits Probe; the
+        // response routes via the burst's preserved `intent` (Seed or Standard) through
+        // `dispatch_quiescence_ok`, comparing against the Profile's `current` (set when it entered
+        // Draining).
         let reconfirm: SmallVec<[ProfileId; 4]> = self
             .profiles
             .iter()
@@ -1381,8 +1384,8 @@ impl Engine {
             post.final_window_residual
                 .note(event_resource, Arc::clone(event_path));
             post.last_event_time = Some(now);
-            // An absorbed in-mask event explains the rebase loop's sample motion — the
-            // mask-blindspot streak breaks, mirroring `event_drives_batching`'s pre-fire reset.
+            // An absorbed in-mask event explains the rebase loop's sample motion — the mask-blindspot
+            // streak breaks, mirroring `event_drives_batching`'s pre-fire reset.
             post.retry_streak = 0;
             out.diagnostics.push(Diagnostic::EventAbsorbedByFireTail {
                 profile: profile_id,
@@ -1393,17 +1396,17 @@ impl Engine {
     }
 
     /// Restart a fresh Standard `Batching` burst from the fire-tail residual — the consumer for
-    /// events `absorb_event_into_fire_tail` accumulated after the rebase probe was already in
-    /// flight. Single source of `Active(PostFire)` → `Active(PreFire(Batching))` typed move (via
+    /// events `absorb_event_into_fire_tail` accumulated after the rebase probe was already in flight.
+    /// Single source of `Active(PostFire)` → `Active(PreFire(Batching))` typed move (via
     /// [`specter_core::PostFireBurst::into_pre_fire_residual`]); the inverse of
     /// `transition_to_awaiting`'s fire move.
     ///
     /// **Caller.** The verdict-terminal router (`finish_verdict_terminal`, `Restart` disposition)
-    /// only — reached from `dispatch_rebase_ok`'s `Stable(_)` arm (natural or ceiling-forced),
-    /// after `rebase_baseline`, and only once the router has established the residual is non-empty
-    /// and the burst is [`BurstFinish::ReturnToIdle`]. Origin-agnostic — a Seed-origin residual
-    /// restarts too; `into_pre_fire_residual` sets `intent: Standard` because a restarted debounce
-    /// burst *is* Standard by definition.
+    /// only — reached from `dispatch_rebase_ok`'s `Stable(_)` arm (natural or ceiling-forced), after
+    /// `rebase_baseline`, and only once the router has established the residual is non-empty and
+    /// the burst is [`BurstFinish::ReturnToIdle`]. Origin-agnostic — a Seed-origin residual restarts
+    /// too; `into_pre_fire_residual` sets `intent: Standard` because a restarted debounce burst *is*
+    /// Standard by definition.
     ///
     /// **No refcount edges.** The typed `PostFire → PreFire` move preserves the watched anchor: it
     /// neither installs nor releases a contribution, so the restarted burst keeps the original
@@ -1412,9 +1415,9 @@ impl Engine {
     ///
     /// **Slot-consumed precondition.** The `map_state` below consumes the post-fire burst (its
     /// closure discards the burst payload); an armed `Rebasing` slot reaching that drop trips
-    /// `ProbeSlot`'s linearity tripwire. The sole caller runs only after
-    /// `on_profile_probe_response` disarmed via `take_owner_probe` — the same precondition
-    /// `finish_burst_to_idle` carries on the path this replaces. Debug-asserted at entry.
+    /// `ProbeSlot`'s linearity tripwire. The sole caller runs only after `on_profile_probe_response`
+    /// disarmed via `take_owner_probe` — the same precondition `finish_burst_to_idle` carries on
+    /// the path this replaces. Debug-asserted at entry.
     ///
     /// The restart re-enters `Batching` (not an immediate re-probe), so it is settle-debounced and
     /// burst-deadline-bounded exactly like a fresh `start_standard_burst` — it self-heals at the
@@ -1474,10 +1477,10 @@ impl Engine {
 
         // Typed restart move PostFire → PreFire — the inverse of `transition_to_awaiting`'s fire
         // move. `into_pre_fire_residual` consumes the post-fire burst by value, so the transform
-        // primitive `map_state` extracts the prior and installs the fresh `Batching` pre-fire
-        // result in one reconcile — no swap-to-Idle-then-reinstall dance. `finish` (ReturnToIdle by
-        // the caller's gate) rides across unchanged, preserving a mid-tail `mark_active_for_reap`.
-        // The non-PostFire arm is post-gate-impossible: it `debug_assert`s loudly and degrades by
+        // primitive `map_state` extracts the prior and installs the fresh `Batching` pre-fire result
+        // in one reconcile — no swap-to-Idle-then-reinstall dance. `finish` (ReturnToIdle by the
+        // caller's gate) rides across unchanged, preserving a mid-tail `mark_active_for_reap`. The
+        // non-PostFire arm is post-gate-impossible: it `debug_assert`s loudly and degrades by
         // reinstalling the prior, never panicking a release daemon.
         self.profiles.map_state(profile_id, |prior| match prior {
             ProfileState::Active(ActiveBurst::PostFire(post), finish) => (
@@ -1570,9 +1573,9 @@ fn listed_ancestor(
 ///
 /// The Standard arm has two should-nevers of one family, each `debug_assert!`ed and the anchor in
 /// release. An empty `dirty`: a Standard burst notes its trigger at construction, and the emission
-/// choke pairs the anchor with a `WholeSubtree` obligation under its own `debug_assert`. No
-/// listing: a Standard burst opens only over a settled baseline, which a listing stands behind; at
-/// the anchor the walk has no prior to skip against, so it reads every chain.
+/// choke pairs the anchor with a `WholeSubtree` obligation under its own `debug_assert`. No listing:
+/// a Standard burst opens only over a settled baseline, which a listing stands behind; at the anchor
+/// the walk has no prior to skip against, so it reads every chain.
 ///
 /// **Draining-reconfirm coverage.** The Draining → Verifying reconfirm folds into the Standard case
 /// because `dirty` is preserved across the burst's whole pre-fire lifetime (only `note`d into), so
@@ -1636,9 +1639,9 @@ mod tests {
     const MAX_SETTLE: Duration = Duration::from_secs(6);
     const NO_EVENTS: ClassSet = ClassSet::EMPTY;
     /// Events-complete fixture mask: CONTENT covers the recursive `Subtree` shape's quiescence
-    /// witness classes, so `event_chains_prove_quiescence` holds for Standard bursts and the
-    /// emission stays dirty-LCA + `Chains` — the shape the LCA / chains pins below lock.
-    /// Events-incomplete pins opt into [`NO_EVENTS`] explicitly.
+    /// witness classes, so `event_chains_prove_quiescence` holds for Standard bursts and the emission
+    /// stays dirty-LCA + `Chains` — the shape the LCA / chains pins below lock. Events-incomplete
+    /// pins opt into [`NO_EVENTS`] explicitly.
     const EVENTS_COMPLETE: ClassSet = ClassSet::CONTENT;
 
     /// Build an Engine with a single Profile anchored at `/anchor`, listing an empty directory.
@@ -1667,8 +1670,8 @@ mod tests {
     }
 
     /// Install `listing` as the Profile's `current` — the read snapshot a Standard target descends.
-    /// A Standard burst opens only over a settled baseline, so a pin that computes a Standard
-    /// target gives its Profile the listing production would hold.
+    /// A Standard burst opens only over a settled baseline, so a pin that computes a Standard target
+    /// gives its Profile the listing production would hold.
     fn list(e: &mut Engine, pid: specter_core::ProfileId, listing: Arc<DirSnapshot>) {
         e.profiles
             .get_mut(pid)
@@ -1800,9 +1803,9 @@ mod tests {
 
     #[test]
     fn event_during_verifying_emits_cancel_and_resets_batching() {
-        // FsEvent during Verifying: Cancel emitted; phase becomes Batching with a fresh
-        // settle_timer; intent preserved. Cold-arm Seed lands directly in Verifying (probe armed at
-        // construction) — no need to drive Batching → Verifying first.
+        // FsEvent during Verifying: Cancel emitted; phase becomes Batching with a fresh settle_timer;
+        // intent preserved. Cold-arm Seed lands directly in Verifying (probe armed at construction)
+        // — no need to drive Batching → Verifying first.
         let (mut e, pid) = engine_with_profile();
         let mut out = StepOutput::default();
         e.start_seed_burst(pid, None, Instant::now(), &mut out); // cold Seed → Verifying
@@ -1865,8 +1868,8 @@ mod tests {
     #[test]
     fn unstable_response_does_not_emit_cancel() {
         // Standard burst → Batching → Verifying → simulated unstable response → Batching. The
-        // transition emits NO Cancel — the helper structurally refuses to emit one because the
-        // verify just responded.
+        // transition emits NO Cancel — the helper structurally refuses to emit one because the verify
+        // just responded.
         let (mut e, pid) = engine_with_profile();
         let mut out = StepOutput::default();
         let resource = e.profiles.get(pid).unwrap().resource();
@@ -1890,10 +1893,11 @@ mod tests {
     }
 
     /// C2 backstop: `finish_burst_to_idle` debug-asserts the owner's `ProbeSlot` is already disarmed
-    /// at function entry. Reaching it with a *genuinely armed* `Active(PreFire(Verifying))` (the slot
-    /// in flight, NOT pre-consumed) must trip the assert loudly rather than silently dropping the
-    /// armed slot and orphaning its correlation. `#[should_panic]` on a `debug_assert!` only triggers
-    /// under debug assertions; nextest runs the debug profile by default, so this is exercised.
+    /// at function entry. Reaching it with a *genuinely armed* `Active(PreFire(Verifying))` (the
+    /// slot in flight, NOT pre-consumed) must trip the assert loudly rather than silently dropping
+    /// the armed slot and orphaning its correlation. `#[should_panic]` on a `debug_assert!` only
+    /// triggers under debug assertions; nextest runs the debug profile by default, so this is
+    /// exercised.
     #[test]
     #[should_panic(expected = "finish_burst_to_idle: probe slot still armed")]
     fn finish_burst_to_idle_armed_slot_trips_debug_assert() {
@@ -1911,8 +1915,8 @@ mod tests {
         );
 
         // Trips the C2 debug_assert at function entry. The slot is never disarmed, so no
-        // `cancel_all_in_flight_probes` teardown is reachable (and unwinding through it would
-        // itself trip the ProbeSlot Drop tripwire) — `#[should_panic]` is the contract.
+        // `cancel_all_in_flight_probes` teardown is reachable (and unwinding through it would itself
+        // trip the ProbeSlot Drop tripwire) — `#[should_panic]` is the contract.
         e.finish_burst_to_idle(pid, &mut out);
     }
 
@@ -1928,8 +1932,8 @@ mod tests {
         let rp = rpath(&e, r);
         e.start_standard_burst(pid, r, &rp, Instant::now(), &mut out);
         e.transition_to_verifying(pid, &mut out);
-        // Mirror the real response path: the Verifying slot is disarmed via `take_owner_probe`
-        // before burst-end.
+        // Mirror the real response path: the Verifying slot is disarmed via `take_owner_probe` before
+        // burst-end.
         let _ = e.take_owner_probe(pid);
         assert!(
             e.pending_probe_for(pid).is_none(),
@@ -1948,9 +1952,9 @@ mod tests {
     fn event_storm_during_batching_does_not_amplify_settle() {
         // Settle-reuse contract: a storm of FsEvents during Batching does NOT re-insert a fresh
         // settle timer per event; only `last_event_time` updates. The on-expiry handler reschedules
-        // at `last_event_time + settle` if events arrived since, otherwise transitions. The
-        // semantic invariant — settle deadline pinned at `last_event + settle` — holds without
-        // per-event heap pushes.
+        // at `last_event_time + settle` if events arrived since, otherwise transitions. The semantic
+        // invariant — settle deadline pinned at `last_event + settle` — holds without per-event heap
+        // pushes.
         let (mut e, pid) = engine_with_profile();
         let mut out = StepOutput::default();
         let r = e.profiles.get(pid).unwrap().resource();
@@ -1966,8 +1970,8 @@ mod tests {
             e.event_drives_batching(pid, r, &rp, last_event, &mut out);
         }
 
-        // ── Invariant 1: last_event_time is the source of truth. The
-        // most recent event imprints on the field; intermediate events overwrite without trace.
+        // ── Invariant 1: last_event_time is the source of truth. The most recent event imprints on
+        // the field; intermediate events overwrite without trace.
         let burst = match e.profiles.get(pid).unwrap().state() {
             ProfileState::Active(ActiveBurst::PreFire(b), _) => b,
             _ => panic!("expected Active"),
@@ -1978,9 +1982,8 @@ mod tests {
             "last_event_time pinned to most recent FsEvent",
         );
 
-        // ── Invariant 2: only one settle timer for this profile in the
-        // heap. The initial timer from `start_standard_burst` carries through the storm, with no
-        // per-event reschedule.
+        // ── Invariant 2: only one settle timer for this profile in the heap. The initial timer from
+        // `start_standard_burst` carries through the storm, with no per-event reschedule.
         let settle_timers: usize = e
             .timers
             .iter()
@@ -1996,11 +1999,10 @@ mod tests {
             _ => panic!("expected Batching"),
         };
 
-        // ── Invariant 3: on the initial timer's expiry while events are
-        // recent (last_event > initial deadline in this contrived unit-test timeline;
-        // saturating_duration_since clamps to 0 and the recency check fires), `on_settle_expired`
-        // reschedules a fresh timer at `last_event + settle`. The phase stays Batching with the new
-        // id.
+        // ── Invariant 3: on the initial timer's expiry while events are recent (last_event > initial
+        // deadline in this contrived unit-test timeline; saturating_duration_since clamps to 0 and
+        // the recency check fires), `on_settle_expired` reschedules a fresh timer at `last_event +
+        // settle`. The phase stays Batching with the new id.
         let expiry_now = t0 + SETTLE; // initial timer's deadline
         let _ = e.step(
             Input::TimerExpired {
@@ -2026,9 +2028,8 @@ mod tests {
             "reschedule mints a fresh TimerId; the initial id is no longer referenced",
         );
 
-        // ── Invariant 4: the rescheduled deadline equals
-        // `last_event + settle` — the settle deadline tracks the most recent event regardless of
-        // which timer carries it.
+        // ── Invariant 4: the rescheduled deadline equals `last_event + settle` — the settle deadline
+        // tracks the most recent event regardless of which timer carries it.
         let rescheduled_deadline = e
             .timers
             .iter()
@@ -2041,9 +2042,8 @@ mod tests {
             "rescheduled deadline pinned at last_event + settle",
         );
 
-        // ── Invariant 5: when the rescheduled timer expires and no
-        // further events have come in, on_settle_expired transitions to Verifying — the cycle
-        // completes.
+        // ── Invariant 5: when the rescheduled timer expires and no further events have come in,
+        // on_settle_expired transitions to Verifying — the cycle completes.
         let final_expiry = last_event + SETTLE;
         let _ = e.step(
             Input::TimerExpired {
@@ -2120,9 +2120,9 @@ mod tests {
         let (mut e, pid) = engine_with_profile();
         let mut out = StepOutput::default();
         e.start_seed_burst(pid, None, Instant::now(), &mut out);
-        // Cold-arm: Verifying-at-construction. Production reaches `transition_to_draining` only
-        // from a Verifying probe response, which has already disarmed the slot via
-        // `take_owner_probe`. Mirror that consume here.
+        // Cold-arm: Verifying-at-construction. Production reaches `transition_to_draining` only from
+        // a Verifying probe response, which has already disarmed the slot via `take_owner_probe`.
+        // Mirror that consume here.
         let _ = e.take_owner_probe(pid);
 
         e.transition_to_draining(pid, &mut out);
@@ -2180,8 +2180,8 @@ mod tests {
     fn precondition_diagnoses_idle_helper_called_on_active() {
         // `start_seed_burst` requires `Idle`. Calling it on an already-Active Profile triggers the
         // precondition: the helper bails before re-scheduling timers or re-minting a probe, and
-        // surfaces `InvalidBurstTransition` with `observed: ActivePreFire` in both dev/CI and
-        // release builds.
+        // surfaces `InvalidBurstTransition` with `observed: ActivePreFire` in both dev/CI and release
+        // builds.
         let (mut e, pid) = engine_with_profile();
         let mut out = StepOutput::default();
         e.start_seed_burst(pid, None, Instant::now(), &mut out);
@@ -2235,9 +2235,9 @@ mod tests {
     //
     // Events-complete Standard target = the deepest directory on the way to the component-LCA of
     // `dirty`'s captured *paths* (history, not surviving slot ids) that the Profile's `current`
-    // lists, descended from the always-live anchor together with the Tree. Seed and
-    // events-incomplete Standard (`!event_chains_prove_quiescence`) target the anchor. Locks the
-    // contract independent of `transition_to_verifying`'s body.
+    // lists, descended from the always-live anchor together with the Tree. Seed and events-incomplete
+    // Standard (`!event_chains_prove_quiescence`) target the anchor. Locks the contract independent
+    // of `transition_to_verifying`'s body.
     // ---------------------------------------------------------------------------
 
     use crate::burst::pre_fire_target;
@@ -2302,8 +2302,8 @@ mod tests {
 
     /// An Engine whose events-complete Profile is anchored at `/root` under `config` and lists
     /// `listing`, with a Tree slot at each anchor-relative path of `slots` (returned in order). The
-    /// slots only name what an event can land on: the target rule reads graftability off the
-    /// listing alone.
+    /// slots only name what an event can land on: the target rule reads graftability off the listing
+    /// alone.
     fn engine_listing(
         config: SubtreeScan,
         listing: Arc<DirSnapshot>,
@@ -2420,8 +2420,8 @@ mod tests {
     fn pre_fire_target_standard_lone_file_roots_at_its_parent_dir() {
         // The dominant single-file-edit case: the lone captured path is a File leaf, so its
         // component-LCA is the file itself. The listing holds it as a leaf, not as a directory it
-        // read, so the descent stops at the directory that lists it. The descendant-observation
-        // model probes Dirs — a File-target probe is misread downstream as anchor removal.
+        // read, so the descent stops at the directory that lists it. The descendant-observation model
+        // probes Dirs — a File-target probe is misread downstream as anchor removal.
         let (e, pid, root, slots) = engine_listing(
             SubtreeScan::builder().build(),
             dir_snap(&[("f", EntryKind::File, 1)]),
@@ -2531,9 +2531,9 @@ mod tests {
     fn pre_fire_target_standard_unlisted_slot_roots_at_nearest_listed_dir() {
         // The Tree holds `a/c`, a slot this Profile's listing does not hold — another Profile
         // anchored inside the subtree keeps it alive, and an event there reaches this Profile by
-        // scope. The descent stops at `a`, the deepest directory the listing holds on the way:
-        // rooted at `c` the walk would carry no prior, and the splice could not find `c` in the
-        // listing it splices into.
+        // scope. The descent stops at `a`, the deepest directory the listing holds on the way: rooted
+        // at `c` the walk would carry no prior, and the splice could not find `c` in the listing it
+        // splices into.
         let (e, pid, _root, slots) = engine_listing(
             SubtreeScan::builder().build(),
             dir_snap_nested(&[("a", covered(dir_snap(&[])))]),
@@ -2548,10 +2548,10 @@ mod tests {
 
     #[test]
     fn pre_fire_target_standard_denied_dir_roots_at_its_parent_dir() {
-        // The listing holds `a` denied — the walk could not read it — while another Profile
-        // anchored beneath it keeps the slots alive and an event there reaches this Profile by
-        // scope. The descent stops at the anchor, which lists `a`: a walk rooted at `a` would have
-        // no prior to stand on.
+        // The listing holds `a` denied — the walk could not read it — while another Profile anchored
+        // beneath it keeps the slots alive and an event there reaches this Profile by scope. The
+        // descent stops at the anchor, which lists `a`: a walk rooted at `a` would have no prior to
+        // stand on.
         let (e, pid, root, slots) = engine_listing(
             SubtreeScan::builder().build(),
             dir_snap_nested(&[("a", denied(1))]),
@@ -2566,10 +2566,10 @@ mod tests {
 
     #[test]
     fn pre_fire_target_standard_reaped_slot_roots_one_level_up() {
-        // The listing still holds `a/gone`, but its slot was reaped, so the Tree names nothing
-        // there: the descent stops one level up, at `a` — not at the anchor. The captured path
-        // stays the basis and the stop moves the root only up; silently (no diagnostic —
-        // delete-recreate churn would flood logs).
+        // The listing still holds `a/gone`, but its slot was reaped, so the Tree names nothing there:
+        // the descent stops one level up, at `a` — not at the anchor. The captured path stays the
+        // basis and the stop moves the root only up; silently (no diagnostic — delete-recreate churn
+        // would flood logs).
         let (mut e, pid, _root, slots) = engine_listing(
             SubtreeScan::builder().build(),
             dir_snap_nested(&[(
@@ -2627,9 +2627,9 @@ mod tests {
 
     #[test]
     fn pre_fire_target_seed_intent_returns_anchor() {
-        // Seed intent on a Dir-anchored Profile: target is the anchor, regardless of dirty
-        // contents. Seed bursts compare against fire history rather than a stable subtree verdict,
-        // so they probe at the anchor unconditionally.
+        // Seed intent on a Dir-anchored Profile: target is the anchor, regardless of dirty contents.
+        // Seed bursts compare against fire history rather than a stable subtree verdict, so they
+        // probe at the anchor unconditionally.
         let (e, pid, root, a, _b) = engine_with_two_children();
 
         let pre = pre_fire_burst_for_test(BurstIntent::Seed, dirty_at(&[(a, "/root/a")]));
@@ -2651,8 +2651,8 @@ mod tests {
         // An events-incomplete Standard burst must not frame its samples at the dirty-LCA: the hash
         // channel compares whole-proof-object reads, so the target rule collapses to the anchor —
         // the same arm Seed takes (`event_chains_prove_quiescence` fails for both). The deep
-        // single-dirty twin of `pre_fire_target_standard_single_dirty_deep_returns_self`, which
-        // pins the LCA on the events-complete control.
+        // single-dirty twin of `pre_fire_target_standard_single_dirty_deep_returns_self`, which pins
+        // the LCA on the events-complete control.
         let (e, pid, root, a, _b) = engine_with_two_children_masked(NO_EVENTS);
         let pre = pre_fire_burst_for_test(BurstIntent::Standard, dirty_at(&[(a, "/root/a")]));
         assert_eq!(
@@ -2665,8 +2665,8 @@ mod tests {
     /// Build an Engine with a File-anchored Profile under a parent dir. `parent/main.rs` (file) is
     /// the anchor; the parent dir exists but is outside the Profile's coverage. Mirrors the
     /// production `attach_sub` flow's anchor-classification step by stamping `Profile.kind =
-    /// Some(File)` post-attach — without it the typed dispatch in `transition_to_verifying`
-    /// defaults to Subtree.
+    /// Some(File)` post-attach — without it the typed dispatch in `transition_to_verifying` defaults
+    /// to Subtree.
     fn engine_with_file_anchor() -> (
         Engine,
         specter_core::ProfileId,
@@ -2701,8 +2701,8 @@ mod tests {
     fn transition_to_verifying_on_file_anchor_targets_anchor() {
         // File-anchored Profile: a Standard burst's probe target must be the anchor itself, not the
         // parent dir. `pre_fire_target` short-circuits a File-kind anchor before any path-LCA
-        // resolution. This test pins that through the emission path — promoting past the anchor
-        // would route the probe outside the Profile's coverage and (downstream) wholesale-replace
+        // resolution. This test pins that through the emission path — promoting past the anchor would
+        // route the probe outside the Profile's coverage and (downstream) wholesale-replace
         // `Profile.current` with a Dir snapshot at the parent.
         let (mut e, pid, _parent, file_anchor) = engine_with_file_anchor();
         let mut start_out = StepOutput::default();
@@ -2778,8 +2778,8 @@ mod tests {
         let (mut e, pid, root, a, b) = engine_with_two_children();
         let (ap, bp) = (rpath(&e, a), rpath(&e, b));
         let now = Instant::now();
-        // Standard burst with two dirty siblings → component-LCA of `/root/a` + `/root/b` is
-        // `/root`, resolving to the anchor.
+        // Standard burst with two dirty siblings → component-LCA of `/root/a` + `/root/b` is `/root`,
+        // resolving to the anchor.
         let mut out = StepOutput::default();
         e.start_standard_burst(pid, a, &ap, now, &mut out);
         e.event_drives_batching(pid, b, &bp, now, &mut out);
@@ -2875,10 +2875,10 @@ mod tests {
     fn transition_to_verifying_ships_anchor_basis_for_sub_anchor_lca() {
         // Two dirty grandchildren /root/sub/{a,b} → component-LCA /root/sub, strictly below the
         // anchor /root. The emitted Subtree probe ships target_path = /root/sub (recursion root)
-        // AND anchor_path = /root (scope basis). Measuring the walker's `rel` from target_path
-        // would desync exclude/pattern/depth from the engine's `covers` for any burst whose
-        // dirty-LCA sits below the anchor. (transition_to_verifying_standard_uses_lca covers only
-        // the sibling-LCA==anchor case; this pins the genuine split.)
+        // AND anchor_path = /root (scope basis). Measuring the walker's `rel` from target_path would
+        // desync exclude/pattern/depth from the engine's `covers` for any burst whose dirty-LCA sits
+        // below the anchor. (transition_to_verifying_standard_uses_lca covers only the
+        // sibling-LCA==anchor case; this pins the genuine split.)
         let mut e = Engine::new();
         let root = e.tree.ensure_root("/root", ResourceRole::User);
         e.tree.set_kind(root, ResourceKind::Dir);
@@ -2963,8 +2963,8 @@ mod tests {
     #[test]
     fn transition_to_verifying_reuses_target_arc_as_anchor_when_lca_is_anchor() {
         // Sibling-LCA resolves to the anchor (target == anchor), so the producer takes the
-        // `Arc::clone(&target_path)` fast path: the emitted anchor_path is byte-equal to
-        // target_path AND the same allocation — a refcount bump, not a second `path_of` walk.
+        // `Arc::clone(&target_path)` fast path: the emitted anchor_path is byte-equal to target_path
+        // AND the same allocation — a refcount bump, not a second `path_of` walk.
         let (mut e, pid, root, a, b) = engine_with_two_children();
         let (ap, bp) = (rpath(&e, a), rpath(&e, b));
         let now = Instant::now();

@@ -65,8 +65,8 @@ pub fn file_leaf(kind: EntryKind, inode: u64) -> LeafEntry {
 
 /// A `Covered` Dir child wrapping `snap` — the walker-recursed shape [`dir_snap`] cannot express.
 ///
-/// Compose with [`dir_snap_nested`] to build the chain-shaped snapshots a `MatchChain` walk
-/// produces: covered chain dirs down to the terminus, `Uncovered` dirs / `Leaf`s at it.
+/// Compose with [`dir_snap_nested`] to build the chain-shaped snapshots a `MatchChain` walk produces:
+/// covered chain dirs down to the terminus, `Uncovered` dirs / `Leaf`s at it.
 #[must_use]
 pub const fn covered(snap: Arc<DirSnapshot>) -> ChildEntry {
     ChildEntry::Dir(DirChild::Covered(snap))
@@ -97,10 +97,10 @@ pub fn leaf(kind: EntryKind, inode: u64) -> ChildEntry {
 
 /// Build a directory snapshot from pre-built children — the nested sibling of [`dir_snap`].
 ///
-/// For fixtures that need `Covered` Dir chains, which `dir_snap`'s flat `(name, kind, inode)`
-/// triples cannot express. Children come from [`covered`] / [`covered_at`] / [`uncovered`] /
-/// [`denied`] / [`leaf`]; the root meta is the same zero sentinel as [`dir_snap`]'s, so equal
-/// children hash equal across calls.
+/// For fixtures that need `Covered` Dir chains, which `dir_snap`'s flat `(name, kind, inode)` triples
+/// cannot express. Children come from [`covered`] / [`covered_at`] / [`uncovered`] / [`denied`] /
+/// [`leaf`]; the root meta is the same zero sentinel as [`dir_snap`]'s, so equal children hash equal
+/// across calls.
 ///
 /// Names must be single path components — same loud-in-dev discipline as [`dir_snap`].
 #[must_use]

@@ -101,8 +101,8 @@ fn abandoned_burst_evidence_rides_next_bursts_obligation_and_fires() {
     );
 
     // Past the burst deadline: the settle expiry re-enters Verifying, the deadline expiry forces
-    // the in-flight verify, and the forced refusal folds `Abandon` — loud terminal, evidence
-    // parked, Profile rests Idle.
+    // the in-flight verify, and the forced refusal folds `Abandon` — loud terminal, evidence parked,
+    // Profile rests Idle.
     let t2 = t0 + MAX_SETTLE + Duration::from_secs(1);
     let _ = drain_due(&mut e, t2);
     let corr = e

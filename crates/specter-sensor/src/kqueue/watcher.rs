@@ -35,8 +35,8 @@ use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::path::Path;
 
 /// Maximum events drained per `kevent` syscall. Excess sit in the kernel queue until the next
-/// iteration of the drain-to-empty loop inside `drain_ready`. 64 mirrors notify-rs and is well
-/// above the per-iteration burst the engine produces.
+/// iteration of the drain-to-empty loop inside `drain_ready`. 64 mirrors notify-rs and is well above
+/// the per-iteration burst the engine produces.
 const EVENT_BATCH: usize = 64;
 
 #[derive(Debug)]
@@ -60,18 +60,18 @@ pub struct KqueueWatcher {
 /// - `fflags` is the post-translation kqueue mask last passed to `EV_ADD`. A re-`watch()` recomputes
 ///   from the user's `events` set and the cached kind; an unchanged mask short-circuits without a
 ///   syscall — `EV_ADD` is idempotent in mask, so the kernel would produce the same registration.
-/// - `kind` is the fstat-verified inode shape at fresh-watch time, closing the TOCTOU window
-///   between the engine's `WatchOp::Watch.kind` and the kernel's path-resolution at install time.
-///   Invariant for the entry's lifetime — the fd is inode-bound (open() resolves the path once); an
-///   inode swap at the path surfaces as `NOTE_DELETE` / `NOTE_RENAME` on the original fd, the
-///   engine reseeds via `Unwatch` (which drops the entry; fd close auto-removes the kernel-side
-///   registration) followed by a fresh `Watch` against the new inode. Consumed by
+/// - `kind` is the fstat-verified inode shape at fresh-watch time, closing the TOCTOU window between
+///   the engine's `WatchOp::Watch.kind` and the kernel's path-resolution at install time. Invariant
+///   for the entry's lifetime — the fd is inode-bound (open() resolves the path once); an inode swap
+///   at the path surfaces as `NOTE_DELETE` / `NOTE_RENAME` on the original fd, the engine reseeds
+///   via `Unwatch` (which drops the entry; fd close auto-removes the kernel-side registration)
+///   followed by a fresh `Watch` against the new inode. Consumed by
 ///   [`crate::kqueue::normalize::kevent_to_fs_event`] to disambiguate `NOTE_WRITE` / `NOTE_LINK` on
 ///   Dir vs File, and by `translate::class_set_to_fflags` to compute the per-FD mask.
 ///
 /// Stored as a single struct so the triple is atomic: every install path writes all three fields
-/// together, every teardown clears them together. Mirror of inotify's `InotifyEntry { wd, mask,
-/// kind }`.
+/// together, every teardown clears them together. Mirror of inotify's `InotifyEntry { wd, mask, kind
+/// }`.
 ///
 /// `OwnedFd` is not `Copy`, so the entry isn't either — callers that need to read `fflags` / `kind`
 /// while preserving the fd hold the entry by reference.
@@ -94,11 +94,11 @@ impl KqueueWatcher {
     }
 
     /// Internal `watch` body — dispatches by entry presence. The trait wrapper maps the inner
-    /// `io::Error` set into a typed [`WatchFailure`] at the boundary so `?` propagation stays
-    /// uniform across the open / stat / register chain.
+    /// `io::Error` set into a typed [`WatchFailure`] at the boundary so `?` propagation stays uniform
+    /// across the open / stat / register chain.
     ///
-    /// - `by_resource[r]` populated → [`Self::rewatch_inner`] (re-register via `EV_ADD` on the
-    ///   cached fd; no reopen).
+    /// - `by_resource[r]` populated → [`Self::rewatch_inner`] (re-register via `EV_ADD` on the cached
+    ///   fd; no reopen).
     /// - `by_resource[r]` empty → [`Self::fresh_watch_inner`] (open + fstat verify + register).
     ///
     /// The engine-supplied `kind` is structurally irrelevant on rewatch (the cached kind is the
@@ -227,8 +227,8 @@ impl KqueueWatcher {
 
 impl FsWatcher for KqueueWatcher {
     /// Trait wrapper around `Self::watch_inner`: classifies the inner `io::Error` into a typed
-    /// [`WatchFailure`] at the boundary so the engine demuxes on the variant rather than on raw
-    /// errno values.
+    /// [`WatchFailure`] at the boundary so the engine demuxes on the variant rather than on raw errno
+    /// values.
     fn watch(
         &mut self,
         r: ResourceId,

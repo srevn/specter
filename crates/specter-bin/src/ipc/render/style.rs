@@ -2,16 +2,16 @@
 //!
 //! Three concerns live here, each a separate layer:
 //!
-//! - **Palette** — the [`Style`] each semantic role carries. Roles (`LABEL` / `DELIM` / …) are
-//!   named consts; phase and severity hues are computed by [`state`] and [`severity_style`].
-//!   Several roles fold onto one weight/hue tier today (e.g. `DELIM` / `MISSING` / `SECONDARY` are
-//!   all `dimmed`); naming them by role lets one be retuned without disturbing the siblings.
+//! - **Palette** — the [`Style`] each semantic role carries. Roles (`LABEL` / `DELIM` / …) are named
+//!   consts; phase and severity hues are computed by [`state`] and [`severity_style`]. Several roles
+//!   fold onto one weight/hue tier today (e.g. `DELIM` / `MISSING` / `SECONDARY` are all `dimmed`);
+//!   naming them by role lets one be retuned without disturbing the siblings.
 //! - **Mechanism** — [`Styler`] (`Active` / `Plain`, resolved once per stream) and the [`Painted`]
 //!   lazy [`Display`] adapter [`Styler::paint`] returns. Plain output is byte-identical to an
 //!   unstyled render and carries no added allocation, so `specter tail` keeps its amortized buffer.
 //!   The [`PaintLeaf`] sealed marker enforces the no-nesting discipline at compile time.
-//! - **Gating** — [`resolve`] is the sole site touching `anstyle-query` and
-//!   [`std::io::IsTerminal`]; it maps a [`ColorWhen`] + [`Stream`] to a [`Styler`].
+//! - **Gating** — [`resolve`] is the sole site touching `anstyle-query` and [`std::io::IsTerminal`];
+//!   it maps a [`ColorWhen`] + [`Stream`] to a [`Styler`].
 //!
 //! `specter-config`'s `cli.rs` owns a small parallel palette for clap's own `--help` output
 //! (`HEADING` / `LITERAL` / `PLACEHOLDER`); that surface is clap's, not the renderers', so the two
@@ -34,16 +34,16 @@ use crate::ipc::wire::{WireStateLabel, WireTime};
 /// column alignment to the eye.
 pub(crate) const LABEL: Style = Style::new().bold();
 
-/// Structural punctuation — the `=` between a key and its value, the
-/// `·` separators on the status `subs` line, the `─` rule rows.
+/// Structural punctuation — the `=` between a key and its value, the `·` separators on the status
+/// `subs` line, the `─` rule rows.
 pub(crate) const DELIM: Style = Style::new().dimmed();
 
 /// The `-` placeholder for an absent value (`list` cells, `show` lines). De-emphasised so populated
 /// cells read first.
 pub(crate) const MISSING: Style = Style::new().dimmed();
 
-/// Secondary detail the operator rarely needs front-and-centre — the `tail` line's leading
-/// timestamp, the wide-only id columns, the `show` unknown-name hint.
+/// Secondary detail the operator rarely needs front-and-centre — the `tail` line's leading timestamp,
+/// the wide-only id columns, the `show` unknown-name hint.
 pub(crate) const SECONDARY: Style = Style::new().dimmed();
 
 /// The `disabled` keyword and a disabled watch's source — a watch that is deliberately off.
@@ -57,8 +57,9 @@ pub(crate) const ERR: Style = AnsiColor::Red.on_default();
 pub(crate) const ERR_CODE: Style = AnsiColor::Red.on_default().bold();
 
 /// Hue for an operator-display phase. `Idle` rests at the default (unstyled, so painting it is a
-/// no-op); `Parked` is red — anchorless, awaiting recovery or operator action, the one phase that is
-/// wrong-at-rest; `Pending` is cyan; the pre-fire phases are yellow; the post-fire phases are blue.
+/// no-op); `Parked` is red — anchorless, awaiting recovery or operator action, the one phase that
+/// is wrong-at-rest; `Pending` is cyan; the pre-fire phases are yellow; the post-fire phases are
+/// blue.
 #[must_use]
 pub(crate) const fn state(label: WireStateLabel) -> Style {
     match label {
@@ -87,11 +88,11 @@ pub(crate) enum Severity {
     /// errno self-recovers), a purged claim, a forced ceiling, an overflow reseed, a gate deadline
     /// — plus the wire-only `Missed` data-loss marker. An edge was hit and handled.
     Warn,
-    /// The daemon did its primary job — a watch fired. The lone green tier, elevated from the
-    /// event's `info!` log level.
+    /// The daemon did its primary job — a watch fired. The lone green tier, elevated from the event's
+    /// `info!` log level.
     Ok,
-    /// Routine lifecycle, benign races, and class / consumer drops — the daemon's `info!` /
-    /// `debug!` / `trace!` events. Unstyled.
+    /// Routine lifecycle, benign races, and class / consumer drops — the daemon's `info!` / `debug!`
+    /// / `trace!` events. Unstyled.
     Info,
 }
 
@@ -122,10 +123,10 @@ impl Styler {
     /// intro / reset; otherwise it forwards `body`'s own [`Display`] verbatim — zero added
     /// allocation, byte-identical to an unstyled render.
     ///
-    /// `body: PaintLeaf` is the no-nesting discipline. An ANSI reset is global, so `paint(_,
-    /// paint(_, x))` would let the inner reset terminate the outer style early. [`Painted`]
-    /// deliberately does not implement [`PaintLeaf`], so a nested call fails to compile. Paint
-    /// leaves; concatenate siblings.
+    /// `body: PaintLeaf` is the no-nesting discipline. An ANSI reset is global, so `paint(_, paint(_,
+    /// x))` would let the inner reset terminate the outer style early. [`Painted`] deliberately does
+    /// not implement [`PaintLeaf`], so a nested call fails to compile. Paint leaves; concatenate
+    /// siblings.
     #[must_use]
     pub(crate) fn paint<D: PaintLeaf + Display>(self, style: Style, body: D) -> Painted<D> {
         // The `style != empty` arm is a defensive optimisation, not the parity proof: `anstyle`
@@ -192,9 +193,9 @@ macro_rules! leaf {
 
 // The exact set of types passed as `body` to `paint` across the renderers and the stderr helpers.
 // Three are reached only as shared borrows via the reference blanket above — never by value: `str`
-// (`&str` literals + keys), `String` (`show`'s unknown-name `&String`), and `WireTime` (an
-// `at_field` borrow). The rest are painted by value (`fmt::Arguments` from the stderr helpers,
-// `PadRight` / `Rule` from the layout primitives, the two wire enums painted directly).
+// (`&str` literals + keys), `String` (`show`'s unknown-name `&String`), and `WireTime` (an `at_field`
+// borrow). The rest are painted by value (`fmt::Arguments` from the stderr helpers, `PadRight` /
+// `Rule` from the layout primitives, the two wire enums painted directly).
 leaf!(
     str,
     String,
@@ -221,8 +222,8 @@ impl Display for PadRight<'_> {
     }
 }
 
-/// A horizontal rule — `n` box-drawing dashes (`─`) written straight
-/// into the formatter, no intermediate `String::repeat` allocation.
+/// A horizontal rule — `n` box-drawing dashes (`─`) written straight into the formatter, no
+/// intermediate `String::repeat` allocation.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Rule(pub(crate) usize);
 
@@ -247,8 +248,8 @@ pub(crate) enum Stream {
 
 /// Resolve the effective [`Styler`] for `stream` under the operator's `--color` choice.
 ///
-/// `Always` / `Never` are unconditional — an explicit flag overrides the environment. `Auto`
-/// consults the environment and the stream's TTY state via [`auto`].
+/// `Always` / `Never` are unconditional — an explicit flag overrides the environment. `Auto` consults
+/// the environment and the stream's TTY state via [`auto`].
 #[must_use]
 pub(crate) fn resolve(when: ColorWhen, stream: Stream) -> Styler {
     let on = match when {
@@ -301,9 +302,9 @@ const fn auto_precedence(
     }
 }
 
-/// Strip ANSI SGR sequences (`ESC [ … m`) so a styled render can be compared against its plain
-/// twin. Test-only, shared across the renderer test modules: stripping an `Active` render must
-/// reproduce the `Plain` bytes exactly (color is purely additive). No test-dep.
+/// Strip ANSI SGR sequences (`ESC [ … m`) so a styled render can be compared against its plain twin.
+/// Test-only, shared across the renderer test modules: stripping an `Active` render must reproduce
+/// the `Plain` bytes exactly (color is purely additive). No test-dep.
 #[cfg(test)]
 pub(crate) fn strip_ansi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -413,8 +414,8 @@ mod tests {
         assert_eq!(Rule(4).to_string(), "────");
     }
 
-    /// Phase hues: `Idle` is the unstyled default (painting it is a no-op); every other phase
-    /// carries a non-empty style.
+    /// Phase hues: `Idle` is the unstyled default (painting it is a no-op); every other phase carries
+    /// a non-empty style.
     #[test]
     fn state_idle_is_default_others_hued() {
         assert_eq!(state(WireStateLabel::Idle), Style::new());

@@ -8,10 +8,10 @@
 //! - [`super::MultiStage::new`] — spawn-body shape (a `Pipe` reified with fewer than two stages).
 //!
 //! It lives in its own module — not in `builder` — because it is owned by neither sibling
-//! constructor: both raise it and one external mapper (`specter-config` lowering) consumes it.
-//! Every variant is a *construction-hygiene* bug: a correct lowering pass never produces one from
-//! valid input. The validator captures them as load errors rather than letting them panic the
-//! daemon, so an internal lowering defect degrades to a contained config-load failure.
+//! constructor: both raise it and one external mapper (`specter-config` lowering) consumes it. Every
+//! variant is a *construction-hygiene* bug: a correct lowering pass never produces one from valid
+//! input. The validator captures them as load errors rather than letting them panic the daemon, so
+//! an internal lowering defect degrades to a contained config-load failure.
 //!
 //! The "program exceeds `u32::MAX` ops" case is deliberately *not* representable here:
 //! [`super::ProgramBuilder::emit`] enforces `pending.len() <= u32::MAX` as a precondition, panicking
@@ -37,9 +37,9 @@ pub enum ProgramError {
     /// A `Continue(target)` patch points at or before the origin op. `origin` is the op being
     /// patched; `target` is the requested target index.
     BackwardEdge { origin: u32, target: u32 },
-    /// A `Continue(target)` patch points past the emitted region (and, at build time, past the
-    /// final op count). `len` is the bound at the time the error was raised — current pending
-    /// length for patch-time rejections, final op count for build-time rejections.
+    /// A `Continue(target)` patch points past the emitted region (and, at build time, past the final
+    /// op count). `len` is the bound at the time the error was raised — current pending length for
+    /// patch-time rejections, final op count for build-time rejections.
     OutOfBoundsEdge { origin: u32, target: u32, len: u32 },
     /// [`super::ProgramBuilder::patch`] was called with an [`super::OpHandle`] that does not index
     /// this builder's pending ops. Only obtainable by reusing a handle minted by a *different*
@@ -47,11 +47,11 @@ pub enum ProgramError {
     /// to a contained config-load error rather than a daemon abort mid-reload. `handle` is the
     /// offending index; `len` is the builder's pending-op count.
     StaleHandle { handle: u32, len: u32 },
-    /// [`super::MultiStage::new`] was called with fewer than two stages. The config validator
-    /// forbids 0/1-stage pipes upstream (`IssueKind::EmptyPipe` / `SingleStagePipe`) before an
-    /// `Action::Pipe` is built, so reaching the constructor with a degenerate list is a
-    /// lowering-hygiene bug. `stages` is the rejected stage count — a diagnostic only, never an
-    /// index, so no `u32` width invariant attaches.
+    /// [`super::MultiStage::new`] was called with fewer than two stages. The config validator forbids
+    /// 0/1-stage pipes upstream (`IssueKind::EmptyPipe` / `SingleStagePipe`) before an `Action::Pipe`
+    /// is built, so reaching the constructor with a degenerate list is a lowering-hygiene bug.
+    /// `stages` is the rejected stage count — a diagnostic only, never an index, so no `u32` width
+    /// invariant attaches.
     DegeneratePipe { stages: usize },
 }
 

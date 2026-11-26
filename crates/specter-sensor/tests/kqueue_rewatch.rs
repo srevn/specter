@@ -2,9 +2,9 @@
 //! `EV_ADD`-overwrites-fflags semantics.
 //!
 //! These tests exercise [`KqueueWatcher::watch`]'s re-watch path: a second `watch()` call on a
-//! resource that already holds an entry. The watcher diffs the cached fflags against the
-//! translator's output for the new `(events, kind)` and re-registers via `EV_ADD` when they differ.
-//! macOS / FreeBSD only.
+//! resource that already holds an entry. The watcher diffs the cached fflags against the translator's
+//! output for the new `(events, kind)` and re-registers via `EV_ADD` when they differ. macOS /
+//! FreeBSD only.
 
 #![cfg(any(target_os = "macos", target_os = "freebsd"))]
 
@@ -95,9 +95,9 @@ fn drain_for(w: &mut KqueueWatcher, dur: Duration) -> Vec<(ResourceId, FsEvent)>
 }
 
 /// Re-watch with a widened mask should make new event classes deliverable. Specifically: a
-/// CONTENT-only registration filters out `MetadataChanged`; widening to `CONTENT | METADATA` (a
-/// fresh `Watch` op the engine emits when `Resource.events_union` changes) must re-register the FD
-/// with `NOTE_ATTRIB`, and a subsequent chmod then fires `MetadataChanged`.
+/// CONTENT-only registration filters out `MetadataChanged`; widening to `CONTENT | METADATA` (a fresh
+/// `Watch` op the engine emits when `Resource.events_union` changes) must re-register the FD with
+/// `NOTE_ATTRIB`, and a subsequent chmod then fires `MetadataChanged`.
 #[test]
 fn rewatch_with_widened_mask_delivers_new_classes() {
     let tmp = TempDir::new().unwrap();
@@ -156,10 +156,10 @@ fn rewatch_with_widened_mask_delivers_new_classes() {
     drop(w);
 }
 
-/// Re-watch with a narrowed mask should drop classes from the registration. Specifically: an
-/// initial `STRUCTURE | METADATA` registration on a Dir delivers both `StructureChanged` on child
-/// write and `MetadataChanged` on chmod. Re-registering with `STRUCTURE` only must remove
-/// `NOTE_ATTRIB`, so chmod no longer fires.
+/// Re-watch with a narrowed mask should drop classes from the registration. Specifically: an initial
+/// `STRUCTURE | METADATA` registration on a Dir delivers both `StructureChanged` on child write and
+/// `MetadataChanged` on chmod. Re-registering with `STRUCTURE` only must remove `NOTE_ATTRIB`, so
+/// chmod no longer fires.
 #[test]
 fn rewatch_with_narrowed_mask_drops_classes() {
     let tmp = TempDir::new().unwrap();
@@ -227,9 +227,9 @@ fn rewatch_with_narrowed_mask_drops_classes() {
 }
 
 /// Re-watch with the same mask is a no-op — the watcher's cache catches it and skips the syscall.
-/// Observationally: the fd's behavior is unchanged. We exercise this by checking that a normal
-/// write still fires `ContentChanged` after a same-mask re-watch (i.e., re-watching didn't
-/// accidentally clear the fflags).
+/// Observationally: the fd's behavior is unchanged. We exercise this by checking that a normal write
+/// still fires `ContentChanged` after a same-mask re-watch (i.e., re-watching didn't accidentally
+/// clear the fflags).
 #[test]
 fn rewatch_with_same_mask_preserves_registration() {
     let tmp = TempDir::new().unwrap();

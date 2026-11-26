@@ -1,10 +1,10 @@
 //! Pending-path descent end-to-end. Drives `Engine::attach_sub` with a path-based request, walks
 //! descent through scaffolds, and confirms anchor materialization triggers a Seed burst. The
-//! witnessed-appearance latch splits the materialization: a descent whose probes observed the
-//! awaited segment absent and then present (an absence→presence pair) opens a *triggered* Seed that
-//! owes a fire; a descent that found every segment on first observation stays cold and pins —
-//! prefix events drive re-probes but never write the witness, so sibling churn at a shared prefix
-//! can't fire a Sub whose anchor sat unchanged on disk.
+//! witnessed-appearance latch splits the materialization: a descent whose probes observed the awaited
+//! segment absent and then present (an absence→presence pair) opens a *triggered* Seed that owes a
+//! fire; a descent that found every segment on first observation stays cold and pins — prefix events
+//! drive re-probes but never write the witness, so sibling churn at a shared prefix can't fire a
+//! Sub whose anchor sat unchanged on disk.
 
 use specter_core::testkit::{dir_snap, empty_program};
 use specter_core::{
@@ -24,8 +24,8 @@ use std::time::{Duration, Instant};
 #[test]
 fn attach_sub_path_pending_then_anchor_appears() {
     // Tree has /var only. attach_sub at path /var/log/myapp pending state: prefix=/var,
-    // remaining=[log, myapp]. Inject probe responses showing log appears, then myapp appears.
-    // Anchor materializes; Seed burst starts.
+    // remaining=[log, myapp]. Inject probe responses showing log appears, then myapp appears. Anchor
+    // materializes; Seed burst starts.
     let mut e = Engine::new();
     let var = e
         .tree_mut()
@@ -96,8 +96,8 @@ fn attach_sub_path_pending_then_anchor_appears() {
     ));
     assert_eq!(e.tree().get(myapp).unwrap().kind(), Some(ResourceKind::Dir));
 
-    // Profile is now in Active(PreFire(Seed)) — the Seed burst was started at materialization.
-    // Under the cold-arm Verifying-first contract, the materializing step opens the burst in
+    // Profile is now in Active(PreFire(Seed)) — the Seed burst was started at materialization. Under
+    // the cold-arm Verifying-first contract, the materializing step opens the burst in
     // `Verifying(ProbeSlot::armed(corr))` and emits the cold-walk Probe directly.
     match e.profiles().get(pid).unwrap().state() {
         ProfileState::Active(ActiveBurst::PreFire(pre), _) => {
@@ -126,10 +126,11 @@ fn attach_sub_path_pending_then_anchor_appears() {
 }
 
 /// The watched file APPEARS after attach: the first descent probe observes the awaited segment absent
-/// (the standing absence half), the parent's STRUCTURE event drives a re-probe, and the response that
-/// finds the segment completes the absence→presence appearance witness — so materialization opens a
-/// triggered Seed (Batching-first) that FIRES once the settle window passes (`FreshSeedFire`). The
-/// witnessed counterpart of [`attach_sub_path_pending_then_anchor_appears`]'s cold pin.
+/// (the standing absence half), the parent's STRUCTURE event drives a re-probe, and the response
+/// that finds the segment completes the absence→presence appearance witness — so materialization
+/// opens a triggered Seed (Batching-first) that FIRES once the settle window passes
+/// (`FreshSeedFire`). The witnessed counterpart of [`attach_sub_path_pending_then_anchor_appears`]'s
+/// cold pin.
 #[test]
 fn pending_path_witnessed_appearance_fires() {
     let mut e = Engine::new();
@@ -210,8 +211,8 @@ fn pending_path_witnessed_appearance_fires() {
 }
 
 /// The W1 wedge, closed: a prefix event that *races* the in-flight descent probe — arriving before
-/// its response is processed — must not be dropped. The walk behind that probe may predate the
-/// event, so its response finds the awaited segment still absent and parks; historically that was a
+/// its response is processed — must not be dropped. The walk behind that probe may predate the event,
+/// so its response finds the awaited segment still absent and parks; historically that was a
 /// permanent wedge, because the segment's own creation was the dropped event and nothing would
 /// re-probe. The re-probe-owed latch repays it with a postdating probe that observes the segment,
 /// completing the absence→presence appearance witness exactly as the non-racing path does — so the
@@ -267,8 +268,8 @@ fn pending_path_event_racing_inflight_probe_repays_and_fires() {
         "racing event emits no probe — the debt is latched",
     );
 
-    // corr1's stale, pre-creation response: app.log still absent → the descent parks and records the
-    // absence half of the witness. The latch repays with a fresh probe that postdates the event.
+    // corr1's stale, pre-creation response: app.log still absent → the descent parks and records
+    // the absence half of the witness. The latch repays with a fresh probe that postdates the event.
     let out = descent_advance(&mut e, pid, None, t1);
     assert!(
         matches!(
@@ -317,14 +318,14 @@ fn pending_path_event_racing_inflight_probe_repays_and_fires() {
 /// effects. The flake shape this pins against: a daemon whose attach path crosses a busy shared
 /// directory (`/tmp`, `$TMPDIR`, `/var/log`) receives STRUCTURE events at the live descent prefix
 /// from churn entirely outside the Sub's scope; a directory event names no segment on either backend,
-/// so treating it as a witness would false-first-fire a never-fired Sub whose anchor sat unchanged on
-/// disk the whole descent. Every probe here finds its segment on first observation — no absence half
-/// is ever observed — so the terminus Seed stays cold no matter how much churn the prefixes saw.
+/// so treating it as a witness would false-first-fire a never-fired Sub whose anchor sat unchanged
+/// on disk the whole descent. Every probe here finds its segment on first observation — no absence
+/// half is ever observed — so the terminus Seed stays cold no matter how much churn the prefixes saw.
 ///
 /// Accepted narrow miss (uniform with the recovery arm's): an anchor created between attach and the
-/// first probe's response is found on first observation and is indistinguishable from having
-/// existed all along — it pins. The window is one probe round-trip; the restart-safe doctrine
-/// already pins the attach-over-existing side of that ambiguity.
+/// first probe's response is found on first observation and is indistinguishable from having existed
+/// all along — it pins. The window is one probe round-trip; the restart-safe doctrine already pins
+/// the attach-over-existing side of that ambiguity.
 #[test]
 fn sibling_churn_during_attach_descent_pins_silently() {
     let mut e = Engine::new();
@@ -409,9 +410,9 @@ fn sibling_churn_during_attach_descent_pins_silently() {
 
 /// A descent prefix that VANISHES mid-descent is a first-hand absence observation for the whole
 /// remaining chain — a path cannot complete through a vanished directory — so the rewound descent's
-/// eventual re-completion is a witnessed appearance: the terminus opens a triggered Seed that
-/// fires. The Vanished-arm counterpart of [`pending_path_witnessed_appearance_fires`]'s
-/// park-observed absence (the two writers of the absence half).
+/// eventual re-completion is a witnessed appearance: the terminus opens a triggered Seed that fires.
+/// The Vanished-arm counterpart of [`pending_path_witnessed_appearance_fires`]'s park-observed
+/// absence (the two writers of the absence half).
 #[test]
 fn prefix_vanished_rewind_then_recompletion_fires() {
     let mut e = Engine::new();
@@ -723,12 +724,12 @@ fn detach_pending_profile_with_inflight_descent_emits_cancel() {
     );
 }
 
-// Anchor terminal event on a Pending Profile pins the no-consumer routing. An absolute attach
-// against an empty Tree puts the FS-root bootstrap between prefix and anchor: prefix is the
-// synthetic `/`, anchor is the scaffolded `/foo`. The two are distinct slots, and the anchor's
-// `watch_demand` is zero (descent hasn't materialized it yet), so a `Removed` at the anchor lands
-// in `EventOnUnwatchedResource` rather than coercing the Pending Profile through
-// `finalize_anchor_lost` / `finish_burst_to_idle`.
+// Anchor terminal event on a Pending Profile pins the no-consumer routing. An absolute attach against
+// an empty Tree puts the FS-root bootstrap between prefix and anchor: prefix is the synthetic `/`,
+// anchor is the scaffolded `/foo`. The two are distinct slots, and the anchor's `watch_demand` is
+// zero (descent hasn't materialized it yet), so a `Removed` at the anchor lands in
+// `EventOnUnwatchedResource` rather than coercing the Pending Profile through `finalize_anchor_lost`
+// / `finish_burst_to_idle`.
 #[test]
 fn pending_profile_event_at_anchor_lands_in_no_consumer_branch() {
     let mut e = Engine::new();
@@ -792,8 +793,8 @@ fn pending_profile_event_at_anchor_lands_in_no_consumer_branch() {
         still_pending,
         "Pending Profile not coerced through anchor-terminal-event path",
     );
-    // The head guard short-circuits before any classifier work, so it emits no watch op (no
-    // spurious Unwatch/Watch on this path).
+    // The head guard short-circuits before any classifier work, so it emits no watch op (no spurious
+    // Unwatch/Watch on this path).
     assert!(
         out.watch_ops.is_empty(),
         "EventOnUnwatchedResource head guard emits no watch op; got {:?}",
@@ -835,9 +836,9 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
     e.tree_mut().set_kind(elsewhere, ResourceKind::Dir);
 
     // Profile A: Pending at /root, descending toward `foo` (does not exist). Drain its initial
-    // descent probe with a no-progress response so its `pending_probe` slot is empty before the
-    // test event — on a busy slot `on_descent_event` latches a re-probe-owed debt rather than
-    // emitting, so the test event would produce no fresh probe to observe.
+    // descent probe with a no-progress response so its `pending_probe` slot is empty before the test
+    // event — on a busy slot `on_descent_event` latches a re-probe-owed debt rather than emitting,
+    // so the test event would produce no fresh probe to observe.
     let req_a = SubAttachRequest::for_anchor(
         "watch-a".into(),
         SubAttachAnchor::Path(PathBuf::from("/root/foo")),
@@ -898,11 +899,11 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
         Some(root_dir),
         "B watches its parent /root for anchor recovery",
     );
-    // B's loss arrives via probe-`Failed` — the path that parks the Profile
-    // (`ProfileState::Parked`) awaiting event-scan recovery. (An observed loss — terminal /
-    // Vanished — on a Profile with a parent re-enters descent inside the loss step and would join
-    // the *descents* class instead; `Failed` is how the recoveries class is populated.) Drive a
-    // Standard burst at the anchor, then fail its verify probe.
+    // B's loss arrives via probe-`Failed` — the path that parks the Profile (`ProfileState::Parked`)
+    // awaiting event-scan recovery. (An observed loss — terminal / Vanished — on a Profile with a
+    // parent re-enters descent inside the loss step and would join the *descents* class instead;
+    // `Failed` is how the recoveries class is populated.) Drive a Standard burst at the anchor, then
+    // fail its verify probe.
     let after_b_seed = b_seed_done + SETTLE;
     e.step(
         Input::FsEvent {

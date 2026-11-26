@@ -73,8 +73,8 @@ fn burst_and_respond(
 /// walk, verify, re-sample, rebase) with a byte-identical kind-appropriate sample (File anchors
 /// `AnchorOk`, Dir anchors an empty subtree), completes any fired effect, and advances the clock a
 /// settle window when the burst waits on a timer. The EMPTY mask `discovery_req` mints under folds
-/// `HashChannel` verdicts, so each certification needs two equal samples. An enumeration mint's
-/// cold Seed pins on its single sample without a clock advance; an appearance mint opens triggered
+/// `HashChannel` verdicts, so each certification needs two equal samples. An enumeration mint's cold
+/// Seed pins on its single sample without a clock advance; an appearance mint opens triggered
 /// (Batching-first, no probe in flight at mint time), so the loop drains its settle window, then
 /// fires and rebases. Returns the instant the Profile rests at Idle.
 fn settle_minted(e: &mut Engine, mid: SubId, kind: Option<EntryKind>, mut at: Instant) -> Instant {
@@ -124,8 +124,8 @@ fn settle_minted(e: &mut Engine, mid: SubId, kind: Option<EntryKind>, mut at: In
 /// Drive every freshly-minted Profile's first-enumeration cold Seed to Idle so later timeline drains
 /// never collide with minted-burst timers. Probe-less minted Profiles are skipped, so the pass never
 /// advances the clock — an enumeration mint's cold Seed pins on its single in-flight sample.
-/// Appearance mints (Batching-first, no probe at mint time) are deliberately *not* converged here: a
-/// test that needs one settled drives it through `settle_minted` at its own timeline position.
+/// Appearance mints (Batching-first, no probe at mint time) are deliberately *not* converged here:
+/// a test that needs one settled drives it through `settle_minted` at its own timeline position.
 fn settle_minted_seeds(e: &mut Engine, template: SubId, at: Instant) {
     let minted: Vec<SubId> = minted_subs_of(e, template).into_values().collect();
     for mid in minted {
@@ -339,12 +339,12 @@ fn minted_under(e: &Engine, sid: SubId, srv: ResourceId, segments: &[&str]) -> S
     minted_subs_of(e, sid)[&slot]
 }
 
-/// A branch that opens mints cold. The baseline holds `b` and `d` as directories the walk was
-/// denied; the next listing reads `b` — the same directory — and `d`, now another directory, beside
-/// `c`, new under a standing `/srv`. The enumeration is established, yet `b/log` was first seen
-/// when its branch opened, so it mints cold: its Seed probes at once and owes no fire. `c/log` and
-/// `d/log` appeared under watch, so each mints as an appearance, its Seed batching first. One
-/// classification feeds the witness and the line.
+/// A branch that opens mints cold. The baseline holds `b` and `d` as directories the walk was denied;
+/// the next listing reads `b` — the same directory — and `d`, now another directory, beside `c`,
+/// new under a standing `/srv`. The enumeration is established, yet `b/log` was first seen when its
+/// branch opened, so it mints cold: its Seed probes at once and owes no fire. `c/log` and `d/log`
+/// appeared under watch, so each mints as an appearance, its Seed batching first. One classification
+/// feeds the witness and the line.
 #[test]
 fn opened_branch_mints_cold_beside_appearances() {
     let mut e = Engine::new();
@@ -403,8 +403,8 @@ fn opened_branch_mints_cold_beside_appearances() {
 }
 
 /// Removal is certified absence. `b` is replaced by a directory the walk is denied: beneath it the
-/// snapshot certifies nothing, so the Sub minted at `b/log` stays. When `b` opens and lists no
-/// `log`, a listing answers for the match, and the Sub is reaped.
+/// snapshot certifies nothing, so the Sub minted at `b/log` stays. When `b` opens and lists no `log`,
+/// a listing answers for the match, and the Sub is reaped.
 #[test]
 fn minted_sub_beneath_a_denied_directory_is_kept_until_a_listing_answers() {
     let mut e = Engine::new();
@@ -445,8 +445,8 @@ fn minted_sub_beneath_a_denied_directory_is_kept_until_a_listing_answers() {
 }
 
 /// Answer `pid`'s walks with `snap` under a certificate naming the directories `denied`, a settle
-/// window apart, until the burst's ceiling ends it. Returns every diagnostic the walks and the
-/// timers between them emitted, and the instant the burst ended.
+/// window apart, until the burst's ceiling ends it. Returns every diagnostic the walks and the timers
+/// between them emitted, and the instant the burst ended.
 fn walk_denied_to_ceiling(
     e: &mut Engine,
     pid: ProfileId,
@@ -667,8 +667,8 @@ fn storm_coalesces_to_one_probe_and_one_reconcile() {
 /// Terminus-internal churn cannot move the discovery proof object — the terminus is the chain's
 /// boundary, and only its membership in the parent's enumeration folds — so the event drops at
 /// routing for the discovery Profile (`EventOutsideProofObject`) and never drives it: no burst, no
-/// terminus-scoped probe, no splice breach. The event reaches the slot at all only through the
-/// minted Profile's co-located anchor FD, and that Profile correctly drives its own burst from it.
+/// terminus-scoped probe, no splice breach. The event reaches the slot at all only through the minted
+/// Profile's co-located anchor FD, and that Profile correctly drives its own burst from it.
 #[test]
 fn terminus_churn_drops_for_discovery_and_drives_only_the_minted_profile() {
     let mut e = Engine::new();
@@ -750,8 +750,8 @@ fn terminus_delete_drives_clamped_reconcile_and_reaps_minted() {
     let minted_pid = pid_of(&e, mid);
 
     // `rmdir` of the Dir terminus: `Removed` on the minted Profile's anchor FD. Anchor-terminal for
-    // the minted Profile (loss-step descent); identity-at-boundary for the discovery Profile
-    // (drives the reconcile — removal authority stays with the reconcile, not the terminal).
+    // the minted Profile (loss-step descent); identity-at-boundary for the discovery Profile (drives
+    // the reconcile — removal authority stays with the reconcile, not the terminal).
     let t1 = now + Duration::from_millis(10);
     let _ = e.step(
         Input::FsEvent {
@@ -799,8 +799,8 @@ fn terminus_delete_drives_clamped_reconcile_and_reaps_minted() {
         "verify probe targets the deepest directory the snapshot lists",
     );
 
-    // The honest payload at the parent: `log` is gone from its enumeration. Clean graft —
-    // membership, not content, is the proof — and the reconcile reaps the minted Sub.
+    // The honest payload at the parent: `log` is gone from its enumeration. Clean graft — membership,
+    // not content, is the proof — and the reconcile reaps the minted Sub.
     let out = respond(&mut e, pid, &dir_snap(&[]), t2);
     assert!(
         !out.diagnostics
@@ -845,9 +845,9 @@ fn terminus_delete_drives_clamped_reconcile_and_reaps_minted() {
 /// A `Symlink` / `Other` chain terminus skips the mint wholesale — no Tree slot, no minted Sub, no
 /// mint→reap churn — narrated once per template lifetime while a real-file sibling in the same pass
 /// mints normally; replacing the symlink with a regular file at the same path then mints (the latch
-/// gates only the diagnostic; kind is read fresh off the snapshot each pass) **and fires**: the
-/// skip arm never enters the enumeration's live set, so the replacement is a latched miss — a
-/// genuine witnessed change, not a re-enumeration.
+/// gates only the diagnostic; kind is read fresh off the snapshot each pass) **and fires**: the skip
+/// arm never enters the enumeration's live set, so the replacement is a latched miss — a genuine
+/// witnessed change, not a re-enumeration.
 #[test]
 fn unsupported_terminus_skips_mint_and_warns_once() {
     let mut e = Engine::new();
@@ -890,8 +890,8 @@ fn unsupported_terminus_skips_mint_and_warns_once() {
         .tree()
         .lookup(Some(srv), "a")
         .expect("chain dir slot (reconciler-watched, independent of minting)");
-    // The post-graft reconciler's diff bookkeeping holds a slot for every created entry — the
-    // skip's claim lives at the registry: nothing anchors there.
+    // The post-graft reconciler's diff bookkeeping holds a slot for every created entry — the skip's
+    // claim lives at the registry: nothing anchors there.
     let skipped = e
         .tree()
         .lookup(Some(a), "current")
@@ -1117,8 +1117,8 @@ fn terminus_vanish_reaps_minted_and_reappearance_remints_fresh() {
 /// Still-matching direction (`a/log → b/log`): one pass reaps the old minted Sub from Idle
 /// (`MatchVanished`, narrated with the *old* path — path identity changed, so fresh history is
 /// correct) and mints the new path. Non-matching direction (the renamed dir leaves the pattern):
-/// reap only. Without the removal pass this shape leaked the old Sub as a permanent anchorless
-/// zombie alongside the double mint.
+/// reap only. Without the removal pass this shape leaked the old Sub as a permanent anchorless zombie
+/// alongside the double mint.
 #[test]
 fn ancestor_rename_reaps_old_minted_and_mints_new() {
     let mut e = Engine::new();
@@ -1130,9 +1130,9 @@ fn ancestor_rename_reaps_old_minted_and_mints_new() {
     settle_minted_seeds(&mut e, sid, now);
     let old_mid = *minted_subs_of(&e, sid).values().next().expect("minted");
 
-    // mv /srv/a /srv/b — kernel-faithful for the minted FD: nothing at all (the minted Profile
-    // stays Idle throughout; this is the no-terminal leak shape). Only the discovery anchor's
-    // STRUCTURE notification fires, and the certified listing then shows the move.
+    // mv /srv/a /srv/b — kernel-faithful for the minted FD: nothing at all (the minted Profile stays
+    // Idle throughout; this is the no-terminal leak shape). Only the discovery anchor's STRUCTURE
+    // notification fires, and the certified listing then shows the move.
     let chain_b = dir_snap_nested(&[("b", covered(dir_snap_nested(&[("log", uncovered(11))])))]);
     let t1 = now + Duration::from_millis(10);
     let (moved, t2) = burst_and_respond(&mut e, pid, srv, &chain_b, t1);
@@ -1193,12 +1193,13 @@ fn ancestor_rename_reaps_old_minted_and_mints_new() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// An atomic replace of a matched terminus is identical to static: the terminal re-enters descent in
-/// the loss step (Sub and Profile survive with identity intact), the descent finds the replacement,
-/// the triggered Seed re-fires (`RecoveryFire` — fire history preserved), and the same-step reconcile
-/// neither reaps nor double-mints the still-live terminus (anchor-slot membership keeps it in `M ∩ T`
-/// while the minted Profile is mid-recovery). The template carries a content mask (the user's
-/// file-watch shape) — single-sample verdicts, unlike the EMPTY-mask fixture template.
+/// An atomic replace of a matched terminus is identical to static: the terminal re-enters descent
+/// in the loss step (Sub and Profile survive with identity intact), the descent finds the
+/// replacement, the triggered Seed re-fires (`RecoveryFire` — fire history preserved), and the
+/// same-step reconcile neither reaps nor double-mints the still-live terminus (anchor-slot membership
+/// keeps it in `M ∩ T` while the minted Profile is mid-recovery). The template carries a content
+/// mask (the user's file-watch shape) — single-sample verdicts, unlike the EMPTY-mask fixture
+/// template.
 #[test]
 fn terminus_replace_keeps_minted_sub_and_re_fires() {
     let mut e = Engine::new();
@@ -1376,8 +1377,8 @@ fn a_minted_subs_per_file_fire_and_late_completion_name_its_template() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// Detaching the discovery template cascades: the template detaches under the caller's reason,
-/// every minted Sub under `TemplateDetached`, and every Profile reaps.
+/// Detaching the discovery template cascades: the template detaches under the caller's reason, every
+/// minted Sub under `TemplateDetached`, and every Profile reaps.
 #[test]
 fn detach_discovery_template_cascades_to_minted_subs() {
     let mut e = Engine::new();
@@ -1604,8 +1605,8 @@ fn prefix_rm_rf_recovery_preserves_minted_sub_without_per_file_warning() {
     );
     assert!(e.subs().get(sid).is_some(), "template survives anchor loss");
 
-    // Reappearance: the parent's StructureChanged re-enters descent; one hop materialises the
-    // anchor and opens the recovery Seed.
+    // Reappearance: the parent's StructureChanged re-enters descent; one hop materialises the anchor
+    // and opens the recovery Seed.
     let t2 = t1 + Duration::from_millis(10);
     outs.push(e.step(
         Input::FsEvent {
@@ -1745,13 +1746,13 @@ fn overflow_reseed_recovers_missed_mints() {
 
 /// Overflow membership is **anchors-only**, gap-case direction: a Profile holding descendant-FD
 /// contributions *inside* an `OverflowScope::Resource(r)` scope, anchor above `r`, is NOT reseeded
-/// — no probe, no burst — even though events under `r` are exactly what the overflow window may
-/// have dropped for it. Asserted as chosen: `profiles_in_subtree` walks anchor ancestry only. The
-/// alternative a per-stream backend will force is contribution-based membership — "does this
-/// Profile hold any contribution at-or-below `r`", enumerable off the Tree's per-Resource
-/// contribution map (`ContribKey` is fully Profile-keyed, no `covers` calls). The case stays latent
-/// today because the Profile anchored *below* `r` reseeds through the same rule, usually
-/// re-observing the shared subtree — the second half of the test pins that reach.
+/// — no probe, no burst — even though events under `r` are exactly what the overflow window may have
+/// dropped for it. Asserted as chosen: `profiles_in_subtree` walks anchor ancestry only. The
+/// alternative a per-stream backend will force is contribution-based membership — "does this Profile
+/// hold any contribution at-or-below `r`", enumerable off the Tree's per-Resource contribution map
+/// (`ContribKey` is fully Profile-keyed, no `covers` calls). The case stays latent today because
+/// the Profile anchored *below* `r` reseeds through the same rule, usually re-observing the shared
+/// subtree — the second half of the test pins that reach.
 #[test]
 fn overflow_resource_scope_skips_profile_holding_descendant_fds_inside_scope() {
     let mut e = Engine::new();
@@ -1937,8 +1938,8 @@ fn mid_burst_discovery_descendant_does_not_drain_covering_profile() {
     settle_minted_seeds(&mut e, tpl_sid, seed_done);
 
     // One event at the discovery anchor opens both bursts (outer covers it recursively); the minted
-    // Profile (deeper) stays Idle. Answer the outer verify first, while discovery is still
-    // mid-burst Verifying.
+    // Profile (deeper) stays Idle. Answer the outer verify first, while discovery is still mid-burst
+    // Verifying.
     let t1 = seed_done + Duration::from_millis(10);
     let _ = e.step(
         Input::FsEvent {
@@ -2018,9 +2019,9 @@ fn mid_burst_minted_descendant_still_drains_through_discovery() {
 }
 
 /// A static Sub joining the minted identity makes the minted Profile mixed; anchor loss is the same
-/// uniform recovery descent regardless, and the pin is the registry seam: the projection keys
-/// minted Subs only (the static co-resident never confuses it), the recovering terminus is back in
-/// the certified set so the Sub is no removal victim, and the dedup finds it still attached — no
+/// uniform recovery descent regardless, and the pin is the registry seam: the projection keys minted
+/// Subs only (the static co-resident never confuses it), the recovering terminus is back in the
+/// certified set so the Sub is no removal victim, and the dedup finds it still attached — no
 /// double-mint after recovery.
 #[test]
 fn mixed_profile_at_minted_anchor_survives_anchor_loss_without_remint() {
@@ -2033,8 +2034,8 @@ fn mixed_profile_at_minted_anchor_survives_anchor_loss_without_remint() {
     let mid = *minted_subs_of(&e, sid).values().next().expect("minted");
     let x = e.tree().lookup(Some(data), "x").expect("terminus slot");
 
-    // Join the minted Profile with a static Sub of the identical identity (what `discovery_req`
-    // mints under: recursive Subtree, EMPTY mask, MAX_SETTLE).
+    // Join the minted Profile with a static Sub of the identical identity (what `discovery_req` mints
+    // under: recursive Subtree, EMPTY mask, MAX_SETTLE).
     let (_, co_pid) = attach(
         &mut e,
         "co-resident",
@@ -2172,8 +2173,8 @@ fn fanout_threshold_warns_exactly_once() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// A Sub kept beneath a denied directory is live, so it counts toward the fan-out: a pass that
-/// mints one match beside a thousand kept ones crosses the threshold.
+/// A Sub kept beneath a denied directory is live, so it counts toward the fan-out: a pass that mints
+/// one match beside a thousand kept ones crosses the threshold.
 #[test]
 fn subs_kept_beneath_a_denied_directory_count_toward_fanout() {
     let mut e = Engine::new();
@@ -2311,8 +2312,8 @@ fn a_prefix_found_at_once_enumerates_cold() {
         .lookup(None, FS_ROOT_SEGMENT)
         .expect("FS root bootstrapped by the pending attach");
 
-    // A change at the prefix's parent while the attach-time probe is in flight; the probe then
-    // finds the prefix present, never having seen it absent.
+    // A change at the prefix's parent while the attach-time probe is in flight; the probe then finds
+    // the prefix present, never having seen it absent.
     let t1 = now + Duration::from_millis(10);
     let _ = e.step(
         Input::FsEvent {
@@ -2443,8 +2444,8 @@ fn root_pattern_installs_no_parent_edge() {
 }
 
 /// Detaching one of two same-pattern templates cascades only its own minted set: the sibling
-/// template, its minted Sub, the shared discovery Profile, and the shared minted Profile all
-/// survive, and the next reconcile is still a dedup no-op for the survivor.
+/// template, its minted Sub, the shared discovery Profile, and the shared minted Profile all survive,
+/// and the next reconcile is still a dedup no-op for the survivor.
 #[test]
 fn second_template_detach_leaves_siblings_minted_set_intact() {
     let mut e = Engine::new();
@@ -2510,8 +2511,8 @@ fn minted_seed_burst_deadline_derives_from_reconcile_now() {
     let now = Instant::now();
     let (sid, pid) = attach_discovery(&mut e, "disc", "/data/*", now);
 
-    // Answer the cold probe a full second after attach: a deadline threaded from any earlier
-    // instant (the attach, the event) would fall due before the boundary probed below.
+    // Answer the cold probe a full second after attach: a deadline threaded from any earlier instant
+    // (the attach, the event) would fall due before the boundary probed below.
     let t_mint = now + Duration::from_secs(1);
     let _ = respond(&mut e, pid, &dir_snap(&[("x", EntryKind::Dir, 1)]), t_mint);
     let mid = *minted_subs_of(&e, sid).values().next().expect("minted");
@@ -2532,9 +2533,9 @@ fn minted_seed_burst_deadline_derives_from_reconcile_now() {
 }
 
 /// A `Vanished` descent response releases only the descender's prefix claim: a discovery Profile
-/// anchored at the shared prefix keeps its watch (no `Unwatch`, demand drops by exactly the
-/// descent's contribution) and its own lifecycle is untouched, while the descender rewinds to the
-/// FS root and re-probes.
+/// anchored at the shared prefix keeps its watch (no `Unwatch`, demand drops by exactly the descent's
+/// contribution) and its own lifecycle is untouched, while the descender rewinds to the FS root and
+/// re-probes.
 #[test]
 fn descent_vanish_preserves_co_resident_discovery_contribution() {
     let mut e = Engine::new();

@@ -1,20 +1,20 @@
 //! `DriverState` — process-level facts the engine driver carries for the lifetime of the daemon.
 //! Owned by [`super::EngineDriver`]; mutated only through edge methods on this type.
 //!
-//! The struct collects load-bearing process metadata that has no natural home on `Engine`,
-//! `Loader`, or any channel bundle:
+//! The struct collects load-bearing process metadata that has no natural home on `Engine`, `Loader`,
+//! or any channel bundle:
 //!
 //! - **Start instants** (`start_instant`, `start_wall`) — captured once at [`DriverState::new`],
 //!   invariant for the process lifetime. `start_instant` is monotonic (`Instant`) for
-//!   elapsed-since-boot arithmetic; `start_wall` is wall-clock (`SystemTime`) for
-//!   operator-meaningful boot display. Both are sampled inside the constructor so wall and
-//!   monotonic agree to within their own nanosecond resolution.
+//!   elapsed-since-boot arithmetic; `start_wall` is wall-clock (`SystemTime`) for operator-meaningful
+//!   boot display. Both are sampled inside the constructor so wall and monotonic agree to within
+//!   their own nanosecond resolution.
 //! - **Reload counter** (`reload_count`) — bumped by [`DriverState::record_reload`] on every
 //!   successful reload (i.e., after `read_and_parse_config` returns `Some`; covers both empty-diff
-//!   and apply-diff branches). A parse-fail reload short-circuits upstream of the bump site and
-//!   never reaches the record.
-//! - **Most-recent reload attribution** (`last_reload`) — wall-clock and trigger lifted into a
-//!   single [`LastReload`] observable; `None` before the first reload fires, `Some` after.
+//!   and apply-diff branches). A parse-fail reload short-circuits upstream of the bump site and never
+//!   reaches the record.
+//! - **Most-recent reload attribution** (`last_reload`) — wall-clock and trigger lifted into a single
+//!   [`LastReload`] observable; `None` before the first reload fires, `Some` after.
 //! - **Socket path** (`socket_path`) — the UNIX-socket path the IPC server bound to. Set once in
 //!   [`DriverState::new`] from the path `App::run` passed to `sockpath::bind_socket_atomic`;
 //!   invariant for the daemon's lifetime (no setter). Read by the IPC `status` projection so
@@ -28,10 +28,10 @@
 //!
 //! # Visibility
 //!
-//! `pub(crate)` so [`crate::driver::ipc::project`] can project the recorded facts into the
-//! wire-side `StatusResponse`. The fields are `pub(crate)` for the same reason — projection reads
-//! them directly. The write-once-via-`record_reload` invariant for the counters survives because
-//! the *driver* owns the only `&mut DriverState` (it is a field of [`super::EngineDriver`]); a
+//! `pub(crate)` so [`crate::driver::ipc::project`] can project the recorded facts into the wire-side
+//! `StatusResponse`. The fields are `pub(crate)` for the same reason — projection reads them
+//! directly. The write-once-via-`record_reload` invariant for the counters survives because the
+//! *driver* owns the only `&mut DriverState` (it is a field of [`super::EngineDriver`]); a
 //! `&DriverState` borrow handed out cross-module cannot mutate.
 
 use crate::ipc::protocol::WireLastReload;
@@ -78,10 +78,10 @@ impl DriverState {
         }
     }
 
-    /// Record a successful reload — counter + attribution move together. Bumps
-    /// [`Self::reload_count`] (with `saturating_add` guarding the practically-unreachable
-    /// `u64`-overflow case) and stamps [`Self::last_reload`] with the wall-clock at *this call*
-    /// plus the caller's `trigger`, packed as one [`LastReload`].
+    /// Record a successful reload — counter + attribution move together. Bumps [`Self::reload_count`]
+    /// (with `saturating_add` guarding the practically-unreachable `u64`-overflow case) and stamps
+    /// [`Self::last_reload`] with the wall-clock at *this call* plus the caller's `trigger`, packed
+    /// as one [`LastReload`].
     ///
     /// Sole call site is `EngineDriver::dispatch_reload`, immediately after `read_and_parse_config`
     /// returns `Some`. Both the empty-diff branch (operator re-saved unchanged bytes; pulse still
@@ -96,9 +96,9 @@ impl DriverState {
     }
 }
 
-/// Most-recent successful reload — wall-clock + attribution as one observable. The struct carries the
-/// invariant "both fields present iff at least one reload has fired"; packing both fields into one
-/// struct makes the invariant structural (the impossible `(Some(at), None)` / `(None, Some(via))`
+/// Most-recent successful reload — wall-clock + attribution as one observable. The struct carries
+/// the invariant "both fields present iff at least one reload has fired"; packing both fields into
+/// one struct makes the invariant structural (the impossible `(Some(at), None)` / `(None, Some(via))`
 /// products are unconstructable). [`DriverState::record_reload`] is the sole constructor; the
 /// wire-side mirror [`WireLastReload`] keeps the JSON shape flat via `#[serde(flatten)]`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -144,14 +144,14 @@ pub(crate) enum ReloadTrigger {
     Ipc,
     /// Startup-TOCTOU drift detected by `App::run`: the on-disk `FileMeta` changed between the
     /// initial config read and the config-watcher's registration window. The driver runs the same
-    /// reload pipeline as SIGHUP, with `Startup` attribution so operators can distinguish
-    /// "boot-time drift caught and applied" from a subsequent operator-driven reload.
+    /// reload pipeline as SIGHUP, with `Startup` attribution so operators can distinguish "boot-time
+    /// drift caught and applied" from a subsequent operator-driven reload.
     Startup,
 }
 
 /// Projection lives at the source so the wire layer stays a leaf (no `crate::driver` import in
-/// [`crate::ipc::wire`]) and a new [`ReloadTrigger`] variant fails compilation here, at the
-/// variant's declaration site.
+/// [`crate::ipc::wire`]) and a new [`ReloadTrigger`] variant fails compilation here, at the variant's
+/// declaration site.
 impl From<ReloadTrigger> for WireReloadTrigger {
     fn from(t: ReloadTrigger) -> Self {
         match t {

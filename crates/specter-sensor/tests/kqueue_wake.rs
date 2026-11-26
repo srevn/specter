@@ -37,9 +37,9 @@ fn drain_ready_returns_promptly_on_empty_queue() {
     drop(w);
 }
 
-/// A `mio::Poll` registered on the watcher's `AsFd::as_fd()` observes the canonical "register →
-/// poll → drain → idle" sequence the production driver exercises against a real kqueue fd. BSD twin
-/// of the `MockFsWatcher::as_fd_becomes_readable_after_inject` testkit test — pins that the trait's
+/// A `mio::Poll` registered on the watcher's `AsFd::as_fd()` observes the canonical "register → poll
+/// → drain → idle" sequence the production driver exercises against a real kqueue fd. BSD twin of
+/// the `MockFsWatcher::as_fd_becomes_readable_after_inject` testkit test — pins that the trait's
 /// readiness contract holds against the kernel-backed fd.
 #[test]
 fn poll_then_drain_returns_kernel_events() {

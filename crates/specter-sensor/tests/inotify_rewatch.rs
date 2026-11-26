@@ -1,11 +1,12 @@
-//! Re-registration on mask change — the per-resource `(wd, mask)` cache + the kernel's "replace
-//! mask" semantics (per `inotify(7)`: "If the pathname referred to by pathname is already being
-//! watched, then the existing watch is updated").
+//! Re-registration on mask change — the per-resource `(wd, mask)` cache + the kernel's "replace mask"
+//! semantics (per `inotify(7)`: "If the pathname referred to by pathname is already being watched,
+//! then the existing watch is updated").
 //!
 //! These tests exercise [`InotifyWatcher::watch`]'s re-watch path: a second `watch()` call on a
 //! resource that already holds an entry. The watcher diffs the cached mask against the translator's
-//! output for the new `(events, kind)` and re-registers via `inotify_add_watch` when they differ; the
-//! unchanged-mask fast path skips the syscall entirely. Mirror of `kqueue_rewatch.rs`. Linux only.
+//! output for the new `(events, kind)` and re-registers via `inotify_add_watch` when they differ;
+//! the unchanged-mask fast path skips the syscall entirely. Mirror of `kqueue_rewatch.rs`. Linux
+//! only.
 
 // `iter_with_drain`: `buf.drain(..)` is the canonical way to consume a `Vec` while preserving its
 // allocation across drain-loop iterations.
@@ -93,9 +94,9 @@ fn drain_for(w: &mut InotifyWatcher, dur: Duration) -> Vec<(ResourceId, FsEvent)
 }
 
 /// Re-watch with a widened mask should make new event classes deliverable. Specifically: a
-/// CONTENT-only registration filters out `MetadataChanged`; widening to `CONTENT | METADATA` (a
-/// fresh `Watch` op the engine emits when `Resource.events_union` changes) must re-register the wd
-/// with `IN_ATTRIB`, and a subsequent chmod then fires `MetadataChanged`.
+/// CONTENT-only registration filters out `MetadataChanged`; widening to `CONTENT | METADATA` (a fresh
+/// `Watch` op the engine emits when `Resource.events_union` changes) must re-register the wd with
+/// `IN_ATTRIB`, and a subsequent chmod then fires `MetadataChanged`.
 #[test]
 fn rewatch_with_widened_mask_delivers_new_classes() {
     let tmp = TempDir::new().unwrap();
@@ -126,9 +127,9 @@ fn rewatch_with_widened_mask_delivers_new_classes() {
         "CONTENT-only mask must not deliver MetadataChanged; got {early:?}"
     );
 
-    // Re-register with widened mask. Same path, same resource — the watcher takes the re-watch
-    // path, diffs cached mask vs new, and re-registers via `inotify_add_watch` with `IN_ATTRIB` now
-    // in the mask. The kernel's "replace mask" semantics return the same wd for the same inode, so
+    // Re-register with widened mask. Same path, same resource — the watcher takes the re-watch path,
+    // diffs cached mask vs new, and re-registers via `inotify_add_watch` with `IN_ATTRIB` now in
+    // the mask. The kernel's "replace mask" semantics return the same wd for the same inode, so
     // `wd == prior.wd` and the inode-swap branch does not fire.
     w.watch(
         r,
@@ -156,10 +157,10 @@ fn rewatch_with_widened_mask_delivers_new_classes() {
     drop(w);
 }
 
-/// Re-watch with a narrowed mask should drop classes from the registration. Specifically: an
-/// initial `STRUCTURE | METADATA` registration on a Dir delivers both `StructureChanged` on child
-/// write and `MetadataChanged` on chmod. Re-registering with `STRUCTURE` only must remove
-/// `IN_ATTRIB`, so chmod no longer fires.
+/// Re-watch with a narrowed mask should drop classes from the registration. Specifically: an initial
+/// `STRUCTURE | METADATA` registration on a Dir delivers both `StructureChanged` on child write and
+/// `MetadataChanged` on chmod. Re-registering with `STRUCTURE` only must remove `IN_ATTRIB`, so chmod
+/// no longer fires.
 #[test]
 fn rewatch_with_narrowed_mask_drops_classes() {
     let tmp = TempDir::new().unwrap();
@@ -266,12 +267,12 @@ fn rewatch_with_same_mask_preserves_registration() {
 ///
 /// Setup mirrors the failing lifecycle: fresh-watch a Unix domain socket (`fstat` collapses non-Dir
 /// / non-regular kinds to `Unknown`), unlink + recreate a Dir at the same path *without* an
-/// intervening drain so `by_resource[r]` keeps its Unknown cache, then rewatch with events that
-/// force `compute_install_mask` to differ under `cached_kind = Unknown`. The broken behaviour
-/// collapses `STRUCTURE | METADATA × Unknown` to File-shape (`effective = File` drops STRUCTURE;
-/// only `IN_ATTRIB` is added) and installs that on the Dir — silently dropping `IN_CREATE |
-/// IN_DELETE | IN_MOVED_*`. The fix reopens + fstats first, derives the mask from `observed = Dir`,
-/// and installs `IN_CREATE` etc., so a child file create fires `StructureChanged` on `r`.
+/// intervening drain so `by_resource[r]` keeps its Unknown cache, then rewatch with events that force
+/// `compute_install_mask` to differ under `cached_kind = Unknown`. The broken behaviour collapses
+/// `STRUCTURE | METADATA × Unknown` to File-shape (`effective = File` drops STRUCTURE; only
+/// `IN_ATTRIB` is added) and installs that on the Dir — silently dropping `IN_CREATE | IN_DELETE |
+/// IN_MOVED_*`. The fix reopens + fstats first, derives the mask from `observed = Dir`, and installs
+/// `IN_CREATE` etc., so a child file create fires `StructureChanged` on `r`.
 #[test]
 fn rewatch_after_unknown_cache_with_kind_flip_installs_observed_mask() {
     use std::os::unix::net::UnixListener;
@@ -279,9 +280,9 @@ fn rewatch_after_unknown_cache_with_kind_flip_installs_observed_mask() {
     let tmp = TempDir::new().unwrap();
     let anchor = tmp.path().join("anchor");
 
-    // Bind a Unix domain socket at `anchor`. The fstat of an `O_PATH` fd over a socket inode
-    // returns `Unknown` (S_IFSOCK is neither S_IFDIR nor S_IFREG), so the watcher caches `kind =
-    // Unknown` on commit.
+    // Bind a Unix domain socket at `anchor`. The fstat of an `O_PATH` fd over a socket inode returns
+    // `Unknown` (S_IFSOCK is neither S_IFDIR nor S_IFREG), so the watcher caches `kind = Unknown`
+    // on commit.
     let listener = UnixListener::bind(&anchor).expect("bind unix socket");
 
     let mut w = InotifyWatcher::new().unwrap();
@@ -300,8 +301,8 @@ fn rewatch_after_unknown_cache_with_kind_flip_installs_observed_mask() {
     //
     // No `drain_ready` between these steps and the rewatch below — draining would consume the
     // IN_IGNORED, the `IN_IGNORED` arm in `drain_ready` would clear `by_resource[r]`, and the next
-    // watch would route through fresh-watch (not rewatch). The bug only bites when rewatch
-    // re-enters with the Unknown cache intact.
+    // watch would route through fresh-watch (not rewatch). The bug only bites when rewatch re-enters
+    // with the Unknown cache intact.
     drop(listener);
     std::fs::remove_file(&anchor).unwrap();
     std::fs::create_dir(&anchor).unwrap();
@@ -309,9 +310,9 @@ fn rewatch_after_unknown_cache_with_kind_flip_installs_observed_mask() {
     // Rewatch with `STRUCTURE | METADATA`. Under `cached_kind = Unknown` (broken path), `STRUCTURE`
     // collapses to no-op (effective File is structure-blind) and `METADATA` adds `IN_ATTRIB` —
     // install mask differs from the prior, forcing the pre-fix code to reopen and install the
-    // File-shape mask on the Dir. Under the fix, the slow path observes `Dir`, computes the
-    // Dir-shape mask (`IN_CREATE | IN_DELETE | IN_MOVED_* | IN_ATTRIB | IN_ONLYDIR` over the
-    // identity floor), and refreshes the cached kind to Dir.
+    // File-shape mask on the Dir. Under the fix, the slow path observes `Dir`, computes the Dir-shape
+    // mask (`IN_CREATE | IN_DELETE | IN_MOVED_* | IN_ATTRIB | IN_ONLYDIR` over the identity floor),
+    // and refreshes the cached kind to Dir.
     w.watch(
         r,
         &anchor,

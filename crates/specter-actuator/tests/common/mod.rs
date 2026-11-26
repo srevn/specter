@@ -30,9 +30,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 /// Test adapter that lifts the actuator's `(sub, key, outcome)` triple into the engine-side
-/// `Input::EffectComplete` envelope so the test's `Receiver<Input>` continues to observe
-/// completions in the pre-trait shape. Mirrors the bin's `DriverEffectSender` without dragging in
-/// the bin's transport identity.
+/// `Input::EffectComplete` envelope so the test's `Receiver<Input>` continues to observe completions
+/// in the pre-trait shape. Mirrors the bin's `DriverEffectSender` without dragging in the bin's
+/// transport identity.
 struct TestEngineIn(Sender<Input>);
 
 impl EffectCompleteSender for TestEngineIn {
@@ -160,9 +160,9 @@ impl Drop for Harness {
 /// Wrap a `Vec<String>` argv as a literal-only single-op [`ActionProgram`].
 ///
 /// The resolver renders each `ArgTemplate(Literal(s))` as the slot `s`, so `literal_program(["foo",
-/// "bar"])` resolves to `argv = ["foo", "bar"]` byte-for-byte. Used by the integration helpers
-/// below to satisfy `Effect.program: Arc<ActionProgram>` while keeping fixture call sites'
-/// `Vec<String>` ergonomics intact.
+/// "bar"])` resolves to `argv = ["foo", "bar"]` byte-for-byte. Used by the integration helpers below
+/// to satisfy `Effect.program: Arc<ActionProgram>` while keeping fixture call sites' `Vec<String>`
+/// ergonomics intact.
 fn literal_program(argv: Vec<String>) -> Arc<ActionProgram> {
     single_exec_program(
         argv.into_iter()

@@ -4,8 +4,8 @@
 //! [`SubRegistryDiff`](specter_core::SubRegistryDiff), [`Cli`]. No engine or actor deps.
 
 // Config is pure data — TOML parse + clap argv + a SubRegistryDiff. No FFI need exists or is
-// foreseeable; `forbid` is the strictest level (cannot be locally overridden by `#[allow]`),
-// matching the discipline of `core` / `engine`.
+// foreseeable; `forbid` is the strictest level (cannot be locally overridden by `#[allow]`), matching
+// the discipline of `core` / `engine`.
 #![forbid(unsafe_code)]
 
 mod action;

@@ -1,6 +1,6 @@
-//! Per-input dispatch tests. Each `(state, input)` cell of the transition table gets a focused
-//! test. Goes hand-in-hand with the integration suite at `tests/integration.rs` which covers
-//! full-lifecycle flows.
+//! Per-input dispatch tests. Each `(state, input)` cell of the transition table gets a focused test.
+//! Goes hand-in-hand with the integration suite at `tests/integration.rs` which covers full-lifecycle
+//! flows.
 
 // Tests prioritize readability over the workspace's pedantic style budget.
 #![allow(
@@ -42,8 +42,8 @@ const MAX_SETTLE: Duration = Duration::from_secs(6);
 /// matches production `EffectScope::SubtreeRoot` Profiles. CONTENT in the mask sets
 /// `events_witness_quiescence == true`, so a single Authoritative sample closes the N=2 hash-channel
 /// obligation (witness = `EventsReliable`). It also sets `has_per_file_fds = true`, so the reconciler
-/// emits per-file FD `WatchOp`s for File children. Tests that drive the N=2 hash channel directly or
-/// that pin "no per-file FDs" opt into `ClassSet::EMPTY` (or a CONTENT-free mask) inline.
+/// emits per-file FD `WatchOp`s for File children. Tests that drive the N=2 hash channel directly
+/// or that pin "no per-file FDs" opt into `ClassSet::EMPTY` (or a CONTENT-free mask) inline.
 const DEFAULT_EVENTS: ClassSet = ClassSet::DEFAULT_SUBTREE_ROOT;
 const NO_EVENTS: ClassSet = ClassSet::EMPTY;
 
@@ -119,16 +119,16 @@ fn file_tree_snap(kind: EntryKind, size: u64, mtime: SystemTime, inode: u64) -> 
     LeafEntry::synthetic(kind, size, mtime, FsIdentity::synthetic(inode, 0))
 }
 
-/// Drive a fresh-attach cold-arm Seed burst from `Active(PreFire(Verifying))` through its
-/// quiescence verdict to pinned `Idle`, pinning against `snap`. After this, `Profile.current` and
+/// Drive a fresh-attach cold-arm Seed burst from `Active(PreFire(Verifying))` through its quiescence
+/// verdict to pinned `Idle`, pinning against `snap`. After this, `Profile.current` and
 /// `Profile.baseline` are set to `snap`.
 ///
 /// The cold-arm Seed burst pins on the first `Authoritative` response: a cold-Seed `SilentPin`
-/// consequence does not owe quiescence proof, so the witness is
-/// [`QuiescenceWitness::EventsReliable`] and the fold folds to `Stable(StableReason::Natural)`;
-/// dispatch reaches `SilentPin` (no fired Subs, no drift) and finishes to Idle. The cold-arm
-/// Verifying-first contract puts the probe in flight at burst construction, so the helper answers
-/// it directly — no Batching settle expiry, no second sample.
+/// consequence does not owe quiescence proof, so the witness is [`QuiescenceWitness::EventsReliable`]
+/// and the fold folds to `Stable(StableReason::Natural)`; dispatch reaches `SilentPin` (no fired
+/// Subs, no drift) and finishes to Idle. The cold-arm Verifying-first contract puts the probe in
+/// flight at burst construction, so the helper answers it directly — no Batching settle expiry, no
+/// second sample.
 ///
 /// Returns the pinning response's [`StepOutput`] so callers can assert the Seed-completion emission
 /// (a fresh Seed never fires, so it is effect-empty).
@@ -337,11 +337,12 @@ fn dispatch_burst_outcome_classifies_kind_on_first_seed_anchor() {
     let r = e.tree.ensure_root("anchor", ResourceRole::User);
     // Resource is Unknown ⇒ Profile.kind starts as None. The Seed burst emits `ProbeRequest::Subtree`
     // per the unified fallback (Subtree is the safe default for unclassified anchors). The walker,
-    // finding a regular file at the path, replies with `Vanished` in production (kind mismatch). For
-    // this test we synthesise an `AnchorOk(leaf)` response — a deliberate deviation that exercises
-    // the dispatch_burst_outcome classification path for AnchorOk; the walker never produces this
-    // response shape against a Subtree request, but the engine's classification logic must still fall
-    // out correctly if it ever does (defense-in-depth + symmetry with the SubtreeProven arm).
+    // finding a regular file at the path, replies with `Vanished` in production (kind mismatch).
+    // For this test we synthesise an `AnchorOk(leaf)` response — a deliberate deviation that
+    // exercises the dispatch_burst_outcome classification path for AnchorOk; the walker never
+    // produces this response shape against a Subtree request, but the engine's classification logic
+    // must still fall out correctly if it ever does (defense-in-depth + symmetry with the
+    // SubtreeProven arm).
     let req = SubAttachRequest::for_anchor(
         "test-sub".into(),
         SubAttachAnchor::Resource(r),
@@ -383,12 +384,12 @@ fn dispatch_burst_outcome_classifies_kind_on_first_seed_anchor() {
 }
 
 /// Walker contract: a `Pending` Profile (descent state) probes a Dir prefix with
-/// `ProbeRequest::Descent`; the only valid responses are `SegmentObserved`, `Vanished`, or
-/// `Failed`. An `AnchorOk` in this slot is a walker-side bug — descent never queries an anchor's
-/// `lstat` shape. `DescentOutcome::try_from` rejects it at the demux seam and the Descent arm
-/// routes to `walker_contract_violated_descent`, which fires a `debug_assert!` in dev/CI and, in
-/// release, emits `WalkerContractViolated` and abandons the descent prefix (no re-probe loop
-/// against a buggy walker). The test pins the dev/CI panic.
+/// `ProbeRequest::Descent`; the only valid responses are `SegmentObserved`, `Vanished`, or `Failed`.
+/// An `AnchorOk` in this slot is a walker-side bug — descent never queries an anchor's `lstat` shape.
+/// `DescentOutcome::try_from` rejects it at the demux seam and the Descent arm routes to
+/// `walker_contract_violated_descent`, which fires a `debug_assert!` in dev/CI and, in release, emits
+/// `WalkerContractViolated` and abandons the descent prefix (no re-probe loop against a buggy
+/// walker). The test pins the dev/CI panic.
 ///
 /// Disabled in release builds via the standard `cfg_attr` discipline, mirroring
 /// `mint_probe_correlation_panics_on_double_open`.
@@ -448,16 +449,16 @@ fn dispatch_descent_with_anchor_outcome_is_walker_contract_violation() {
 /// Walker contract: a Verifying / Rebasing probe response carries a quiescence observation
 /// (`AnchorOk` / `SubtreeProven` / `Vanished` / `Failed`). A `SegmentObserved` outcome — the
 /// descent-route shape — is a walker-side bug: the request was a `Subtree` quiescence read, not a
-/// structural segment query. `ProofOutcome::try_from` rejects it at the demux seam and the
-/// Verifying arm routes to `walker_contract_violated_burst`, which fires a `debug_assert!` in
-/// dev/CI and, in release, emits `WalkerContractViolated` and finishes the burst to Idle
-/// (anchor/baseline preserved). The test pins the dev/CI panic.
+/// structural segment query. `ProofOutcome::try_from` rejects it at the demux seam and the Verifying
+/// arm routes to `walker_contract_violated_burst`, which fires a `debug_assert!` in dev/CI and, in
+/// release, emits `WalkerContractViolated` and finishes the burst to Idle (anchor/baseline
+/// preserved). The test pins the dev/CI panic.
 ///
-/// `profile_probe_gate` does not filter on outcome variant (it routes on owner state +
-/// correlation), so this payload-shape violation is the kind the public test surface can
-/// synthesise. The owner-split removed every cross-owner defensive arm at the type level (no
-/// `Enumerating` on the Profile side), so the only surviving runtime guards are these
-/// `WalkerContractViolation` payload-shape parses.
+/// `profile_probe_gate` does not filter on outcome variant (it routes on owner state + correlation),
+/// so this payload-shape violation is the kind the public test surface can synthesise. The
+/// owner-split removed every cross-owner defensive arm at the type level (no `Enumerating` on the
+/// Profile side), so the only surviving runtime guards are these `WalkerContractViolation`
+/// payload-shape parses.
 ///
 /// Disabled in release builds via the standard `cfg_attr` discipline, mirroring
 /// `dispatch_descent_with_anchor_outcome_is_walker_contract_violation`.
@@ -487,12 +488,12 @@ fn certify_segment_observed_outcome_is_walker_contract_violation() {
     );
 }
 
-/// `certify_probe_response`'s inline kind guard: a `Profile.kind = Some(File)` receiving a
-/// Dir-shaped response is a structurally unreachable kind divergence (the typed `ProbeRequest`
-/// chain emits `AnchorFile` for File-kinded Profiles, and the walker collapses any Dir↔File swap to
-/// `Vanished` by construction). The guard catches the case at the verdict floor and routes through
-/// [`Engine::finalize_anchor_lost`] rather than misroute the Dir snapshot onto a File-kinded
-/// Profile (which would leak watch contributions and break the cross-field invariant).
+/// `certify_probe_response`'s inline kind guard: a `Profile.kind = Some(File)` receiving a Dir-shaped
+/// response is a structurally unreachable kind divergence (the typed `ProbeRequest` chain emits
+/// `AnchorFile` for File-kinded Profiles, and the walker collapses any Dir↔File swap to `Vanished`
+/// by construction). The guard catches the case at the verdict floor and routes through
+/// [`Engine::finalize_anchor_lost`] rather than misroute the Dir snapshot onto a File-kinded Profile
+/// (which would leak watch contributions and break the cross-field invariant).
 #[test]
 #[cfg_attr(
     not(debug_assertions),
@@ -587,8 +588,8 @@ fn attach_sub_existing_profile_bumps_refcount() {
     assert!(pre_state, "first attach went Active");
     let pre_count = e.subs.at(pid).len();
 
-    // Second attach with the same config_hash — must match the fixture's events mask, since
-    // `events` folds into `config_hash`.
+    // Second attach with the same config_hash — must match the fixture's events mask, since `events`
+    // folds into `config_hash`.
     let req = SubAttachRequest::for_anchor(
         "second".into(),
         SubAttachAnchor::Resource(r),
@@ -765,9 +766,9 @@ fn probe_response_for_idle_profile_drops_with_diagnostic() {
 
 #[test]
 fn standard_burst_stable_emits_effect_and_awaits() {
-    // Stable verdict emits the Effect and transitions to `PostFirePhase::Awaiting`; the engine
-    // waits for the completion before returning to Idle. Idle means "nothing in flight" —
-    // outstanding Effects keep the burst Active until they report back.
+    // Stable verdict emits the Effect and transitions to `PostFirePhase::Awaiting`; the engine waits
+    // for the completion before returning to Idle. Idle means "nothing in flight" — outstanding
+    // Effects keep the burst Active until they report back.
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
     complete_seed_burst(&mut e, pid);
     let now = Instant::now();
@@ -822,8 +823,8 @@ fn standard_burst_stable_emits_effect_and_awaits() {
     let eff = &out.effects()[0];
     assert!(!eff.forced);
     // Engine carries the lowered ActionProgram; the actuator resolves argv at spawn time. Assert on
-    // the template's literal-only first arg instead of the resolved argv. (`/bin/true` is the
-    // test's stub command — see `empty_program()`.)
+    // the template's literal-only first arg instead of the resolved argv. (`/bin/true` is the test's
+    // stub command — see `empty_program()`.)
     let SpawnBody::Exec(exec) = &eff.program.ops()[0].body() else {
         panic!("expected SpawnBody::Exec");
     };
@@ -869,9 +870,9 @@ fn standard_burst_stable_emits_effect_and_awaits() {
 ///
 /// A noise FsEvent on a fresh Profile drives a phantom Standard burst whose stable verdict observes
 /// `baseline.hash() == current.hash()`. Without the `fired_subs.contains` gate, the phantom would
-/// suppress the very first Effect — the Sub would never fire and the user's command would never
-/// run. This test pins the gate so any future flattening of the suppress derivation (e.g., dropping
-/// back to the per-Profile signal alone) fails here, not in production.
+/// suppress the very first Effect — the Sub would never fire and the user's command would never run.
+/// This test pins the gate so any future flattening of the suppress derivation (e.g., dropping back
+/// to the per-Profile signal alone) fails here, not in production.
 #[test]
 fn b1_dedup_fresh_sub_fires_on_phantom_standard_burst() {
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
@@ -886,10 +887,10 @@ fn b1_dedup_fresh_sub_fires_on_phantom_standard_burst() {
     };
     assert!(!e.subs.any_fired(pid), "fresh Sub: no fire history");
 
-    // Drive a Standard burst whose probe response equals the Seed baseline byte-for-byte — a
-    // phantom (noise FsEvent, no actual disk change). One probe suffices because the stability
-    // verdict compares the response against `current.subtree_at(target)`, which equals baseline
-    // immediately post-Seed.
+    // Drive a Standard burst whose probe response equals the Seed baseline byte-for-byte — a phantom
+    // (noise FsEvent, no actual disk change). One probe suffices because the stability verdict
+    // compares the response against `current.subtree_at(target)`, which equals baseline immediately
+    // post-Seed.
     let now = Instant::now();
     e.step(
         Input::FsEvent {
@@ -968,8 +969,8 @@ fn emit_effects_subtree_root_uses_parent_dir_for_file_profile() {
     let attach_out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = e.subs.get(sid).unwrap().profile();
-    // Seed → Idle: cold-arm Verifying-first, a single Authoritative response pins → SilentPin →
-    // Idle. No Batching settle expiry needed (the cold walk is in flight at burst construction).
+    // Seed → Idle: cold-arm Verifying-first, a single Authoritative response pins → SilentPin → Idle.
+    // No Batching settle expiry needed (the cold walk is in flight at burst construction).
     let snap = file_tree_snap(EntryKind::File, 0, std::time::UNIX_EPOCH, 1);
     let seed_corr = e
         .pending_probe_for(pid)
@@ -1017,23 +1018,23 @@ fn emit_effects_subtree_root_uses_parent_dir_for_file_profile() {
     assert_eq!(out.effects().len(), 1);
     let eff = &out.effects()[0];
     // File-kind anchor: actuator's `compute_cwd` returns parent dir. The engine's job here is to
-    // pin (anchor_path, anchor_kind) so the actuator's compute_cwd reaches "parentdir". The
-    // original cwd assertion ("File-kind anchor uses parent dir as cwd") is now structural:
-    // anchor_path is the file, anchor_kind is File ⇒ compute_cwd returns parent.
+    // pin (anchor_path, anchor_kind) so the actuator's compute_cwd reaches "parentdir". The original
+    // cwd assertion ("File-kind anchor uses parent dir as cwd") is now structural: anchor_path is
+    // the file, anchor_kind is File ⇒ compute_cwd returns parent.
     assert_eq!(eff.anchor_path.as_os_str(), "parentdir/main.rs");
     assert_eq!(eff.anchor_kind, specter_core::ResourceKind::File);
     // SPECTER_PATH and SPECTER_ANCHOR both derive from `anchor_path` for a File-anchor Subtree
-    // Effect: the resolver returns `Cow::Borrowed(&anchor_path)` when `relative()` is empty, so
-    // both env values share the same byte sequence.
+    // Effect: the resolver returns `Cow::Borrowed(&anchor_path)` when `relative()` is empty, so both
+    // env values share the same byte sequence.
     assert_eq!(eff.relative(), "");
 }
 
 #[test]
 fn standard_burst_on_file_anchor_targets_anchor_not_parent_dir() {
     // Realistic Standard-burst-on-File-anchor flow. A real Sensor probing a File anchor returns
-    // `TreeSnapshot::File(leaf)`; the engine must (1) probe the anchor itself rather than the
-    // parent dir and (2) preserve `Profile.current` as `TreeSnapshot::File(_)` post-dispatch — the
-    // snapshot navigation invariant `current` is anchor-shaped breaks if a Standard burst graft
+    // `TreeSnapshot::File(leaf)`; the engine must (1) probe the anchor itself rather than the parent
+    // dir and (2) preserve `Profile.current` as `TreeSnapshot::File(_)` post-dispatch — the snapshot
+    // navigation invariant `current` is anchor-shaped breaks if a Standard burst graft
     // wholesale-replaces with a Dir snapshot rooted at the parent.
     let mut e = Engine::new();
     let parent = e.tree.ensure_root("parentdir", ResourceRole::User);
@@ -1102,9 +1103,9 @@ fn standard_burst_on_file_anchor_targets_anchor_not_parent_dir() {
     }
 
     // (1) The Standard probe is `AnchorFile` and its `target_path` is the anchor's filesystem path.
-    // The two assertions are the structural witnesses for the v1 design: File anchors take the
-    // typed `AnchorFile` arm (single-`lstat` walker dispatch) and never promote past the anchor to
-    // the parent dir.
+    // The two assertions are the structural witnesses for the v1 design: File anchors take the typed
+    // `AnchorFile` arm (single-`lstat` walker dispatch) and never promote past the anchor to the
+    // parent dir.
     let anchor_path = e.tree.path_of(file_anchor).expect("anchor path resolves");
     match probe_request.as_ref() {
         Some(ProbeRequest::AnchorFile { target_path, .. }) => {
@@ -1222,9 +1223,9 @@ fn standard_burst_force_fires_on_max_settle() {
 #[test]
 fn fs_event_content_changed_during_seed_probing_preserves_intent() {
     let (mut e, pid, _sid, root, _) = engine_with_attached_sub();
-    // The Seed burst is Batching-first; expire the settle window so it reaches Verifying with a
-    // probe in flight, then inject an FsEvent — it should cancel that probe and return to
-    // Active(Seed Batching) with the Seed intent preserved.
+    // The Seed burst is Batching-first; expire the settle window so it reaches Verifying with a probe
+    // in flight, then inject an FsEvent — it should cancel that probe and return to Active(Seed
+    // Batching) with the Seed intent preserved.
     assert_seed_verifying(&e);
     let out = e.step(
         Input::FsEvent {
@@ -1281,12 +1282,12 @@ fn event_drives_batching_clears_pending_probe() {
 
 /// Hash-channel carrier survival across the pre-fire phase swaps, pinned through the **verdict** —
 /// `last_certified_hash` is `pub(crate)` on core, so this crate cannot read the field directly and
-/// pins survival black-box. The Layer-C channel needs the prior sample to ride through every
-/// pre-fire swap for a *second, equal* Authoritative sample to fold `Stable(Natural)` and fire; if
-/// any phase helper reset the carrier the second sample's `prior` reverts to `None`, folding
-/// `Unstable` forever (never fires). The fire is therefore the executable witness that the carrier
-/// survived `transition_to_verifying` (Batching → Verifying), `retry_drives_batching` (the first
-/// sample's `Unstable` re-Batch), and `event_drives_batching` (an FsEvent during Verifying).
+/// pins survival black-box. The Layer-C channel needs the prior sample to ride through every pre-fire
+/// swap for a *second, equal* Authoritative sample to fold `Stable(Natural)` and fire; if any phase
+/// helper reset the carrier the second sample's `prior` reverts to `None`, folding `Unstable` forever
+/// (never fires). The fire is therefore the executable witness that the carrier survived
+/// `transition_to_verifying` (Batching → Verifying), `retry_drives_batching` (the first sample's
+/// `Unstable` re-Batch), and `event_drives_batching` (an FsEvent during Verifying).
 ///
 /// Requires a CONTENT-free (`STRUCTURE`-only) Profile so the channel engages
 /// (`events_witness_quiescence == false`); a CONTENT-bearing Profile closes the obligation on one
@@ -1358,8 +1359,8 @@ fn hash_channel_carrier_survives_pre_fire_swaps_to_stable_resample() {
         "settle expiry reaches the second Verifying probe",
     );
 
-    // FsEvent during Verifying ⇒ event_drives_batching cancels the probe and re-Batches. The
-    // carrier (Some(H)) must ride through this swap.
+    // FsEvent during Verifying ⇒ event_drives_batching cancels the probe and re-Batches. The carrier
+    // (Some(H)) must ride through this swap.
     let _ = e.step(
         Input::FsEvent {
             resource: anchor,
@@ -1410,8 +1411,8 @@ fn hash_channel_carrier_survives_pre_fire_swaps_to_stable_resample() {
     );
 }
 
-/// Field-discipline pin for `finalize_anchor_lost`: an anchor terminal event during Verifying
-/// cancels the in-flight probe and clears the channel.
+/// Field-discipline pin for `finalize_anchor_lost`: an anchor terminal event during Verifying cancels
+/// the in-flight probe and clears the channel.
 #[test]
 fn finalize_anchor_lost_during_verifying_clears_pending_probe() {
     let (mut e, pid, _sid, root, _) = engine_with_attached_sub();
@@ -1521,8 +1522,9 @@ fn fs_event_metadatachanged_at_anchor_bypasses_class_filter() {
 }
 
 /// Descendant events whose class is not in the covering Profile's `events_union` drop with
-/// `EventClassDropped` BEFORE driving the burst. Profile has events = EMPTY ⇒ `intersects(any_class)
-/// == false`, so a `MetadataChanged` on a covered descendant drops cleanly without state mutation.
+/// `EventClassDropped` BEFORE driving the burst. Profile has events = EMPTY ⇒
+/// `intersects(any_class) == false`, so a `MetadataChanged` on a covered descendant drops cleanly
+/// without state mutation.
 #[test]
 fn fs_event_metadatachanged_at_descendant_drops_with_event_class_dropped() {
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
@@ -1637,9 +1639,9 @@ fn fs_event_terminal_on_descendant_file_folds_to_content_and_drops() {
     let _ = sid;
 }
 
-/// Terminal events on the anchor route through `on_anchor_terminal_event` regardless of the
-/// Profile's `events_union`. Anchor is a Dir, events = EMPTY: the kqexec class for `Removed` on a
-/// Dir is STRUCTURE — not in the EMPTY mask — but anchor events bypass the filter. After the call,
+/// Terminal events on the anchor route through `on_anchor_terminal_event` regardless of the Profile's
+/// `events_union`. Anchor is a Dir, events = EMPTY: the kqexec class for `Removed` on a Dir is
+/// STRUCTURE — not in the EMPTY mask — but anchor events bypass the filter. After the call,
 /// `anchor_claim` is cleared to `None` and `baseline` / `current` are dropped.
 #[test]
 fn fs_event_anchor_terminal_bypasses_class_filter() {
@@ -1809,13 +1811,13 @@ fn fs_event_removed_at_anchor_idle_releases_watch_and_clears_baseline() {
 #[test]
 fn count_gate_zero_iff_no_carrier_and_anchor_loss_while_idle_balances_nonsteady() {
     // Oracle (b): the O(1) carrier gate is sound. `nonsteady() == 0` ⇒ `classify_event_carriers`
-    // empty ∀ r — a healthy *anchored* Idle Profile is excluded by the pure state predicate
-    // (`Pending ∨ Parked`), so a quiet watcher never pins the gate. And the count stays balanced
-    // across the anchor-loss-while-Idle park (the loss wrapper's `Idle → Parked` edge through the
-    // `ProfileMap` chokepoint). The debug count-vs-full-scan tripwire inside
-    // `classify_event_carriers` runs on every covering scan here (and across the whole suite), so a
-    // desync panics in debug regardless of the explicit asserts below — this test pins the
-    // *implication* and the loss balance the tripwire alone does not state.
+    // empty ∀ r — a healthy *anchored* Idle Profile is excluded by the pure state predicate (`Pending
+    // ∨ Parked`), so a quiet watcher never pins the gate. And the count stays balanced across the
+    // anchor-loss-while-Idle park (the loss wrapper's `Idle → Parked` edge through the `ProfileMap`
+    // chokepoint). The debug count-vs-full-scan tripwire inside `classify_event_carriers` runs on
+    // every covering scan here (and across the whole suite), so a desync panics in debug regardless
+    // of the explicit asserts below — this test pins the *implication* and the loss balance the
+    // tripwire alone does not state.
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
     complete_seed_burst(&mut e, pid);
 
@@ -1841,8 +1843,8 @@ fn count_gate_zero_iff_no_carrier_and_anchor_loss_while_idle_balances_nonsteady(
     }
 
     // Anchor lost while Idle: `Removed @ anchor` ⇒ the observed-loss wrapper. This root anchor has
-    // no recovery parent, so the fallback parks — a chokepointed `Idle → Parked` edge that must
-    // move the count 0 → 1.
+    // no recovery parent, so the fallback parks — a chokepointed `Idle → Parked` edge that must move
+    // the count 0 → 1.
     e.step(
         Input::FsEvent {
             resource: root,
@@ -1907,11 +1909,11 @@ fn timer_expired_settle_in_settling_transitions_to_probing() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// An external `FsEvent` on the burst's own anchor, arriving mid-Batching, is processed (not
-/// silently dropped): it lands in the pre-fire burst's `dirty` and advances `last_event_time`, so
-/// the next settle expiry **reschedules** the settle timer (debounce) instead of verifying. The two
-/// anchor events plus the reschedule collapse into a single fire — no double-fire. Deterministic
-/// via explicit clock control; no soak.
+/// An external `FsEvent` on the burst's own anchor, arriving mid-Batching, is processed (not silently
+/// dropped): it lands in the pre-fire burst's `dirty` and advances `last_event_time`, so the next
+/// settle expiry **reschedules** the settle timer (debounce) instead of verifying. The two anchor
+/// events plus the reschedule collapse into a single fire — no double-fire. Deterministic via
+/// explicit clock control; no soak.
 #[test]
 fn pre_fire_anchor_event_rearms_settle_and_fires_once() {
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
@@ -2085,10 +2087,10 @@ fn timer_expired_stale_id_emits_diagnostic() {
 
 #[test]
 fn effect_complete_ok_in_idle_diagnoses_outside_awaiting() {
-    // No path leaves Idle with an outstanding EffectComplete: the burst stays Active(Awaiting)
-    // until completions arrive. A completion landing in Idle is therefore unexpected (gate-deadline
-    // force-transition or anchor-loss) — emit `EffectCompleteOutsideAwaiting` and drop without
-    // state change.
+    // No path leaves Idle with an outstanding EffectComplete: the burst stays Active(Awaiting) until
+    // completions arrive. A completion landing in Idle is therefore unexpected (gate-deadline
+    // force-transition or anchor-loss) — emit `EffectCompleteOutsideAwaiting` and drop without state
+    // change.
     let (mut e, pid, sid, _root, _now) = engine_with_attached_sub();
     complete_seed_burst(&mut e, pid);
     let out = e.step(
@@ -2243,16 +2245,16 @@ fn effect_emission_carries_diff_when_needs_diff() {
 
 #[test]
 fn seed_burst_descendants_watched_via_first_probe() {
-    // Uses an events-incomplete (`STRUCTURE`-only) Profile so the graft can be exercised on the
-    // first sample without per-file FDs landing on the File child — CONTENT in the mask would set
+    // Uses an events-incomplete (`STRUCTURE`-only) Profile so the graft can be exercised on the first
+    // sample without per-file FDs landing on the File child — CONTENT in the mask would set
     // `has_per_file_fds = true`, doubling the Watch count.
     let mut e = Engine::new();
     let anchor = e.tree.ensure_root("anchor", ResourceRole::User);
     e.tree.set_kind(anchor, ResourceKind::Dir);
     let now = Instant::now();
     let (_sid, pid) = crate::testkit::attach_structure_only(&mut e, anchor, now);
-    // Cold-arm Seed: the first Seed probe is in flight directly after `attach_sub` — no settle
-    // expiry needed to reach Verifying.
+    // Cold-arm Seed: the first Seed probe is in flight directly after `attach_sub` — no settle expiry
+    // needed to reach Verifying.
     assert_seed_verifying(&e);
     let correlation = e
         .pending_probe_for(pid)
@@ -2321,8 +2323,8 @@ fn probe_op_for_file_anchor_is_file_kind() {
 
 #[test]
 fn watch_op_rejected_clamps_watch_demand_to_zero() {
-    // Build a Resource with watch_demand=2 (multi-Profile co-located). Inject WatchOpRejected.
-    // Expect watch_demand → 0, Unwatch emitted, Diagnostic.
+    // Build a Resource with watch_demand=2 (multi-Profile co-located). Inject WatchOpRejected. Expect
+    // watch_demand → 0, Unwatch emitted, Diagnostic.
     let mut e = Engine::new();
     let r = e.tree.ensure_root("x", ResourceRole::User);
     e.tree.set_kind(r, ResourceKind::Dir);
@@ -2587,9 +2589,9 @@ fn watch_op_rejected_purges_multiple_descents_at_same_prefix() {
 
 #[test]
 fn sensor_overflow_global_idle_reseeds_to_active_seed() {
-    // Idle Profile (post-`complete_seed_burst`): an overflow drives a direct `start_seed_burst`
-    // call; the Profile transitions to `Active(Seed)` Batching-first — no probe yet, a fresh settle
-    // window opens (the probe emits one settle expiry later).
+    // Idle Profile (post-`complete_seed_burst`): an overflow drives a direct `start_seed_burst` call;
+    // the Profile transitions to `Active(Seed)` Batching-first — no probe yet, a fresh settle window
+    // opens (the probe emits one settle expiry later).
     let (mut e, pid, _sid, _root, _now) = engine_with_attached_sub();
     complete_seed_burst(&mut e, pid);
     assert!(matches!(
@@ -2633,8 +2635,8 @@ fn sensor_overflow_global_idle_reseeds_to_active_seed() {
 #[test]
 fn sensor_overflow_active_standard_transitions_to_active_seed() {
     // Active(Standard) Profile: an overflow `finish_burst_to_idle` + `start_seed_burst` round-trip
-    // transitions the burst to `Active(Seed)`. The Standard burst's `dirty` provenance and
-    // quiescence prior are discarded — the seed re-baselines.
+    // transitions the burst to `Active(Seed)`. The Standard burst's `dirty` provenance and quiescence
+    // prior are discarded — the seed re-baselines.
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
     complete_seed_burst(&mut e, pid);
     let now = Instant::now();
@@ -2716,8 +2718,8 @@ fn sensor_overflow_armed_verifying_reseeds_no_cancel() {
         Instant::now(),
     );
 
-    // (b) Owner-scoped probe ops: one Probe (cold-arm reseed emits the fresh cold walk), zero
-    // Cancel (reseed disarms the engine slot only via take_owner_probe — no wire Cancel).
+    // (b) Owner-scoped probe ops: one Probe (cold-arm reseed emits the fresh cold walk), zero Cancel
+    // (reseed disarms the engine slot only via take_owner_probe — no wire Cancel).
     let owner = pid;
     let probes = out
         .probe_ops()
@@ -2757,8 +2759,8 @@ fn sensor_overflow_armed_verifying_reseeds_no_cancel() {
 /// Armed-slot overflow, Rebasing variant: same as above but on a *genuinely armed*
 /// `Active(PostFire(Rebasing))`. The Rebasing slot is the post-effect rebase probe minted by
 /// `transition_to_rebasing` — armed, never pre-consumed. Overflow must reseed without panicking,
-/// disarming the slot only; the superseding Seed burst is Batching-first. Owner-scoped: zero
-/// `Probe`, zero `Cancel`.
+/// disarming the slot only; the superseding Seed burst is Batching-first. Owner-scoped: zero `Probe`,
+/// zero `Cancel`.
 #[test]
 fn sensor_overflow_armed_rebasing_reseeds_no_cancel() {
     let (mut e, pid, sid, root, _now0) = engine_with_attached_sub();
@@ -2828,11 +2830,11 @@ fn sensor_overflow_armed_rebasing_reseeds_no_cancel() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// Armed-slot overflow, reap arm: overflow on a *genuinely armed* `Active(PreFire(Verifying))`
-/// whose `BurstFinish` is `Reap` (the last Sub was detached mid-burst). Here `will_reap == true`,
-/// so the arm emits the wire `Cancel` via `cancel_owner_probe` (no superseding submit follows —
-/// `start_seed_burst` no-ops on the detached Profile), then `finish_burst_to_idle` reaps the
-/// Profile. Owner-scoped: exactly one `Cancel`, zero `Probe`; Profile gone.
+/// Armed-slot overflow, reap arm: overflow on a *genuinely armed* `Active(PreFire(Verifying))` whose
+/// `BurstFinish` is `Reap` (the last Sub was detached mid-burst). Here `will_reap == true`, so the
+/// arm emits the wire `Cancel` via `cancel_owner_probe` (no superseding submit follows —
+/// `start_seed_burst` no-ops on the detached Profile), then `finish_burst_to_idle` reaps the Profile.
+/// Owner-scoped: exactly one `Cancel`, zero `Probe`; Profile gone.
 #[test]
 fn sensor_overflow_armed_verifying_reap_emits_cancel_only() {
     let (mut e, pid, sid, _root, _) = engine_with_attached_sub();
@@ -2890,11 +2892,11 @@ fn sensor_overflow_armed_verifying_reap_emits_cancel_only() {
 #[test]
 fn sensor_overflow_pending_descent_latches_and_repays() {
     // A Pending descent whose probe is still in flight when an overflow lands. The overflow cannot
-    // be dropped: the in-flight walk may predate the overflow window, so its response cannot
-    // witness the edges the kernel lost. `on_descent_event` latches a re-probe-owed debt instead —
-    // no second probe at overflow time, the armed slot untouched — and the descent's own response
-    // dispatch repays the debt with a fresh probe that reads the post-overflow tree. Pins both
-    // halves: the latch (overflow step) and the repay (response step).
+    // be dropped: the in-flight walk may predate the overflow window, so its response cannot witness
+    // the edges the kernel lost. `on_descent_event` latches a re-probe-owed debt instead — no second
+    // probe at overflow time, the armed slot untouched — and the descent's own response dispatch
+    // repays the debt with a fresh probe that reads the post-overflow tree. Pins both halves: the
+    // latch (overflow step) and the repay (response step).
     let mut e = Engine::new();
     let req = SubAttachRequest::for_anchor(
         "guard".into(),
@@ -3152,8 +3154,8 @@ fn seed_vanished_then_reap_releases_anchor_via_claim() {
         AnchorClaim::Held,
     );
 
-    // A Seed burst is Batching-first; expire its settle timer so a verify probe is in flight to
-    // drive the Vanished response below.
+    // A Seed burst is Batching-first; expire its settle timer so a verify probe is in flight to drive
+    // the Vanished response below.
     assert_seed_verifying(&e);
 
     // Detach the Sub mid-burst → reap_pending = true.
@@ -3765,8 +3767,8 @@ fn per_stable_file_skips_dir_entries() {
 /// StepOutput that contains the Effect emission. Common harness for SubtreeRoot dedup-hash tests.
 ///
 /// The verify response folds through `quiescence_verdict` to `Stable(StableReason::Natural)` — the
-/// CONTENT-subscribed `DEFAULT_EVENTS` mask makes the witness `EventsReliable`, so one
-/// Authoritative sample fires on classify-consequence Standard.
+/// CONTENT-subscribed `DEFAULT_EVENTS` mask makes the witness `EventsReliable`, so one Authoritative
+/// sample fires on classify-consequence Standard.
 fn drive_to_first_effect(
     e: &mut Engine,
     pid: specter_core::ProfileId,
@@ -3833,8 +3835,8 @@ fn records_fired_subs_after_subtree_effect() {
 
 /// `Effect.target` for a `Subtree`-keyed Effect is the Profile anchor — captured from
 /// `Profile.resource` at emit time. The sort-key extractor pulls `target` directly without a
-/// `&Engine` lookup; this pins the emission-side capture so a future refactor that drops the
-/// `target` assignment surfaces here.
+/// `&Engine` lookup; this pins the emission-side capture so a future refactor that drops the `target`
+/// assignment surfaces here.
 #[test]
 fn subtree_effect_target_is_anchor_at_emission() {
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
@@ -3905,8 +3907,8 @@ fn fresh_seed_without_activity_does_not_fire() {
 
 /// Standard burst with a per-stable-file Sub: drift filter is `None`, PerFile keys still emit per
 /// matching diff entry. This pins that the SeedDrift-path narrowing (PerFile Subs skipped on
-/// `EmitMode::SeedDrift`) doesn't accidentally skip PerFile emission on the unrelated Standard
-/// burst path.
+/// `EmitMode::SeedDrift`) doesn't accidentally skip PerFile emission on the unrelated Standard burst
+/// path.
 #[test]
 fn b3_per_key_filter_does_not_affect_standard_burst_perfile_emission() {
     let mut e = Engine::new();
@@ -3983,8 +3985,8 @@ fn has_per_file_fds_is_invariant_for_profile_lifetime() {
     // never flips during the Profile's lifetime.
     //
     // This test pins the new invariant: a Profile constructed with a mask containing CONTENT (or
-    // METADATA) starts with the flag set, and a Sub attaching via the same `(resource,
-    // config_hash)` does not change it.
+    // METADATA) starts with the flag set, and a Sub attaching via the same `(resource, config_hash)`
+    // does not change it.
     let mut e = Engine::new();
     let r = e.tree.ensure_root("anchor", ResourceRole::User);
     e.tree.set_kind(r, ResourceKind::Dir);
@@ -4057,9 +4059,9 @@ fn structure_only_profile_has_per_file_fds_false() {
 // Per-origin assertions that every anchor-loss dispatch path through `Engine::discard_anchor_state`
 // clears the cached `Profile.kind`. The helper unit tests in `claims.rs` pin the contract in
 // isolation; these tests pin the integration at every dispatch origin — both intents through each
-// merged pre-fire helper (`dispatch_pre_fire_{vanished,failed}`, now intent-parametric), both
-// rebase routes (`dispatch_rebase_{vanished,failed}`), and the anchor-terminal event — so the
-// kind-clear cannot regress at any one of them without a test failure.
+// merged pre-fire helper (`dispatch_pre_fire_{vanished,failed}`, now intent-parametric), both rebase
+// routes (`dispatch_rebase_{vanished,failed}`), and the anchor-terminal event — so the kind-clear
+// cannot regress at any one of them without a test failure.
 
 /// Drive a Profile from fresh-attach into `Active(Standard, Verifying)` with
 /// `pending_probe.is_some()`. Returns the live correlation.
@@ -4100,8 +4102,8 @@ fn drive_to_standard_verifying(
 /// response.
 ///
 /// The last `EffectComplete::Ok` goes probe-first: `Awaiting → Rebasing` directly, minting the
-/// `WholeSubtree` rebase probe in the same step. There is no first `Settling` window before the
-/// first sample.
+/// `WholeSubtree` rebase probe in the same step. There is no first `Settling` window before the first
+/// sample.
 fn drive_to_rebasing(
     e: &mut Engine,
     pid: specter_core::ProfileId,
@@ -4276,12 +4278,12 @@ fn dispatch_rebase_failed_clears_profile_kind() {
 // finish to Idle once it forces — never tearing the anchor down. Only `Denied`-class failures tear
 // the anchor down, pinned by the `*_clears_profile_kind` tests above.
 
-/// (Standard, Transient). FD pressure on a Standard verify re-batches for another window
-/// (`!forced`) — the anchor watch and baseline retained, the pressure surfaced — then, once the
-/// `BurstDeadline` forces, finishes to Idle with the anchor watch and baseline **still** retained,
-/// so the anchor's own next event re-bursts without waiting on the parent (a `Denied`-class failure
-/// would instead tear it down). Pins both Standard-route Transient arms in one lifecycle; the
-/// retained baseline is the central regression guard a baseline-less Seed cannot assert.
+/// (Standard, Transient). FD pressure on a Standard verify re-batches for another window (`!forced`)
+/// — the anchor watch and baseline retained, the pressure surfaced — then, once the `BurstDeadline`
+/// forces, finishes to Idle with the anchor watch and baseline **still** retained, so the anchor's
+/// own next event re-bursts without waiting on the parent (a `Denied`-class failure would instead
+/// tear it down). Pins both Standard-route Transient arms in one lifecycle; the retained baseline
+/// is the central regression guard a baseline-less Seed cannot assert.
 #[test]
 fn standard_transient_retries_then_forced_finishes_retaining_anchor() {
     let (mut e, pid, _sid, root, now) = engine_with_attached_sub();
@@ -4698,8 +4700,8 @@ fn rebasing_probes_whole_subtree_and_resets_awaiting_absorbed_residual() {
         burst.final_window_residual.chains(),
     );
 
-    // EffectComplete::Ok drives Awaiting → Rebasing directly (probe-first), minting the
-    // WholeSubtree rebase probe in the same step.
+    // EffectComplete::Ok drives Awaiting → Rebasing directly (probe-first), minting the WholeSubtree
+    // rebase probe in the same step.
     let rebase_out = e.step(
         Input::EffectComplete(EffectCompletion {
             sub: sid,
@@ -4748,10 +4750,10 @@ fn rebasing_probes_whole_subtree_and_resets_awaiting_absorbed_residual() {
 }
 
 /// Idempotent fire-tail: even with no FsEvent absorbed during Awaiting, the rebase probe ships
-/// `WholeSubtree` and is never `forced`. The post-command tree has no trustworthy prior — an
-/// in-place descendant edit need not bump an ancestor mtime, so the walker must re-read the whole
-/// subtree regardless of mtime or any (now-absent) scoped chain. Pins that the rebase obligation is
-/// a soundness floor, not an absorb-conditioned optimization.
+/// `WholeSubtree` and is never `forced`. The post-command tree has no trustworthy prior — an in-place
+/// descendant edit need not bump an ancestor mtime, so the walker must re-read the whole subtree
+/// regardless of mtime or any (now-absent) scoped chain. Pins that the rebase obligation is a
+/// soundness floor, not an absorb-conditioned optimization.
 #[test]
 fn rebasing_without_absorbs_still_probes_whole_subtree() {
     let (mut e, pid, sid, root, _now0) = engine_with_attached_sub();
@@ -4759,8 +4761,8 @@ fn rebasing_without_absorbs_still_probes_whole_subtree() {
     let stable_out = drive_to_first_effect(&mut e, pid, root, now);
     let key = stable_out.effects()[0].key();
 
-    // EffectComplete::Ok drives Awaiting → Rebasing directly (probe-first), minting the
-    // WholeSubtree rebase probe in the same step.
+    // EffectComplete::Ok drives Awaiting → Rebasing directly (probe-first), minting the WholeSubtree
+    // rebase probe in the same step.
     let rebase_out = e.step(
         Input::EffectComplete(EffectCompletion {
             sub: sid,
@@ -4842,10 +4844,10 @@ fn post_fire_settling_reschedules_on_absorbed_event() {
         .pending_probe_for(pid)
         .expect("rebase probe in flight after EffectComplete drove Awaiting → Rebasing");
 
-    // Fold the first rebase response to Retry (Undischarged + !terminal walker refusal) so the
-    // burst enters the spacing Settling window — the only post-fire Settling entry. `now_a` is the
-    // Retry-response instant: `last_event_time` and the PostFireSettle timer are set here,
-    // scheduled at `now_a + SETTLE`.
+    // Fold the first rebase response to Retry (Undischarged + !terminal walker refusal) so the burst
+    // enters the spacing Settling window — the only post-fire Settling entry. `now_a` is the
+    // Retry-response instant: `last_event_time` and the PostFireSettle timer are set here, scheduled
+    // at `now_a + SETTLE`.
     let now_a = now + SETTLE * 3;
     let unread: std::sync::Arc<std::path::Path> =
         std::sync::Arc::from(std::path::Path::new("anchor/opaque"));
@@ -4974,9 +4976,9 @@ fn post_fire_settling_reschedules_on_absorbed_event() {
 /// `PostFireSettle` expiry re-enters `Rebasing` with a fresh probe, and a follow-up `Authoritative`
 /// response commits and finishes — the only surviving post-fire loop. Pairs with
 /// `rebase_retry_does_not_poison_current` (which pins the first loop-back); this test pins the
-/// COMPLETE retry path: loop entry → settle expiry → re-Rebasing → Authoritative commit. The
-/// `Retry` verdict has two origins — channel disagreement and walker refusal with `terminal: false`
-/// — that share this dispatcher arm; the test exercises the walker-refusal origin.
+/// COMPLETE retry path: loop entry → settle expiry → re-Rebasing → Authoritative commit. The `Retry`
+/// verdict has two origins — channel disagreement and walker refusal with `terminal: false` — that
+/// share this dispatcher arm; the test exercises the walker-refusal origin.
 #[test]
 fn post_fire_retry_loops_via_settling() {
     let (mut e, pid, sid, root, now) = engine_with_attached_sub();
@@ -5013,8 +5015,8 @@ fn post_fire_retry_loops_via_settling() {
         "Retry must not commit — baseline stays put",
     );
 
-    // PostFireSettle expiry past the settle window: Settling → Rebasing with a fresh probe
-    // (different correlation from the first).
+    // PostFireSettle expiry past the settle window: Settling → Rebasing with a fresh probe (different
+    // correlation from the first).
     let now_retry = now_loop + SETTLE * 2;
     let out_retry = e.step(
         Input::TimerExpired {
@@ -5114,8 +5116,8 @@ fn gate_deadline_non_zombie_drives_rebase_with_forced_directly() {
     );
 
     // Phase: Awaiting → Rebasing directly (no Settling in between). CeilingState: gate-deadline
-    // latches directly from NotStarted to Reached without arming a timer (the prior `forced = true`
-    // + `rebase_ceiling = None` lockstep, now a single state).
+    // latches directly from NotStarted to Reached without arming a timer (the prior `forced = true` +
+    // `rebase_ceiling = None` lockstep, now a single state).
     match e.profiles.get(pid).unwrap().state() {
         ProfileState::Active(ActiveBurst::PostFire(post), _) => {
             assert!(
@@ -5133,8 +5135,8 @@ fn gate_deadline_non_zombie_drives_rebase_with_forced_directly() {
         other => panic!("expected Active(PostFire(Rebasing)); got {other:?}"),
     }
 
-    // The Rebasing burst carries no PostFireSettle token: the gate-deadline went Awaiting →
-    // Rebasing directly, never opening a Settling window.
+    // The Rebasing burst carries no PostFireSettle token: the gate-deadline went Awaiting → Rebasing
+    // directly, never opening a Settling window.
     assert!(
         e.profiles
             .get(pid)
@@ -5243,11 +5245,11 @@ fn rebase_authoritative_commits_baseline_and_finishes() {
     );
 }
 
-/// A `Retry` rebase response — produced by the walker refusing on some chain with `terminal:
-/// false`, or by the hash channel disagreeing at this sample — loops back through
-/// `transition_to_settling`: an unread region must never poison `current` — **no** `apply_snapshot`
-/// — and the carrier prior is withheld. The loop settle-spaces for another sample. The test
-/// exercises the walker-refusal origin; the channel disagreement origin folds identically.
+/// A `Retry` rebase response — produced by the walker refusing on some chain with `terminal: false`,
+/// or by the hash channel disagreeing at this sample — loops back through `transition_to_settling`:
+/// an unread region must never poison `current` — **no** `apply_snapshot` — and the carrier prior
+/// is withheld. The loop settle-spaces for another sample. The test exercises the walker-refusal
+/// origin; the channel disagreement origin folds identically.
 #[test]
 fn rebase_retry_does_not_poison_current() {
     let (mut e, pid, sid, root, now) = engine_with_attached_sub();
@@ -5255,8 +5257,8 @@ fn rebase_retry_does_not_poison_current() {
     let baseline_before = baseline_hash(&e, pid);
     let current_before = current_hash(&e, pid);
 
-    // An unread response — the walk could not read a directory it had cause to — folds to Retry
-    // while unforced.
+    // An unread response — the walk could not read a directory it had cause to — folds to Retry while
+    // unforced.
     let unread: std::sync::Arc<std::path::Path> =
         std::sync::Arc::from(std::path::Path::new("anchor/opaque"));
     let degraded = dir_tree_snap(vec![("ghost", EntryKind::File, 9)]);
@@ -5292,9 +5294,9 @@ fn rebase_retry_does_not_poison_current() {
     );
 }
 
-/// `Authoritative`, ceiling **reached** (forced=true): the `RebaseCeiling` fired but the walker
-/// still certified. Pin the freshest observation as the new baseline anyway (a deliberate, loud
-/// terminal — not a wedge) and finish.
+/// `Authoritative`, ceiling **reached** (forced=true): the `RebaseCeiling` fired but the walker still
+/// certified. Pin the freshest observation as the new baseline anyway (a deliberate, loud terminal
+/// — not a wedge) and finish.
 #[test]
 fn rebase_authoritative_at_ceiling_pins_freshest_and_diagnoses() {
     let (mut e, pid, sid, root, now) = engine_with_attached_sub();
@@ -5478,9 +5480,9 @@ fn rebase_ceiling_in_settling_drives_rebasing_with_forced() {
     let (mut e, pid, sid, root, now) = engine_with_attached_sub();
     let rebase_corr = drive_to_rebasing(&mut e, pid, sid, root, now);
 
-    // Loop back through Settling via a Retry response — produced by an Undischarged !forced
-    // authority (the only surviving post-fire loop). The `Stable(Natural)` arm finishes
-    // immediately; we need the burst still alive in Settling to fire the ceiling there.
+    // Loop back through Settling via a Retry response — produced by an Undischarged !forced authority
+    // (the only surviving post-fire loop). The `Stable(Natural)` arm finishes immediately; we need
+    // the burst still alive in Settling to fire the ceiling there.
     let unread: std::sync::Arc<std::path::Path> =
         std::sync::Arc::from(std::path::Path::new("anchor/opaque"));
     e.step(
@@ -5582,16 +5584,16 @@ fn rebase_ceiling_in_settling_drives_rebasing_with_forced() {
 
 /// Spacing soundness — the reason post-fire `Settling` settle-spaces consecutive rebase samples on
 /// an events-incomplete Profile. A writer whose period exceeds the probe round-trip but is shorter
-/// than `settle` would let two back-to-back `WholeSubtree` reads catch the same transient
-/// byte-state and manufacture a premature `Stable`. The loop instead settle-separates consecutive
-/// samples through `Settling`: a mid-loop change makes sample N+1 differ from sample N ⇒ `Retry` ⇒
-/// keep looping; only two settle-spaced *equal* samples close `Stable`.
+/// than `settle` would let two back-to-back `WholeSubtree` reads catch the same transient byte-state
+/// and manufacture a premature `Stable`. The loop instead settle-separates consecutive samples
+/// through `Settling`: a mid-loop change makes sample N+1 differ from sample N ⇒ `Retry` ⇒ keep
+/// looping; only two settle-spaced *equal* samples close `Stable`.
 ///
-/// Pins, on a `STRUCTURE`-only Profile (the hash channel is active for the rebase loop): a
-/// differing second sample does NOT prematurely finish, a `Settling` settle-spacer always sits
-/// between samples, and the third equal sample is what closes the loop. The events-reliable rebase
-/// path skips the channel entirely (a single sample fires), so this scenario is reachable only on
-/// events-incomplete masks.
+/// Pins, on a `STRUCTURE`-only Profile (the hash channel is active for the rebase loop): a differing
+/// second sample does NOT prematurely finish, a `Settling` settle-spacer always sits between samples,
+/// and the third equal sample is what closes the loop. The events-reliable rebase path skips the
+/// channel entirely (a single sample fires), so this scenario is reachable only on events-incomplete
+/// masks.
 #[test]
 fn rebase_loop_spacing_defeats_a_premature_stable_on_a_slow_writer() {
     let mut e = Engine::new();
@@ -5621,9 +5623,9 @@ fn rebase_loop_spacing_defeats_a_premature_stable_on_a_slow_writer() {
 
     // EffectComplete → Awaiting → Rebasing directly (probe-first; the rebase loop's natural entry).
     // `arm_rebase_loop_ceiling` armed `RebaseCeiling` here for the whole loop's bound — well past
-    // the settle windows this test walks through. Sample 1's WholeSubtree probe is already in
-    // flight. The helper advances `at += SETTLE * 2` per sample and fired on the second equal
-    // sample, so we are at `fire_start + SETTLE * 4`.
+    // the settle windows this test walks through. Sample 1's WholeSubtree probe is already in flight.
+    // The helper advances `at += SETTLE * 2` per sample and fired on the second equal sample, so we
+    // are at `fire_start + SETTLE * 4`.
     let after_fire = fire_start + SETTLE * 4 + Duration::from_millis(1);
     e.step(
         Input::EffectComplete(EffectCompletion {
@@ -5734,8 +5736,8 @@ fn rebase_loop_spacing_defeats_a_premature_stable_on_a_slow_writer() {
         .expect("PostFireSettle re-arms Rebasing #3");
 
     // Sample 3, settle-spaced: the writer has now quiesced (== B). carrier prior hash(B) == hash(B)
-    // ⇒ Stable ⇒ commit + finish. Two settle-spaced *equal* samples close the loop — never a sub-
-    // settle coincidence.
+    // ⇒ Stable ⇒ commit + finish. Two settle-spaced *equal* samples close the loop — never a
+    // sub-settle coincidence.
     let t_s3 = t_s2 + SETTLE * 2;
     e.step(
         Input::ProbeResponse(ProbeResponse {
@@ -5761,9 +5763,9 @@ fn rebase_loop_spacing_defeats_a_premature_stable_on_a_slow_writer() {
 
 /// The strong-signal pre-fire ceiling diagnostic: `QuiescenceCeilingForcedDespiteChange` fires only
 /// when the hash channel was active AND observed concrete `prior != response` disagreement before
-/// the `BurstDeadline` expired. On the natural `Stable(Forced)` arm (channel inactive OR
-/// first-sample `prior=None` OR `prior == response`), pre-fire stays silent — the `forced` bit is
-/// already operator-visible on `Effect.forced`.
+/// the `BurstDeadline` expired. On the natural `Stable(Forced)` arm (channel inactive OR first-sample
+/// `prior=None` OR `prior == response`), pre-fire stays silent — the `forced` bit is already
+/// operator-visible on `Effect.forced`.
 ///
 /// Drives a structure-only Profile through Sample 1 (carrier prior = None → Retry, carrier :=
 /// hash(A)), then expires the `BurstDeadline` mid-Batching to set `forced = true` and drive a fresh
@@ -5881,10 +5883,10 @@ fn pre_fire_forced_ceiling_with_hash_disagreement_emits_strong_signal_diagnostic
 /// the `RebaseCeiling` forces a commit, then varies only the second (forced) sample relative to the
 /// carried first sample:
 ///
-/// - second sample DIFFERS ⇒ `Stable(Forced{disagreed=true})` ⇒ `RebaseCeilingForced {
-///   observed_change: true }` (the strong "tree visibly still moving at ceiling expiry" signal).
-/// - second sample EQUALS the first ⇒ `Stable(Forced{disagreed=false})` ⇒ `RebaseCeilingForced {
-///   observed_change: false }` — the same-step race the ceiling resolves: the samples agreed, but
+/// - second sample DIFFERS ⇒ `Stable(Forced{disagreed=true})` ⇒ `RebaseCeilingForced
+///   { observed_change: true }` (the strong "tree visibly still moving at ceiling expiry" signal).
+/// - second sample EQUALS the first ⇒ `Stable(Forced{disagreed=false})` ⇒ `RebaseCeilingForced
+///   { observed_change: false }` — the same-step race the ceiling resolves: the samples agreed, but
 ///   the ceiling ran out before two consecutive equal reads could fold a natural `Stable`, so the
 ///   freshest observation is pinned anyway.
 ///
@@ -5975,8 +5977,8 @@ fn post_fire_forced_ceiling_observed_change_tracks_carrier_disagreement() {
         );
 
         // Fire the RebaseCeiling mid-Settling: `force_pending_post_fire` sets `forced=true` + drops
-        // `rebase_ceiling = None`; `handle_rebase_ceiling` drives Rebasing (Settling phase: no
-        // probe in flight).
+        // `rebase_ceiling = None`; `handle_rebase_ceiling` drives Rebasing (Settling phase: no probe
+        // in flight).
         let ceiling = rebase_ceiling_timer(&e, pid);
         let ceiling_out = e.step(
             Input::TimerExpired {
@@ -6042,11 +6044,11 @@ fn post_fire_forced_ceiling_observed_change_tracks_carrier_disagreement() {
 
 /// The mask-blindspot upgrade at the pre-fire ceiling: a touch-storm under `events = STRUCTURE`.
 /// Every settle window is event-silent (no STRUCTURE event ever arrives, so `retry_streak` never
-/// resets) yet every sample hashes differently — in-place writes / mtime churn fold into
-/// `leaf_hash` while the subscribed class stays quiet. After `CHANGE_OUTSIDE_MASK_RETRY_FLOOR`
-/// consecutive Retry windows, the forced-ceiling disagreement emits `ChangeOutsideEventMask`
-/// (carrying the streak) **instead of** the generic `QuiescenceCeilingForcedDespiteChange`; the
-/// bounded fire itself is unchanged.
+/// resets) yet every sample hashes differently — in-place writes / mtime churn fold into `leaf_hash`
+/// while the subscribed class stays quiet. After `CHANGE_OUTSIDE_MASK_RETRY_FLOOR` consecutive Retry
+/// windows, the forced-ceiling disagreement emits `ChangeOutsideEventMask` (carrying the streak)
+/// **instead of** the generic `QuiescenceCeilingForcedDespiteChange`; the bounded fire itself is
+/// unchanged.
 #[test]
 fn pre_fire_forced_ceiling_after_event_silent_retry_streak_emits_mask_hint() {
     let floor = crate::transitions::CHANGE_OUTSIDE_MASK_RETRY_FLOOR;
@@ -6068,10 +6070,10 @@ fn pre_fire_forced_ceiling_after_event_silent_retry_streak_emits_mask_hint() {
     );
 
     // One priming round plus `floor` disagreement rounds: each settle expiry drives a verify whose
-    // sample hashes differently from the carrier's prior (distinct sizes ⇒ distinct leaf/dir
-    // hashes). The first round folds `Retry { observed_motion: false }` (`prior = None` is absence
-    // of confirmation) and holds the streak; every subsequent round observes concrete disagreement
-    // and bumps it. No FsEvent arrives anywhere in the loop: the streak never resets.
+    // sample hashes differently from the carrier's prior (distinct sizes ⇒ distinct leaf/dir hashes).
+    // The first round folds `Retry { observed_motion: false }` (`prior = None` is absence of
+    // confirmation) and holds the streak; every subsequent round observes concrete disagreement and
+    // bumps it. No FsEvent arrives anywhere in the loop: the streak never resets.
     let mut at = burst_start;
     for round in 0..=floor {
         at += SETTLE * 2;
@@ -6392,8 +6394,8 @@ fn post_fire_forced_ceiling_after_retry_streak_emits_mask_hint() {
         })
         .expect("RebaseCeiling in Settling drives a fresh forced Rebasing probe");
 
-    // The forced sample still disagrees — `hash_channel_disagreed = true` at `retry_streak ==
-    // floor` selects the hint over the generic RebaseCeilingForced.
+    // The forced sample still disagrees — `hash_channel_disagreed = true` at `retry_streak == floor`
+    // selects the hint over the generic RebaseCeilingForced.
     let final_sample = dir_tree_snap(vec![("draft", EntryKind::File, u64::from(floor) + 3)]);
     let s_out = e.step(
         Input::ProbeResponse(ProbeResponse {
@@ -6437,9 +6439,9 @@ fn post_fire_forced_ceiling_after_retry_streak_emits_mask_hint() {
 
 // ---------- rebase_baseline witness clears at every site ----------
 
-/// Construct an `Active(PreFire)` state populated with default empty per-burst sets and the
-/// supplied phase / intent / probe target. Used by witness-clear tests that drive `dispatch_*_ok`
-/// directly with a pre-staged Profile.
+/// Construct an `Active(PreFire)` state populated with default empty per-burst sets and the supplied
+/// phase / intent / probe target. Used by witness-clear tests that drive `dispatch_*_ok` directly
+/// with a pre-staged Profile.
 fn active_pre_fire_burst(
     e: &mut Engine,
     pid: specter_core::ProfileId,
@@ -6834,8 +6836,8 @@ fn seed_recovery_fire_consumes_survival_witness_eagerly() {
     let _ = e.cancel_all_in_flight_probes();
 
     // Survival-mode drift setup: a witness snapshot whose hash won't match the post-graft current ⇒
-    // the drift signal triggers; pre-loss fire history on `sid` narrows the SeedDrift filter to
-    // this Sub. `mark_fired` is idempotent — "sid fired pre-loss" needs exactly one mark.
+    // the drift signal triggers; pre-loss fire history on `sid` narrows the SeedDrift filter to this
+    // Sub. `mark_fired` is idempotent — "sid fired pre-loss" needs exactly one mark.
     let witness_snap = dir_tree_snap(vec![("pre", EntryKind::File, 1)]);
     let witness_hash = witness_snap.dir_hash();
     enter_survival_mode(&mut e, pid, witness_snap);
@@ -7147,8 +7149,8 @@ fn seed_drift_observed_returns_true_on_post_recovery_drift() {
         "test setup: pre-loss witness and recovery current must differ",
     );
 
-    // Survival mode: anchor loss stashed the pre-loss baseline.hash() into the witness; the
-    // recovery probe lands a `current` whose hash differs from that witness ⇒ drift.
+    // Survival mode: anchor loss stashed the pre-loss baseline.hash() into the witness; the recovery
+    // probe lands a `current` whose hash differs from that witness ⇒ drift.
     enter_survival_mode(&mut e, pid, witness_snap);
     e.subs.mark_fired(sid);
     if let Some(p) = e.profiles.get_mut(pid) {
@@ -7214,14 +7216,14 @@ fn seed_drift_observed_returns_false_when_active_mode_baseline_matches_current()
 /// Pins the three load-bearing properties of relocating the Effect fire-history from a per-Profile
 /// container to a per-Sub `bool`:
 ///
-///  1. **B1 / SeedDrift read `Sub.has_fired`.** A real burst that fires sets the emitting Sub's
-///     flag; `SubRegistry::any_fired` / `fired_in` (the B1-suppress and SeedDrift-filter bases)
-///     observe it through the registry, not through any Profile container.
-///  2. **A detached Sub's flag dies with its slotmap entry — no purge needed.** After the Sub
-///     fired, detach it (a sibling Sub keeps the Profile alive) and drive a survival-mode *drift*
-///     Seed-Ok. It must NOT re-fire: `fired_in(pid)` is empty because the detached Sub's
-///     `has_fired` died with `subs.remove`, and the surviving sibling never fired. There is no
-///     per-Profile fire container to purge, and none is touched.
+///  1. **B1 / SeedDrift read `Sub.has_fired`.** A real burst that fires sets the emitting Sub's flag;
+///     `SubRegistry::any_fired` / `fired_in` (the B1-suppress and SeedDrift-filter bases) observe
+///     it through the registry, not through any Profile container.
+///  2. **A detached Sub's flag dies with its slotmap entry — no purge needed.** After the Sub fired,
+///     detach it (a sibling Sub keeps the Profile alive) and drive a survival-mode *drift* Seed-Ok.
+///     It must NOT re-fire: `fired_in(pid)` is empty because the detached Sub's `has_fired` died
+///     with `subs.remove`, and the surviving sibling never fired. There is no per-Profile fire
+///     container to purge, and none is touched.
 ///  3. **A fresh attach starts unfired.** The sibling attached after the original has `has_fired ==
 ///     false`.
 #[test]
@@ -7284,8 +7286,8 @@ fn fire_history_is_per_sub_detach_drops_it_no_purge() {
     );
 
     // Set up a survival-mode *drift* scenario: the survival witness carries a pre-loss hash; the
-    // post-recovery `current` differs from it ⇒ `seed_drift_observed` is true *while sid_a is
-    // fired*. (The witness must differ from `current` for drift; matches the working
+    // post-recovery `current` differs from it ⇒ `seed_drift_observed` is true *while sid_a is fired*.
+    // (The witness must differ from `current` for drift; matches the working
     // `seed_drift_observed_returns_true_on_post_recovery_drift` setup.)
     let witness_snap = dir_tree_snap(vec![("pre", EntryKind::File, 1)]);
     let current_snap = dir_tree_snap(vec![("post", EntryKind::File, 2)]);
@@ -7399,8 +7401,8 @@ fn drive_standard_verdict(
 }
 
 /// `baseline().hash() == current().hash()` for a Dir-anchored Profile — the post-fold witness that
-/// the silent seal advanced the baseline onto the folded sample (the rebase family, not the
-/// suppress family).
+/// the silent seal advanced the baseline onto the folded sample (the rebase family, not the suppress
+/// family).
 fn baseline_equals_current(e: &Engine, pid: specter_core::ProfileId) -> bool {
     let p = e.profiles.get(pid).unwrap();
     match (p.baseline(), p.current()) {
@@ -7598,8 +7600,8 @@ fn consume_on_first_folds_once_then_fires() {
     assert!(e.subs.get(sid).unwrap().has_fired(), "second episode fired");
 }
 
-/// `PersistUntil` (a `Some(duration)` window) survives folds: two separate episodes within the
-/// window both fold. Once the clock passes `expiry`, the window reads inert and a burst fires.
+/// `PersistUntil` (a `Some(duration)` window) survives folds: two separate episodes within the window
+/// both fold. Once the clock passes `expiry`, the window reads inert and a burst fires.
 #[test]
 fn persist_until_folds_repeatedly_then_fires_after_expiry() {
     let (mut e, pid, sid, root, _now) = engine_with_attached_sub();
@@ -7666,8 +7668,8 @@ fn persist_until_folds_repeatedly_then_fires_after_expiry() {
 
 /// Cold-Seed redundancy: a fold-latched Cold Seed (no driving event) resolves to `SilentPin`, not
 /// `AbsorbFold` — a Seed that owes no first-fire is not a firing `base`, so the override never
-/// engages. The window is therefore NOT consumed and survives for the first genuinely-fireable
-/// burst, which then consumes it.
+/// engages. The window is therefore NOT consumed and survives for the first genuinely-fireable burst,
+/// which then consumes it.
 #[test]
 fn cold_seed_under_window_stays_silent_pin_and_preserves_window() {
     let (mut e, pid, sid, root, _now) = engine_with_attached_sub();
@@ -7749,15 +7751,15 @@ fn cold_seed_under_window_stays_silent_pin_and_preserves_window() {
     );
 }
 
-/// Residual-restart latch: a window armed during post-fire applies to the burst the residual
-/// restart produces. The restarted Standard burst (born via `restart_burst_from_fire_tail_residual`
-/// → `into_pre_fire_residual`) freezes the live window at its birth and folds at its verdict.
+/// Residual-restart latch: a window armed during post-fire applies to the burst the residual restart
+/// produces. The restarted Standard burst (born via `restart_burst_from_fire_tail_residual` →
+/// `into_pre_fire_residual`) freezes the live window at its birth and folds at its verdict.
 #[test]
 fn residual_restart_under_window_folds() {
     let (mut e, pid, sid, root, _now) = engine_with_attached_sub();
     let now = Instant::now();
-    // Fire once (real Effect), then drive the post-fire loop into Rebasing with an absorbed
-    // residual so the rebase response restarts a fresh Standard burst.
+    // Fire once (real Effect), then drive the post-fire loop into Rebasing with an absorbed residual
+    // so the rebase response restarts a fresh Standard burst.
     let stable_out = drive_to_first_effect(&mut e, pid, root, now);
     assert_eq!(
         stable_out.effects().len(),
@@ -7772,8 +7774,8 @@ fn residual_restart_under_window_folds() {
         .lookup(Some(root), "a.rs")
         .expect("the standard burst's reconcile created a.rs");
 
-    // EffectComplete::Ok → Awaiting → Rebasing directly (probe-first; probe in flight, dirty
-    // cleared at the loop entry).
+    // EffectComplete::Ok → Awaiting → Rebasing directly (probe-first; probe in flight, dirty cleared
+    // at the loop entry).
     let rebasing_at = now + SETTLE * 2;
     let rearm_out = e.step(
         Input::EffectComplete(EffectCompletion {
@@ -7951,10 +7953,10 @@ fn on_arm_absorb_derives_window_from_duration() {
     );
 }
 
-/// A chain verdict reconciles whatever its Profile holds: the shape pre-check runs ahead of the
-/// fold override, so a burst born fold-latched on a chain Profile folds nothing and the pass mints.
-/// No input arms a chain Profile — an absorb addressed to a template arms its matches' Profiles —
-/// so the window is armed here through the core edge.
+/// A chain verdict reconciles whatever its Profile holds: the shape pre-check runs ahead of the fold
+/// override, so a burst born fold-latched on a chain Profile folds nothing and the pass mints. No
+/// input arms a chain Profile — an absorb addressed to a template arms its matches' Profiles — so
+/// the window is armed here through the core edge.
 #[test]
 fn absorb_window_is_inert_for_discovery() {
     let mut e = Engine::new();
@@ -8292,10 +8294,10 @@ mod props {
 
         /// `prop_seed_burst_without_activity_emits_no_effects`: from a fresh attach with **no
         /// FsEvents witnessed**, the Seed-burst's eventual ProbeResponse path never produces an
-        /// Effect. This is strictly the no-activity path: with no events injected and `dirty`
-        /// empty, the verdict routes to `SilentPin` and the burst finishes without emission. It
-        /// does NOT assert anything about a fresh Seed that *witnessed* activity — that case fires
-        /// and is covered by the `fresh_seed_fires::*` tests.
+        /// Effect. This is strictly the no-activity path: with no events injected and `dirty` empty,
+        /// the verdict routes to `SilentPin` and the burst finishes without emission. It does NOT
+        /// assert anything about a fresh Seed that *witnessed* activity — that case fires and is
+        /// covered by the `fresh_seed_fires::*` tests.
         #[test]
         fn prop_seed_burst_without_activity_emits_no_effects(
             seed_outcome in prop_oneof![

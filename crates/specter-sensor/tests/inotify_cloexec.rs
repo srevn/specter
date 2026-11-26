@@ -2,9 +2,9 @@
 //!
 //! The actuator's spawn path uses fork+exec; any fd without `CLOEXEC` leaks into every spawned
 //! command. The watcher's single persistent fd — `inotify_fd` — must carry the flag: if leaked, the
-//! child holds an unrelated inotify instance that prevents kernel-side cleanup at watcher drop.
-//! (Wake / reactor fds live on the caller's side under the mio integration and are not the
-//! watcher's responsibility.)
+//! child holds an unrelated inotify instance that prevents kernel-side cleanup at watcher drop. (Wake
+//! / reactor fds live on the caller's side under the mio integration and are not the watcher's
+//! responsibility.)
 //!
 //! This test forks a child via `Command::new` with the actuator's `pre_exec`-driven discipline
 //! (forces fork+exec on Linux), then reads `/proc/<child_pid>/fd/` and asserts no symlink target

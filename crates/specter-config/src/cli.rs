@@ -82,8 +82,8 @@ pub struct DaemonArgs {
 
     /// IPC socket path to bind.
     ///
-    /// Omitted ⇒ the per-platform convention; `$SPECTER_SOCK` overrides that and `--socket`
-    /// overrides both. Must be absolute.
+    /// Omitted ⇒ the per-platform convention; `$SPECTER_SOCK` overrides that and `--socket` overrides
+    /// both. Must be absolute.
     #[arg(long)]
     pub socket: Option<PathBuf>,
 
@@ -121,8 +121,8 @@ pub struct DaemonArgs {
     /// SIGHUP remains the only reload trigger.
     ///
     /// Default-on auto-reload covers the common-case operator workflow (edit + save the running
-    /// daemon's config and have it pick up the change). Disable when the config lives on a
-    /// filesystem where the watcher's preconditions don't hold:
+    /// daemon's config and have it pick up the change). Disable when the config lives on a filesystem
+    /// where the watcher's preconditions don't hold:
     ///
     /// - Network filesystems (NFS, SMB, CIFS, FUSE-over-network) — fanotify / inotify / kqueue do
     ///   not deliver kernel events for server-side mutations; the watcher would init successfully
@@ -249,8 +249,8 @@ pub struct TailArgs {
     #[arg(long)]
     pub filter: Vec<String>,
 
-    /// Output format. `human` pretty-prints one event per line; `json` emits the lossless wire
-    /// shape (one JSON object per line, symmetric with the daemon's emission).
+    /// Output format. `human` pretty-prints one event per line; `json` emits the lossless wire shape
+    /// (one JSON object per line, symmetric with the daemon's emission).
     #[arg(long, short = 'o', value_enum, default_value_t = OutputFormat::Human)]
     pub output: OutputFormat,
 }

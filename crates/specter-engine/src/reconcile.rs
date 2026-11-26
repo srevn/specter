@@ -10,33 +10,33 @@
 //! and installs or releases the per-Resource [`ContribKey::ProfileDescendant`] contribution via
 //! [`add_watch`] / [`crate::refcounts::sub_watch`] for *interior* Dirs (always) and interior Leaves
 //! under `Profile.has_per_file_fds` — never for boundary Dirs, whose member churn no verdict can
-//! observe (see [`wants_descendant_watch`]). The Watch ops appear in `StepOutput.watch_ops`,
-//! resealed by `ResourceId` at emission.
+//! observe (see [`wants_descendant_watch`]). The Watch ops appear in `StepOutput.watch_ops`, resealed
+//! by `ResourceId` at emission.
 //!
-//! **Empty-prior path.** When `Profile.current` is `None` — the Seed burst's first probe —
-//! [`graft`] synthesises the Diff via [`Diff::all_created`](specter_core::Diff::all_created) on the
-//! response. Equivalent to diffing against an empty `DirSnapshot`, no empty-snapshot allocation.
+//! **Empty-prior path.** When `Profile.current` is `None` — the Seed burst's first probe — [`graft`]
+//! synthesises the Diff via [`Diff::all_created`](specter_core::Diff::all_created) on the response.
+//! Equivalent to diffing against an empty `DirSnapshot`, no empty-snapshot allocation.
 //!
 //! **Splice-first ordering.** [`graft`] runs `splice` *before* any Tree mutation.
-//! [`SpliceResult::CrossedUncovered`] (unreachable from legitimate filesystem state — see
-//! [`graft`]) surfaces a [`Diagnostic`] and short-circuits without touching Tree state —
-//! `Profile.current` and `Tree` stay coherent across the breach.
+//! [`SpliceResult::CrossedUncovered`] (unreachable from legitimate filesystem state — see [`graft`])
+//! surfaces a [`Diagnostic`] and short-circuits without touching Tree state — `Profile.current` and
+//! `Tree` stay coherent across the breach.
 //!
 //! **Two-phase reaping and ordering.** [`apply_diff_to_tree`] runs:
-//! 1. Phase 1 — `diff.deleted` and `diff.renamed.from`, in reverse iteration. Releases this
-//!    Profile's contribution at each slot; [`Tree::try_reap`] reclaims any slot left with no
-//!    anchors. Reverse-lex within each list is **performance / cleanliness**, not correctness —
-//!    `try_reap` cascades upward through any parent that loses its last anchor, so
-//!    leaf-before-parent only avoids the cascade work, it does not enable the reap.
+//! 1. Phase 1 — `diff.deleted` and `diff.renamed.from`, in reverse iteration. Releases this Profile's
+//!    contribution at each slot; [`Tree::try_reap`] reclaims any slot left with no anchors.
+//!    Reverse-lex within each list is **performance / cleanliness**, not correctness — `try_reap`
+//!    cascades upward through any parent that loses its last anchor, so leaf-before-parent only
+//!    avoids the cascade work, it does not enable the reap.
 //! 2. Phase 2 — `diff.created` and `diff.renamed.to`, in forward iteration. Ensures each slot under
 //!    its rel-path, sets the kind, and installs the contribution if covered.
 //!
-//! Phase-1-before-Phase-2 is load-bearing for the **same-segment kind change** case (`rm foo
-//! (File)` then `mkdir foo (Dir)`): `diff_tree` stages both delete and create with `pair_eligible:
-//! false`. Phase 1 reaps the prior slot (generation-incremented on remove); Phase 2's
-//! `ensure_child` returns a fresh slot at the new generation. If we processed creations first, the
-//! slot would be re-typed to Dir, and the deletion pass would look up the same slot (now Dir) and
-//! emit Unwatch — silently breaking the new directory's watch.
+//! Phase-1-before-Phase-2 is load-bearing for the **same-segment kind change** case (`rm foo (File)`
+//! then `mkdir foo (Dir)`): `diff_tree` stages both delete and create with `pair_eligible: false`.
+//! Phase 1 reaps the prior slot (generation-incremented on remove); Phase 2's `ensure_child` returns
+//! a fresh slot at the new generation. If we processed creations first, the slot would be re-typed
+//! to Dir, and the deletion pass would look up the same slot (now Dir) and emit Unwatch — silently
+//! breaking the new directory's watch.
 //!
 //! **Reap discipline.** [`Tree::try_reap`] is gated by the slot's `has_anchors`, so the multi-Profile
 //! case (where another Profile still contributes) does not prematurely tear down a still-live slot.
@@ -62,21 +62,20 @@ use std::sync::Arc;
 /// only via spec-violating inputs).
 ///
 /// **Multi-component segments.** `Diff` entries may carry multi-segment rel-paths like
-/// `subdir/file.txt` for recursive Profiles. `ensure_child` is single-component by design
-/// (`(parent, segment)` is the slot identity); this helper walks each segment in lock-step. The
-/// Diff's depth-first lex order over `parent/child` segments ensures parents are processed before
-/// their descendants in Phase 2, so intermediate slots typically exist before their descendants are
-/// touched — but the helper is robust to out-of-order entries (e.g. `renamed.to` segments) because
-/// each component is `ensure_child`d on the way through.
+/// `subdir/file.txt` for recursive Profiles. `ensure_child` is single-component by design (`(parent,
+/// segment)` is the slot identity); this helper walks each segment in lock-step. The Diff's
+/// depth-first lex order over `parent/child` segments ensures parents are processed before their
+/// descendants in Phase 2, so intermediate slots typically exist before their descendants are touched
+/// — but the helper is robust to out-of-order entries (e.g. `renamed.to` segments) because each
+/// component is `ensure_child`d on the way through.
 ///
-/// **Kind refresh.** The leaf is unconditionally `set_kind`-ed to `leaf_kind` even on a
-/// pre-existing slot. The same-segment kind-flip case (a `File` becoming a `Dir` under kernel inode
-/// reuse) is handled
-/// upstream by `diff_tree`'s `_ =>` arm in `diff_same_name`: both the
-/// prior File and the new Dir are staged with `pair_eligible: false`, Phase 1 reaps the prior slot
-/// (generation increment), and Phase 2's `ensure_child` returns a fresh-generation slot whose kind
-/// this call then sets to `Dir`. The leaf-kind write is idempotent for the common (kind-stable)
-/// case and load-bearing for the kind-flip case.
+/// **Kind refresh.** The leaf is unconditionally `set_kind`-ed to `leaf_kind` even on a pre-existing
+/// slot. The same-segment kind-flip case (a `File` becoming a `Dir` under kernel inode reuse) is
+/// handled upstream by `diff_tree`'s `_ =>` arm in `diff_same_name`: both the prior File and the
+/// new Dir are staged with `pair_eligible: false`, Phase 1 reaps the prior slot (generation
+/// increment), and Phase 2's `ensure_child` returns a fresh-generation slot whose kind this call
+/// then sets to `Dir`. The leaf-kind write is idempotent for the common (kind-stable) case and
+/// load-bearing for the kind-flip case.
 ///
 /// `pub(crate)` so every diff-entry-to-Resource resolution agrees with what reconcile produced.
 pub(crate) fn ensure_descendant(
@@ -151,18 +150,18 @@ pub(crate) fn lookup_descendant(
 ///   proof-irrelevant member churn. The Dir's own identity changes (delete / rename) remain fully
 ///   observable at the parent's FD.
 ///
-/// The single source for both directions of [`apply_diff_to_tree`]: Phase 2 installs the
-/// contribution wherever this holds, and Phase 1 releases the contribution this same predicate
-/// would have installed on a prior probe response. Install and release stay in lockstep because
-/// they read one predicate, not two expressions that must be kept mirrored by hand.
+/// The single source for both directions of [`apply_diff_to_tree`]: Phase 2 installs the contribution
+/// wherever this holds, and Phase 1 releases the contribution this same predicate would have
+/// installed on a prior probe response. Install and release stay in lockstep because they read one
+/// predicate, not two expressions that must be kept mirrored by hand.
 ///
 /// Classification runs on the diff **entry's** kind, never the Tree slot's current kind. The two
 /// agree on install (Phase 2 stamps the slot from the entry first) but can diverge on release: a
 /// co-covering Profile's graft may have re-stamped a shared slot's kind between this Profile's
 /// install and its Phase-1 delete, and at a boundary-capable depth (the `max_depth` rim) a File→Dir
 /// re-stamp would flip the classification to `Boundary` and strand the per-file contribution on the
-/// slot forever. The delete entry carries the baseline-side kind — exactly the kind the
-/// contribution was installed under — so keying on it makes release read what install read.
+/// slot forever. The delete entry carries the baseline-side kind — exactly the kind the contribution
+/// was installed under — so keying on it makes release read what install read.
 fn wants_descendant_watch(
     profile: &Profile,
     r: ResourceId,
@@ -181,8 +180,8 @@ fn wants_descendant_watch(
 
 /// Apply a [`Diff`] to the engine's `Tree` for one Profile. Side-effecting only — no return value.
 ///
-/// The `base` parameter is the Tree node the diff's rel-paths are relative to. For [`graft`], `base
-/// == target` (the probe's target). For `Engine::release_descendant_claim`, `base ==
+/// The `base` parameter is the Tree node the diff's rel-paths are relative to. For [`graft`],
+/// `base == target` (the probe's target). For `Engine::release_descendant_claim`, `base ==
 /// profile.resource` (the anchor) and the diff is [`Diff::all_deleted`]. `base` is live at every
 /// call site — graft's `target` is `ancestor_chain`-proven (or the anchor itself); claims' `base`
 /// is the still-attached anchor (`take_current` ran under a live Profile, so the slot still has
@@ -192,25 +191,25 @@ fn wants_descendant_watch(
 /// **Two phases.**
 ///
 /// 1. **Phase 1 — deletes.** Iterates `diff.deleted` and `diff.renamed.from` in reverse (via
-///    `DoubleEndedIterator::rev`). For each entry the helper looks up the slot under `base`,
-///    releases this Profile's [`ContribKey::ProfileDescendant`] if [`wants_descendant_watch`] says
-///    so, and — when the slot has no remaining anchors — vacates and reaps it. [`Tree::try_reap`]
-///    cascades up through any parent that loses its last anchor on the way; reverse iteration here
-///    is performance / cleanliness (avoids the cascade work and the intermediate "parent holds
-///    reaped child id" states), not a correctness requirement.
+///    `DoubleEndedIterator::rev`). For each entry the helper looks up the slot under `base`, releases
+///    this Profile's [`ContribKey::ProfileDescendant`] if [`wants_descendant_watch`] says so, and —
+///    when the slot has no remaining anchors — vacates and reaps it. [`Tree::try_reap`] cascades up
+///    through any parent that loses its last anchor on the way; reverse iteration here is performance
+///    / cleanliness (avoids the cascade work and the intermediate "parent holds reaped child id"
+///    states), not a correctness requirement.
 ///
 /// 2. **Phase 2 — creates.** Iterates `diff.created` and `diff.renamed.to` forward. For each entry
 ///    the helper ensures the slot under `base` (creating intermediate components as needed), sets
 ///    its kind, and installs the per-Resource [`ContribKey::ProfileDescendant`] contribution via
-///    [`add_watch`] wherever [`wants_descendant_watch`] holds (interior Dirs always; interior
-///    Leaves under `Profile.has_per_file_fds`; boundary Dirs never).
+///    [`add_watch`] wherever [`wants_descendant_watch`] holds (interior Dirs always; interior Leaves
+///    under `Profile.has_per_file_fds`; boundary Dirs never).
 ///
 /// `diff.modified` entries are Tree-side no-ops — the slot exists and kind is unchanged.
 ///
 /// The whole contract is the side effects: Phase 1's watch release / slot reap (with the closing
 /// `Unwatch` [`Tree::try_reap`] folds in) and Phase 2's `add_watch`. There is no reaped-slot return
-/// — the fire history is per-Sub ([`specter_core::Sub::has_fired`]) and dies with the slotmap
-/// entry, so a reaped leaf has nothing to purge by `ResourceId`.
+/// — the fire history is per-Sub ([`specter_core::Sub::has_fired`]) and dies with the slotmap entry,
+/// so a reaped leaf has nothing to purge by `ResourceId`.
 pub(crate) fn apply_diff_to_tree(
     diff: &Diff,
     profile: &Profile,
@@ -234,13 +233,13 @@ pub(crate) fn apply_diff_to_tree(
     // Two paths converge on the slot lifecycle terminus, [`Tree::try_reap`]:
     //
     // - When this Profile contributes a watch at the slot — interior Dir under any events mask, or
-    //   interior Leaf under `has_per_file_fds` — [`sub_watch_then_try_reap`] removes the
-    //   contribution by key and try-reaps. The multi-Profile case (another Profile still
-    //   contributes) short-circuits inside `try_reap` via `has_anchors()`.
-    // - When this Profile contributes nothing at the slot — a boundary Dir, or an interior Leaf
-    //   under a STRUCTURE-only Profile, where Phase 2's `ensure_descendant` materialised the slot
-    //   without an `add_watch` — we still want to free a now-orphaned Tree slot that this delete
-    //   reaches. Call `try_reap` directly so the Tree doesn't leak a never-watched slot.
+    //   interior Leaf under `has_per_file_fds` — [`sub_watch_then_try_reap`] removes the contribution
+    //   by key and try-reaps. The multi-Profile case (another Profile still contributes)
+    //   short-circuits inside `try_reap` via `has_anchors()`.
+    // - When this Profile contributes nothing at the slot — a boundary Dir, or an interior Leaf under
+    //   a STRUCTURE-only Profile, where Phase 2's `ensure_descendant` materialised the slot without
+    //   an `add_watch` — we still want to free a now-orphaned Tree slot that this delete reaches.
+    //   Call `try_reap` directly so the Tree doesn't leak a never-watched slot.
     //
     // `try_reap` folds in `Tree::vacate` as the closing-emission step, so the kernel-watch protocol
     // owed at reap time (the closing `Unwatch`, if a contribution were ever stranded at the slot)
@@ -302,11 +301,11 @@ pub(crate) fn apply_diff_to_tree(
 ///
 /// **Splice-first ordering.** The splice runs *before* any Tree mutation. A
 /// [`SpliceResult::CrossedUncovered`] verdict surfaces a [`Diagnostic`] and short-circuits without
-/// touching Tree state — the pre-fire target rule roots every Standard probe at a directory
-/// `current` lists, so no cause is reachable through legitimate state and the arm is a defence.
+/// touching Tree state — the pre-fire target rule roots every Standard probe at a directory `current`
+/// lists, so no cause is reachable through legitimate state and the arm is a defence.
 /// `Profile.current` is untouched across the breach: the `prior` arg was an Arc clone the caller
-/// (`apply_snapshot`) made from `Profile.current`'s handle, so dropping it on the failure path
-/// leaves the Profile's own handle alive at its pre-call shape.
+/// (`apply_snapshot`) made from `Profile.current`'s handle, so dropping it on the failure path leaves
+/// the Profile's own handle alive at its pre-call shape.
 ///
 /// **Diff at TARGET.** The Diff is built between `prior_at_target` (descended from `prior` via
 /// [`subtree_at_dir`]) and `response_arc`, so its rel-paths are relative to `target` —
@@ -317,8 +316,8 @@ pub(crate) fn apply_diff_to_tree(
 /// **Borrow shape.** Takes `profile_id: ProfileId` (not `&mut Profile`) because the splice write
 /// and the immutable Profile read for the `apply_diff_to_tree` argument live on opposite sides of a
 /// borrow boundary. Threading the id through lets graft re-borrow under whichever shape each step
-/// needs. `prior` arrives typed (`Option<Arc<DirSnapshot>>`) — the caller already extracted it
-/// under one Profile borrow, lifting the File-shape detection out of graft's body.
+/// needs. `prior` arrives typed (`Option<Arc<DirSnapshot>>`) — the caller already extracted it under
+/// one Profile borrow, lifting the File-shape detection out of graft's body.
 pub(crate) fn graft(
     profile_id: ProfileId,
     target: ResourceId,
@@ -335,8 +334,8 @@ pub(crate) fn graft(
     };
 
     // Navigate the typed Dir prior down to `target`. Reused for the equal-hash early-out and as the
-    // diff's baseline; cheap Arc::clone at depth 1 (target == anchor) — same shape as the prior
-    // call through the inlined `subtree_at` dispatcher, but without the
+    // diff's baseline; cheap Arc::clone at depth 1 (target == anchor) — same shape as the prior call
+    // through the inlined `subtree_at` dispatcher, but without the
     // `TreeSnapshot::Dir(Arc::clone(...))` wrapper allocation the `&TreeSnapshot`-keyed entry point
     // required.
     let prior_at_target = prior
@@ -355,9 +354,9 @@ pub(crate) fn graft(
     // path-to-target prefix for every entry. `prior_at_target == None` is the first-graft /
     // freshly-covered-target case; `Diff::all_created(&response)` is the empty-prior shorthand.
     //
-    // `diff_dir_pair` takes `&DirSnapshot` directly (Arc derefs in the call coerce), so neither
-    // prior nor response needs to be cloned wholesale for the diff — `response_arc` stays available
-    // for `splice`'s consume below.
+    // `diff_dir_pair` takes `&DirSnapshot` directly (Arc derefs in the call coerce), so neither prior
+    // nor response needs to be cloned wholesale for the diff — `response_arc` stays available for
+    // `splice`'s consume below.
     let diff = match &prior_at_target {
         Some(p) => diff_dir_pair(p, &response_arc),
         None => Diff::all_created(&response_arc),
@@ -365,9 +364,9 @@ pub(crate) fn graft(
 
     // Splice — pure, no Tree mutation. `CrossedUncovered` short-circuits before any
     // `apply_diff_to_tree` work, so `Profile.current` and `Tree` stay coherent across the breach.
-    // Even when (a future regression makes) `CrossedUncovered` reachable, the engine cannot
-    // diverge: the splice-then-apply ordering keeps `Profile.current` and `Tree` from drifting
-    // apart on the breach.
+    // Even when (a future regression makes) `CrossedUncovered` reachable, the engine cannot diverge:
+    // the splice-then-apply ordering keeps `Profile.current` and `Tree` from drifting apart on the
+    // breach.
     //
     // Consumes `prior` and `response_arc`. The caller (apply_snapshot) held an independent Arc handle
     // in `Profile.current`, so dropping our `prior` on the CrossedUncovered failure path leaves the
@@ -394,9 +393,9 @@ pub(crate) fn graft(
         }
     };
 
-    // Apply to Tree under a scoped immutable Profile borrow so the `install_dir_current` write
-    // below can re-borrow `&mut`. Purely side-effecting (watch release, reap); no reaped-slot
-    // return — fire-history is per-Sub now, so a reaped leaf has nothing to purge.
+    // Apply to Tree under a scoped immutable Profile borrow so the `install_dir_current` write below
+    // can re-borrow `&mut`. Purely side-effecting (watch release, reap); no reaped-slot return —
+    // fire-history is per-Sub now, so a reaped leaf has nothing to purge.
     {
         let Some(profile) = profiles.get(profile_id) else {
             return;
@@ -486,9 +485,9 @@ mod tests {
                 None,
             ),
         );
-        // The covered descendants reconciler reads `has_per_file_fds` off the Profile;
-        // `Profile::new` already derives it from the events mask, but this test still depends on
-        // the constructor's contract — assert it inline so a future change shouts.
+        // The covered descendants reconciler reads `has_per_file_fds` off the Profile; `Profile::new`
+        // already derives it from the events mask, but this test still depends on the constructor's
+        // contract — assert it inline so a future change shouts.
         debug_assert_eq!(profiles.get(pid).unwrap().has_per_file_fds(), per_file);
         (tree, profiles, r, pid)
     }
@@ -659,10 +658,10 @@ mod tests {
     fn apply_diff_release_keys_on_entry_kind_not_restamped_slot_kind() {
         // A co-covering Profile's graft can re-stamp a shared slot's kind between this Profile's
         // install and its release. At a boundary-capable depth (the rim of a one-level bound) a
-        // File→Dir re-stamp would classify the slot's *current* kind as Boundary and skip the
-        // release — stranding the per-file contribution, which keeps `has_anchors` true and blocks
-        // the slot's reap (and its kernel FD) for the daemon's lifetime. The delete entry carries
-        // the baseline-side kind the contribution was installed under; release must key on that.
+        // File→Dir re-stamp would classify the slot's *current* kind as Boundary and skip the release
+        // — stranding the per-file contribution, which keeps `has_anchors` true and blocks the slot's
+        // reap (and its kernel FD) for the daemon's lifetime. The delete entry carries the
+        // baseline-side kind the contribution was installed under; release must key on that.
         let mut tree = Tree::new();
         let mut profiles = ProfileMap::new();
         let r = tree.ensure_root("root", ResourceRole::User);
@@ -778,8 +777,8 @@ mod tests {
 
     #[test]
     fn graft_equal_hash_short_circuits() {
-        // current.subtree_at(target).dir_hash() == response.dir_hash() ⇒ zero allocations, zero
-        // Watch ops, current unchanged.
+        // current.subtree_at(target).dir_hash() == response.dir_hash() ⇒ zero allocations, zero Watch
+        // ops, current unchanged.
         let (mut tree, mut profiles, root, pid) = anchor(false);
         let snap_a = dir_snap(100, vec![("a.rs", leaf(EntryKind::File, 1))]);
         profiles
@@ -845,14 +844,14 @@ mod tests {
 
     #[test]
     fn graft_emits_diagnostic_when_path_crosses_uncovered_intermediate() {
-        // Setup: Tree has root → a → b (all live slots). The Profile's `current` snapshot is
-        // anchored at root with entry "a" stored as `DirChild::Uncovered(_)` (engine never observed
-        // below "a"). A probe response arrives for target `b`. Splice navigates the tree chain
-        // anchor→a→b successfully but cannot navigate the *snapshot*'s coverage path —
+        // Setup: Tree has root → a → b (all live slots). The Profile's `current` snapshot is anchored
+        // at root with entry "a" stored as `DirChild::Uncovered(_)` (engine never observed below
+        // "a"). A probe response arrives for target `b`. Splice navigates the tree chain anchor→a→b
+        // successfully but cannot navigate the *snapshot*'s coverage path —
         // `prior.lookup_covered_dir("a")` returns `None` because "a" is `Uncovered`, not `Covered`
         // — so splice returns CrossedUncovered. Graft must emit Diagnostic::SpliceCrossedUncovered
-        // AND keep the prior `current` unchanged so the anchor-rooted invariant on
-        // `Profile.current` is preserved.
+        // AND keep the prior `current` unchanged so the anchor-rooted invariant on `Profile.current`
+        // is preserved.
         let (mut tree, mut profiles, root, pid) = anchor(false);
         let a_id = tree
             .ensure_child(root, "a", ResourceRole::User)
@@ -931,11 +930,10 @@ mod tests {
         //    - `out.watch_ops` contains a Watch op at the new slot.
         //
         // Keying entity identity on `(inode, device)` alone would, under inode reuse across a kind
-        // flip, conclude "same identity ⇒ no Tree-side delta" and skip both the reap of the old
-        // File slot and the creation of the new Dir slot. Instead, `diff_tree::diff_same_name`
-        // routes kind flips through its
-        // `_ =>` arm (pair_eligible: false), which `apply_diff_to_tree`
-        // Phase 1 / Phase 2 then applies symmetrically.
+        // flip, conclude "same identity ⇒ no Tree-side delta" and skip both the reap of the old File
+        // slot and the creation of the new Dir slot. Instead, `diff_tree::diff_same_name` routes
+        // kind flips through its `_ =>` arm (pair_eligible: false), which `apply_diff_to_tree` Phase
+        // 1 / Phase 2 then applies symmetrically.
         let (mut tree, mut profiles, root, pid) = anchor(true);
 
         // Pre-materialise the prior File slot at `(root, "foo")` with a watch contribution matching
@@ -960,9 +958,9 @@ mod tests {
             .install_dir_current(Arc::clone(&prior_current));
 
         // Build response: root has covered Dir `foo` at the SAME inode (42), with one descendant
-        // File `nested.rs` under it. The covered subtree's `root_meta.fs_id` IS the `foo`
-        // directory's kernel identity under the sum-type encoding, so it must be stamped with inode
-        // 42 for the kind-flip-with-inode-reuse invariant to hold.
+        // File `nested.rs` under it. The covered subtree's `root_meta.fs_id` IS the `foo` directory's
+        // kernel identity under the sum-type encoding, so it must be stamped with inode 42 for the
+        // kind-flip-with-inode-reuse invariant to hold.
         let nested_subtree = {
             let mut entries: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
             entries.insert(CompactString::new("nested.rs"), leaf(EntryKind::File, 99));
@@ -1003,8 +1001,8 @@ mod tests {
             &mut PathBuf::new(),
         );
 
-        // 1. Old File slot was reaped — its id is stale on a fresh lookup. `tree.lookup(root,
-        //    "foo")` should now resolve to a NEW slot with a different id (generation increment).
+        // 1. Old File slot was reaped — its id is stale on a fresh lookup. `tree.lookup(root, "foo")`
+        //    should now resolve to a NEW slot with a different id (generation increment).
         let new_foo_id = tree
             .lookup(Some(root), "foo")
             .expect("graft must materialise a Tree slot at the post-graft target");

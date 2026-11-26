@@ -1,10 +1,10 @@
 //! Subscribe-arm scaffold shared by `specter tail` and `specter wait`.
 //!
 //! Both verbs open a connection, write a [`WireRequest::Subscribe`], read + validate the
-//! [`ResponsePayload::SubscribeAck`] line, and then loop reading line-delimited
-//! [`WireDiagnostic`]s. The pre-loop work is identical; this module owns it: `tail` opens the whole
-//! stream ([`open`]), `wait` one watch's ([`open_watch`]), which also hands back the Sub the daemon
-//! resolved the watch's name to.
+//! [`ResponsePayload::SubscribeAck`] line, and then loop reading line-delimited [`WireDiagnostic`]s.
+//! The pre-loop work is identical; this module owns it: `tail` opens the whole stream ([`open`]),
+//! `wait` one watch's ([`open_watch`]), which also hands back the Sub the daemon resolved the watch's
+//! name to.
 //!
 //! The post-ack stream loop diverges between the two verbs:
 //!
@@ -75,8 +75,8 @@ pub(crate) fn open_watch(
 ///
 /// `verb` is the operator-facing command name (`"tail"` / `"wait"`), the `specter <verb>:` prefix
 /// on every failure path: the connect stage routes through [`connect::dial`] (the seam shared with
-/// the one-shot verbs), the remaining transport stages through [`connect::emit_error`], the ack
-/// tail through [`connect::fail_response`]. Call sites `return code` directly.
+/// the one-shot verbs), the remaining transport stages through [`connect::emit_error`], the ack tail
+/// through [`connect::fail_response`]. Call sites `return code` directly.
 fn handshake(
     client: &ClientArgs,
     verb: &'static str,
@@ -146,9 +146,9 @@ impl Subscription {
     /// - `Ok(Some(wire))` — a complete line parsed cleanly.
     /// - `Ok(None)` — EOF; the daemon closed the connection (per-conn teardown on driver shutdown,
     ///   or peer-initiated close).
-    /// - `Err(io::Error)` — any other failure. A JSON parse failure maps to
-    ///   `ErrorKind::InvalidData`, mirroring [`connect::read_response`]'s discipline so callers can
-    ///   distinguish "transport broken" from "daemon sent malformed JSON" with one error type.
+    /// - `Err(io::Error)` — any other failure. A JSON parse failure maps to `ErrorKind::InvalidData`,
+    ///   mirroring [`connect::read_response`]'s discipline so callers can distinguish "transport
+    ///   broken" from "daemon sent malformed JSON" with one error type.
     ///
     /// The inbound line buffer is reused across calls — `clear` preserves the previously-grown heap
     /// so subsequent lines pay no allocation. A partial read on `Err` discards the bytes (the next

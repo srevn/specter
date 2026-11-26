@@ -5,8 +5,8 @@
 //! covered Leaves).
 //!
 //! Where the equivalent shape lives in `transitions_tests.rs`, this file is the **integration**
-//! counterpart — exercising whole-Engine flows (attach → Seed-Ok → FsEvent → optional Effect)
-//! rather than dispatch handlers in isolation.
+//! counterpart — exercising whole-Engine flows (attach → Seed-Ok → FsEvent → optional Effect) rather
+//! than dispatch handlers in isolation.
 
 use specter_core::testkit::{covered, dir_snap, dir_snap_nested, proven};
 use specter_core::{
@@ -32,11 +32,12 @@ const MAX_SETTLE: Duration = Duration::from_secs(6);
 // IT-EF-1 — DEFAULT_SUBTREE_ROOT enables per-file FDs (closes E2E #3)
 //
 // `echo 'test' > file.txt` inside a subtree-root watched dir receives an event on the per-file FD
-// (CONTENT class drives the translator to emit `NOTE_WRITE | NOTE_EXTEND` on every covered Leaf), the
-// burst fires, the probe runs, the diff classifies the file as Modified, and the user's command runs.
+// (CONTENT class drives the translator to emit `NOTE_WRITE | NOTE_EXTEND` on every covered Leaf),
+// the burst fires, the probe runs, the diff classifies the file as Modified, and the user's command
+// runs.
 //
-// At engine level this manifests as: a `subtree-root` Sub with default events (`STRUCTURE |
-// CONTENT`) drives `has_per_file_fds = true`, so `graft`'s `apply_diff_to_tree` emits a per-file
+// At engine level this manifests as: a `subtree-root` Sub with default events (`STRUCTURE | CONTENT`)
+// drives `has_per_file_fds = true`, so `graft`'s `apply_diff_to_tree` emits a per-file
 // `WatchOp::Watch` for every covered Leaf during reconciliation. The Watch op carries the Profile's
 // mask (which translates downstream to `NOTE_WRITE | NOTE_EXTEND` on the file FD).
 // ───────────────────────────────────────────────────────────────────────
@@ -63,11 +64,11 @@ fn it_ef_1_default_subtree_root_emits_per_file_watch_on_leaves() {
         "default subtree-root mask (STRUCTURE|CONTENT) sets has_per_file_fds",
     );
 
-    // The Seed probe fires one settle window after attach, not at attach. Drive the first Seed
-    // probe with one File child. graft runs against prior=None ⇒ `Diff::all_created` pure-create
-    // path. The first sample is `Retry` by construction (no prior certified hash) so it does not
-    // pin, but `apply_snapshot` still grafts: with has_per_file_fds=true the File child gets a
-    // Watch op on this very (first) response.
+    // The Seed probe fires one settle window after attach, not at attach. Drive the first Seed probe
+    // with one File child. graft runs against prior=None ⇒ `Diff::all_created` pure-create path.
+    // The first sample is `Retry` by construction (no prior certified hash) so it does not pin, but
+    // `apply_snapshot` still grafts: with has_per_file_fds=true the File child gets a Watch op on
+    // this very (first) response.
     let (corr, at) = assert_seed_verifying(&mut e, pid, t0);
     let snap = dir_snap(&[("file.txt", EntryKind::File, 1)]);
     let seed_out = e.step(
@@ -264,9 +265,9 @@ fn it_ef_2b_profile_events_invariant_across_sub_attach_detach() {
 #[test]
 fn it_ef_2_chmod_only_fires_metadata_profile_not_content_profile() {
     // Concrete chmod scenario: Sub A wants CONTENT, Sub B wants METADATA. After a `MetadataChanged`
-    // at the anchor, Profile B drives a burst; Profile A's class filter would drop it… EXCEPT
-    // anchor events bypass the filter unconditionally. So both Profiles drive bursts — the
-    // differentiation happens at probe time / dedup, not at routing.
+    // at the anchor, Profile B drives a burst; Profile A's class filter would drop it… EXCEPT anchor
+    // events bypass the filter unconditionally. So both Profiles drive bursts — the differentiation
+    // happens at probe time / dedup, not at routing.
     //
     // This test pins the routing semantics (both Profiles get the event because of the anchor-bypass)
     // and the registration semantics (METADATA-only kernel mask wouldn't even fire MetadataChanged
@@ -364,8 +365,8 @@ fn it_ef_3_descent_prefix_contributes_structure_only() {
     };
     assert_eq!(current_prefix, tmp);
 
-    // /tmp's events_union is STRUCTURE — NOT the Sub's CONTENT mask. The Sub's mask only
-    // contributes to its own anchor's union; the prefix is engine infrastructure.
+    // /tmp's events_union is STRUCTURE — NOT the Sub's CONTENT mask. The Sub's mask only contributes
+    // to its own anchor's union; the prefix is engine infrastructure.
     assert_eq!(
         e.tree().get(tmp).unwrap().events_union(),
         ClassSet::STRUCTURE,
@@ -469,8 +470,8 @@ fn it_ef_4_anchor_terminal_bypasses_filter_for_narrow_mask() {
 //
 // Descendant `MetadataChanged` events on a Sub whose mask excludes METADATA drop with
 // `EventClassDropped` and do NOT extend the pre-fire or post-fire burst's `dirty` provenance (the
-// class filter sits before dirty-provenance notes). The Profile remains in its prior state; no
-// Effect emerges.
+// class filter sits before dirty-provenance notes). The Profile remains in its prior state; no Effect
+// emerges.
 // ───────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -637,11 +638,11 @@ fn it_ef_7_dir_metadata_drops_outside_proof_object() {
 
 #[test]
 fn it_ef_7_boundary_dir_structure_drops_for_outer_profile_via_co_located_demand() {
-    // The static co-location twin of a minted Profile on a discovery terminus: the boundary Dir
-    // holds no FD from the outer Profile (watch installation is interior-gated), so the only way an
-    // event surfaces there is a second Profile's own anchor demand. The event must then route by
-    // class per Profile: the anchor Profile drives its own burst; the outer Profile — for whom the
-    // slot is a boundary — drops it.
+    // The static co-location twin of a minted Profile on a discovery terminus: the boundary Dir holds
+    // no FD from the outer Profile (watch installation is interior-gated), so the only way an event
+    // surfaces there is a second Profile's own anchor demand. The event must then route by class
+    // per Profile: the anchor Profile drives its own burst; the outer Profile — for whom the slot
+    // is a boundary — drops it.
     let mut e = Engine::new();
     let x = pre_place_dir(&mut e, &["x"]);
     let now = Instant::now();
@@ -762,12 +763,12 @@ fn it_ef_7_boundary_dir_holds_no_fd_and_events_drop_at_head_guard() {
 //
 // The union mask can change without the refcount changing — when a second Profile starts covering a
 // Resource, its mask contribution may expand the union. The empty→non-empty edge alone is
-// structurally insufficient. `add_watch` emits Watch on that existence edge OR on any union
-// widening while the contributions map remains non-empty.
+// structurally insufficient. `add_watch` emits Watch on that existence edge OR on any union widening
+// while the contributions map remains non-empty.
 //
 // Watcher-side mechanics (cache diff, EV_ADD overwrite) are covered in
-// `crates/specter-sensor/tests/kqueue_rewatch.rs`. This engine-level test pins the upstream
-// contract: the engine emits the right Watch op.
+// `crates/specter-sensor/tests/kqueue_rewatch.rs`. This engine-level test pins the upstream contract:
+// the engine emits the right Watch op.
 // ───────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -851,9 +852,9 @@ fn it_ef_5_second_profile_widens_mask_emits_fresh_watch() {
 
 // ───────────────────────────────────────────────────────────────────────
 // IT-EF-2 dedup — the actuator's `DedupKey::Subtree` carries the Profile id, so two Profiles with
-// different masks get distinct coalescing keys. (The fire-history does not need to: it is now
-// per-Sub `Sub.has_fired`, with the owning Profile implicit, so two Profiles' Subs are inherently
-// distinct slots.)
+// different masks get distinct coalescing keys. (The fire-history does not need to: it is now per-Sub
+// `Sub.has_fired`, with the owning Profile implicit, so two Profiles' Subs are inherently distinct
+// slots.)
 // ───────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -895,9 +896,9 @@ fn it_ef_2_dedup_keys_disambiguated_by_profile_id() {
 // Seed-Vanished releases the anchor claim before descent re-entry
 //
 // `dispatch_pre_fire_vanished` releases the anchor's contribution (for both intents) inside
-// `finalize_anchor_lost_and_descend`, *before* the same step re-enters `Pending` — a still-Held
-// claim would violate `reap_profile`'s `!(Pending && Held)` trichotomy invariant at the descent
-// flip. The watch is re-acquired via descent's anchor materialization on recovery.
+// `finalize_anchor_lost_and_descend`, *before* the same step re-enters `Pending` — a still-Held claim
+// would violate `reap_profile`'s `!(Pending && Held)` trichotomy invariant at the descent flip. The
+// watch is re-acquired via descent's anchor materialization on recovery.
 // ───────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -1092,8 +1093,8 @@ fn seed_failed_releases_anchor_claim() {
 // ───────────────────────────────────────────────────────────────────────
 
 /// Set up a Profile + a covered Dir child so the anchor cannot reap when the Profile detaches (the
-/// child's existence keeps the slot alive). Returns (root, child, sid, pid). The Seed burst is
-/// driven to a pinned `Idle` via the quiescence proof ([`seed_to_idle`]).
+/// child's existence keeps the slot alive). Returns (root, child, sid, pid). The Seed burst is driven
+/// to a pinned `Idle` via the quiescence proof ([`seed_to_idle`]).
 fn setup_with_surviving_child(
     e: &mut Engine,
 ) -> (ResourceId, ResourceId, specter_core::SubId, ProfileId) {
@@ -1227,8 +1228,9 @@ fn standard_failed_with_reap_pending_does_not_double_release_anchor() {
 
 /// Drive the anchor-terminal-with-reap-pending setup: attach P + surviving child, kick off a Standard
 /// burst, advance to Probing, detach to set reap_pending, then dispatch the supplied FsEvent at the
-/// anchor. Returns the resulting StepOutput. Surviving child fixture keeps the anchor slot alive past
-/// `reap_profile`'s `try_reap`, exposing any post-finish refcount mistake on a still-live counter.
+/// anchor. Returns the resulting StepOutput. Surviving child fixture keeps the anchor slot alive
+/// past `reap_profile`'s `try_reap`, exposing any post-finish refcount mistake on a still-live
+/// counter.
 fn drive_anchor_terminal_with_reap_pending(event: FsEvent) -> (Engine, ResourceId, ProfileId) {
     let mut e = Engine::new();
     let (root, _child, sid, pid) = setup_with_surviving_child(&mut e);
@@ -1415,9 +1417,9 @@ fn anchor_terminal_with_reap_pending_multi_profile_each_released_once() {
 // ───────────────────────────────────────────────────────────────────────
 // Descendant-claim release
 //
-// The four claim types differ in cardinality: anchor / watch-root parent / descent prefix are
-// 1-to-1 (one Profile contributes to one Resource); covered descendants are 1-to-N (one Profile
-// contributes to N Tree slots). The 1-to-N descendant set needs its own release helper: clearing
+// The four claim types differ in cardinality: anchor / watch-root parent / descent prefix are 1-to-1
+// (one Profile contributes to one Resource); covered descendants are 1-to-N (one Profile contributes
+// to N Tree slots). The 1-to-N descendant set needs its own release helper: clearing
 // `Profile.current` on a teardown path without releasing the per-descendant `watch_demand`
 // contributions encoded in it would leave the descendant slots alive in the Tree with non-zero
 // `watch_demand`, the kernel keeping their FDs registered — a default `subtree-root × CONTENT` Sub
@@ -1426,9 +1428,9 @@ fn anchor_terminal_with_reap_pending_multi_profile_each_released_once() {
 // `Engine::release_descendant_claim` closes the symmetry. Wired into `reap_profile` and the seven
 // `dispatch_*_vanished/failed` + `finalize_anchor_lost` sites in `transitions.rs`. The helper takes
 // `Profile.current` atomically, then applies a wholesale-deletion `Diff::all_deleted` over it via
-// `apply_diff_to_tree`, releasing each covered slot's [`ContribKey::ProfileDescendant`]
-// contribution by explicit key. Removal by explicit key is unambiguous regardless of
-// `Profile.current`'s visibility to a concurrent graft.
+// `apply_diff_to_tree`, releasing each covered slot's [`ContribKey::ProfileDescendant`] contribution
+// by explicit key. Removal by explicit key is unambiguous regardless of `Profile.current`'s
+// visibility to a concurrent graft.
 // ───────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -1578,8 +1580,9 @@ fn release_descendant_claim_anchor_terminal_event_releases_descendants() {
         Instant::now(),
     );
 
-    // After Removed at the root anchor: no recovery parent, so the loss wrapper's fallback parks the
-    // Profile; anchor_claim cleared to None, current taken by release_descendant_claim, child reaped.
+    // After Removed at the root anchor: no recovery parent, so the loss wrapper's fallback parks
+    // the Profile; anchor_claim cleared to None, current taken by release_descendant_claim, child
+    // reaped.
     let p = e.profiles().get(pid).expect("Profile survives anchor loss");
     assert!(matches!(p.state(), ProfileState::Parked));
     assert_eq!(p.anchor_claim(), AnchorClaim::None);
@@ -1605,8 +1608,8 @@ fn release_descendant_claim_dispatch_rebase_vanished_releases_descendants() {
     // populated by the pre-fire `dispatch_quiescence_ok` `StandardFire` graft (`apply_snapshot`)
     // and contains the covered descendants. The rebase-failure path must release them too.
     //
-    // Lifecycle: Idle → ContentChanged at root → Active(Verifying) → ProbeResponse::Ok (stable,
-    // same snapshot) → emit_effects (one Effect for the SubtreeRoot Sub) → Active(Awaiting) →
+    // Lifecycle: Idle → ContentChanged at root → Active(Verifying) → ProbeResponse::Ok (stable, same
+    // snapshot) → emit_effects (one Effect for the SubtreeRoot Sub) → Active(Awaiting) →
     // EffectComplete::Ok → Active(Rebasing) directly (probe-first; the WholeSubtree rebase probe is
     // minted in that step) → ProbeResponse::Vanished → dispatch_rebase_vanished. The
     // release_descendant_claim wire-up walks Profile.current and reaps subdir.
@@ -1648,8 +1651,8 @@ fn release_descendant_claim_dispatch_rebase_vanished_releases_descendants() {
     ));
 
     // EffectComplete::Ok drives Awaiting → Rebasing directly (probe-first): the WholeSubtree rebase
-    // probe is minted in this very step, with no first Settling window. Read its correlation
-    // straight off the in-flight probe for the Vanished response below.
+    // probe is minted in this very step, with no first Settling window. Read its correlation straight
+    // off the in-flight probe for the Vanished response below.
     let _ = complete_effect_to_rebasing(&mut e, sid, effect.key(), t2);
     let rebase_corr = e
         .pending_probe_for(pid)
@@ -1694,9 +1697,9 @@ fn release_descendant_claim_dispatch_rebase_vanished_releases_descendants() {
 
 #[test]
 fn release_descendant_claim_multi_profile_preserves_others() {
-    // Two Profiles co-anchor at root with the same recursive scan, both observing the same
-    // descendant `subdir`. Profile P loses its anchor (Vanished); Profile Q stays Idle. P's release
-    // walks current and decrements subdir 2 → 1 — no leak — while Q's contribution survives at 1.
+    // Two Profiles co-anchor at root with the same recursive scan, both observing the same descendant
+    // `subdir`. Profile P loses its anchor (Vanished); Profile Q stays Idle. P's release walks
+    // current and decrements subdir 2 → 1 — no leak — while Q's contribution survives at 1.
     let mut e = Engine::new();
     let root = anchor_dir(&mut e, "src");
 
@@ -1729,8 +1732,8 @@ fn release_descendant_claim_multi_profile_preserves_others() {
         .map(|(pid, _)| pid)
         .expect("Q profile minted");
 
-    // Drive both to Idle with a shared seeded Dir descendant. Each Profile's create_child
-    // contributed +1 to subdir.watch_demand().
+    // Drive both to Idle with a shared seeded Dir descendant. Each Profile's create_child contributed
+    // +1 to subdir.watch_demand().
     let snap_p = dir_snap(&[("subdir", EntryKind::Dir, 99)]);
     let _ = seed_to_idle(&mut e, pid_p, &snap_p, t0_p);
     let snap_q = dir_snap(&[("subdir", EntryKind::Dir, 99)]);
@@ -1747,8 +1750,8 @@ fn release_descendant_claim_multi_profile_preserves_others() {
     );
 
     // Drive P's Standard burst to Verifying, detach P (reap_pending), inject Vanished — P's anchor
-    // is gone, but Q's stays. P's release_descendant_claim walks P's current and decrements
-    // subdir's contribution; Q's contribution is preserved.
+    // is gone, but Q's stays. P's release_descendant_claim walks P's current and decrements subdir's
+    // contribution; Q's contribution is preserved.
     let t1 = Instant::now();
     e.step(
         Input::FsEvent {
@@ -1866,9 +1869,9 @@ fn delete_child_during_graft_recompute_skips_releasing_profile() {
     drain_due(&mut e, t2);
     let correlation = e.pending_probe_for(pid_p).expect("P probe in flight");
 
-    // Probe response: subdir is GONE (P sees a tree where it's been deleted).
-    // dispatch_quiescence_ok → graft → apply_diff_to_tree Phase-1 fires `sub_watch_then_try_reap`
-    // for subdir keyed by `ContribKey::ProfileDescendant(pid_p)`.
+    // Probe response: subdir is GONE (P sees a tree where it's been deleted). dispatch_quiescence_ok
+    // → graft → apply_diff_to_tree Phase-1 fires `sub_watch_then_try_reap` for subdir keyed by
+    // `ContribKey::ProfileDescendant(pid_p)`.
     let response = Arc::new(DirSnapshot::new(
         DirMeta::synthetic(UNIX_EPOCH, FsIdentity::synthetic(0, 0)),
         0,
@@ -1886,8 +1889,8 @@ fn delete_child_during_graft_recompute_skips_releasing_profile() {
     // After the graft delete pass:
     // - subdir.watch_demand() goes 2 → 1 (P's ProfileDescendant entry removed).
     // - Remaining contributor Q's mask defines events_union = METADATA.
-    // - Without the contribution-map move (lazy-derivation era): the recompute could have
-    //   over-masked at CONTENT|METADATA.
+    // - Without the contribution-map move (lazy-derivation era): the recompute could have over-masked
+    //   at CONTENT|METADATA.
     assert!(
         e.tree().get(subdir).is_some(),
         "subdir survives, Q anchors it"

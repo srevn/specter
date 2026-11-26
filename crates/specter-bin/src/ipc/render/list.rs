@@ -69,10 +69,10 @@ struct Column {
 /// One rendered table cell — its plain text plus the [`Style`] to paint it with. Widths fold over
 /// `text.len()` (plain bytes), so a styled cell occupies the same columns as its plain twin.
 ///
-/// The paint wraps the right-padded cell ([`write_row`]), so the style covers the trailing pad:
-/// cell styles must be glyph-only (foreground hue or `dimmed`) — never background / underline /
-/// reverse, which would render on the pad spaces and break column alignment to the eye (the same
-/// constraint [`style::LABEL`] documents).
+/// The paint wraps the right-padded cell ([`write_row`]), so the style covers the trailing pad: cell
+/// styles must be glyph-only (foreground hue or `dimmed`) — never background / underline / reverse,
+/// which would render on the pad spaces and break column alignment to the eye (the same constraint
+/// [`style::LABEL`] documents).
 struct Cell {
     text: String,
     style: Style,
@@ -186,9 +186,8 @@ const ALL_COLUMNS: &[Column] = &[
     },
 ];
 
-/// Two-space inter-column padding on every join. The last column
-/// also carries a trailing `"  "` — invisible in fixed-width
-/// terminals, and keeps the header/data/separator writers symmetric.
+/// Two-space inter-column padding on every join. The last column also carries a trailing `"  "` —
+/// invisible in fixed-width terminals, and keeps the header/data/separator writers symmetric.
 const COL_GAP: &str = "  ";
 
 fn write_header(out: &mut String, columns: &[Column], widths: &[usize], sty: Styler) {
@@ -202,10 +201,10 @@ fn write_header(out: &mut String, columns: &[Column], widths: &[usize], sty: Sty
     out.push('\n');
 }
 
-/// One box-drawing dash per column-width cell, joined by [`COL_GAP`]. Each column's dash row
-/// matches the header / data widths exactly, so the separator lines up under the labels regardless
-/// of cell length. The dash run is a [`Rule`] per column painted [`style::DELIM`] — the
-/// N-rules-joined-by-gap shape, not one rule.
+/// One box-drawing dash per column-width cell, joined by [`COL_GAP`]. Each column's dash row matches
+/// the header / data widths exactly, so the separator lines up under the labels regardless of cell
+/// length. The dash run is a [`Rule`] per column painted [`style::DELIM`] — the N-rules-joined-by-gap
+/// shape, not one rule.
 fn write_separator(out: &mut String, widths: &[usize], sty: Styler) {
     for (i, &w) in widths.iter().enumerate() {
         if i > 0 {
@@ -447,9 +446,7 @@ mod tests {
     }
 
     /// The separator row spans each column's width with the box-drawing dash. The separator is at
-    /// least as wide as the
-    /// corresponding header — never empty (`"─".repeat(0)` would
-    /// regress this).
+    /// least as wide as the corresponding header — never empty (`"─".repeat(0)` would regress this).
     #[test]
     fn list_table_separator_repeats_per_column_width() {
         let resp = ListResponse {

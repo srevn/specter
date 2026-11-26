@@ -2,8 +2,9 @@
 //! step into [`CommandResolved`] argv plus the standard `SPECTER_*` env-var set.
 //!
 //! Lives next to the actuator because resolution runs immediately before `spawner.spawn` —
-//! Latest-coalesce drops `pending` Effects before they reach the syscall, so resolving at submit time
-//! wastes the bytes; resolving at spawn time preserves "render late" as the architectural invariant.
+//! Latest-coalesce drops `pending` Effects before they reach the syscall, so resolving at submit
+//! time wastes the bytes; resolving at spawn time preserves "render late" as the architectural
+//! invariant.
 //!
 //! Pure data work — no `std::env`, no `std::process`, no I/O. The actuator's `spawn_effect` is the
 //! sole production caller; sibling unit tests drive directly.
@@ -28,16 +29,16 @@
 //! # `SPECTER_DIFF_PATH` slots in alphabetically
 //!
 //! The actuator's `spawn_effect` materialises the diff tmp file (path depends on the actuator
-//! process's pid, so it can't be derived purely) and passes the resulting `&Path` to
-//! [`resolve_step`] as `diff_path`. The resolver inserts `SPECTER_DIFF_PATH` at its alphabetical
-//! position in the env vec rather than relying on the caller to append after the fact. The
-//! env-order golden test (`tests::env_order_is_alphabetical`) is then a guarantee about the bytes
-//! the spawned child sees, not just a property of the resolver's standalone output.
+//! process's pid, so it can't be derived purely) and passes the resulting `&Path` to [`resolve_step`]
+//! as `diff_path`. The resolver inserts `SPECTER_DIFF_PATH` at its alphabetical position in the env
+//! vec rather than relying on the caller to append after the fact. The env-order golden test
+//! (`tests::env_order_is_alphabetical`) is then a guarantee about the bytes the spawned child sees,
+//! not just a property of the resolver's standalone output.
 //!
 //! # Argv substitution semantics
 //!
-//! Each [`ArgTemplate`] in `ExecAction.argv` produces one or more argv slots. The walk is
-//! single-pass with a prefix accumulator:
+//! Each [`ArgTemplate`] in `ExecAction.argv` produces one or more argv slots. The walk is single-pass
+//! with a prefix accumulator:
 //!
 //! - **Literals** and **single-value placeholders** (`${specter.path}`, `${specter.relative}`,
 //!   `${specter.anchor}`, `${specter.watch}`, `${specter.parent}`, `${specter.time}`) append to the
@@ -50,13 +51,13 @@
 //!   becomes a standalone trailing slot. If nothing was emitted (no multi-value found), the
 //!   single-slot prefix is the one slot for this template.
 //! - An [`ArgTemplate`] containing a multi-value placeholder that yields zero entries (empty diff
-//!   list, `diff = None`, or empty exclude list) produces zero argv slots — there's no value to
-//!   emit, and dropping the surrounding prefix is the principle-of-least-surprise (`["fmt",
+//!   list, `diff = None`, or empty exclude list) produces zero argv slots — there's no value to emit,
+//!   and dropping the surrounding prefix is the principle-of-least-surprise (`["fmt",
 //!   "${specter.created}"]` with no created entries is just `["fmt"]`).
 //!
-//! Two multi-value placeholders within one template (exotic; e.g. `["mv ${specter.renamed_from}
-//! ${specter.renamed_to}"]` as one quoted arg) expand **independently** — no parallel zip. Users
-//! wanting per-pair semantics use `EffectScope::PerStableFile`.
+//! Two multi-value placeholders within one template (exotic; e.g. `["mv
+//! ${specter.renamed_from} ${specter.renamed_to}"]` as one quoted arg) expand **independently** —
+//! no parallel zip. Users wanting per-pair semantics use `EffectScope::PerStableFile`.
 //!
 //! # Env catalog
 //!
@@ -90,22 +91,22 @@
 //!
 //! # Single rendering pass per resolve
 //!
-//! All four shared single-value derivations — `${specter.path}` / `SPECTER_PATH`,
-//! `${specter.anchor}` / `SPECTER_ANCHOR`, `${specter.parent}` / `SPECTER_PARENT`, and
-//! `${specter.time}` / `SPECTER_TIME` — are rendered exactly once at the top of [`resolve_step`]
-//! and threaded through both `substitute_argv` and `build_env` as a [`Derived<'a>`] bundle whose
-//! `Cow<'a, str>` fields propagate the input borrow: Subtree fires (where `target_path` and
-//! `anchor_path` already live as `&'a Path`) emit `Cow::Borrowed` on the UTF-8 fast path, so
-//! `SPECTER_PATH`, `SPECTER_ANCHOR`, and `SPECTER_PARENT` cost zero allocations. PerFile fires
-//! (`target_path = anchor.join(segment)`, a stack-local `PathBuf`) own. The argv and env surfaces
-//! share the same source string for each placeholder by construction — no risk of one surface
-//! formatting differently from the other under future edits. The `Option<&Diff>` carrying the
-//! diff-derived placeholders is unpacked the same way, so a pipe's per-stage resolves and an argv
-//! template's per-arg loops both see the same `Arc` deref once.
+//! All four shared single-value derivations — `${specter.path}` / `SPECTER_PATH`, `${specter.anchor}`
+//! / `SPECTER_ANCHOR`, `${specter.parent}` / `SPECTER_PARENT`, and `${specter.time}` / `SPECTER_TIME`
+//! — are rendered exactly once at the top of [`resolve_step`] and threaded through both
+//! `substitute_argv` and `build_env` as a [`Derived<'a>`] bundle whose `Cow<'a, str>` fields
+//! propagate the input borrow: Subtree fires (where `target_path` and `anchor_path` already live as
+//! `&'a Path`) emit `Cow::Borrowed` on the UTF-8 fast path, so `SPECTER_PATH`, `SPECTER_ANCHOR`,
+//! and `SPECTER_PARENT` cost zero allocations. PerFile fires (`target_path = anchor.join(segment)`,
+//! a stack-local `PathBuf`) own. The argv and env surfaces share the same source string for each
+//! placeholder by construction — no risk of one surface formatting differently from the other under
+//! future edits. The `Option<&Diff>` carrying the diff-derived placeholders is unpacked the same
+//! way, so a pipe's per-stage resolves and an argv template's per-arg loops both see the same `Arc`
+//! deref once.
 //!
 //! Multi-value env values ([`env_multivalue`]) follow the same discipline: empty source lists
-//! short-circuit to `Cow::Borrowed("")` rather than allocating a zero-byte `String`; populated
-//! lists emit `Cow::Owned` after newline-joining.
+//! short-circuit to `Cow::Borrowed("")` rather than allocating a zero-byte `String`; populated lists
+//! emit `Cow::Owned` after newline-joining.
 
 use crate::env::EnvSnapshot;
 use crate::spawner::EnvVar;
@@ -134,8 +135,8 @@ pub(crate) struct CommandResolved {
 /// boundary, distinguishing "argv could not be rendered" from "binary could not be exec'd".
 ///
 /// v1 has one variant — strict `${env.<NAME>}` references that found neither an entry in the captured
-/// snapshot nor a `:-default` literal. The caller maps every variant to `EffectOutcome::Failed {
-/// exit_code: None, signal: None }` after a `tracing::error!` log line; the operator sees a clear
+/// snapshot nor a `:-default` literal. The caller maps every variant to `EffectOutcome::Failed
+/// { exit_code: None, signal: None }` after a `tracing::error!` log line; the operator sees a clear
 /// "Specter could not satisfy a required env reference" message in their journal, followed by a
 /// `tracing::warn!` at the synth-Failed dispatch site carrying the `Resolver` cause discriminant.
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -167,11 +168,11 @@ impl std::error::Error for ResolveError {}
 /// All three path-derived fields share one borrow discipline: when [`Effect::target_path`] returns
 /// `Cow::Borrowed` (Subtree fire shape, borrowing from `effect.anchor_path`), `path_lossy` /
 /// `parent_lossy` propagate the borrow into `Cow::Borrowed(&'a str)` on the UTF-8 fast path; when
-/// it returns `Cow::Owned` (PerFile fire shape, where `target_path = anchor_path.join(segment)`
-/// lives only on this resolve's stack), both fields own. `anchor_lossy` borrows from
-/// `effect.anchor_path` directly on the UTF-8 fast path. The unified `Cow<'a, str>` shape lets
-/// [`build_env`] move each field into `EnvVar<'a>::value` regardless of which arm is present, so
-/// the downstream env surface neither knows nor cares which fire shape produced the bytes.
+/// it returns `Cow::Owned` (PerFile fire shape, where `target_path = anchor_path.join(segment)` lives
+/// only on this resolve's stack), both fields own. `anchor_lossy` borrows from `effect.anchor_path`
+/// directly on the UTF-8 fast path. The unified `Cow<'a, str>` shape lets [`build_env`] move each
+/// field into `EnvVar<'a>::value` regardless of which arm is present, so the downstream env surface
+/// neither knows nor cares which fire shape produced the bytes.
 struct Derived<'a> {
     /// `${specter.path}` / `SPECTER_PATH`.
     path_lossy: Cow<'a, str>,
@@ -225,8 +226,8 @@ pub(crate) fn resolve_step<'a>(
     Ok((CommandResolved { argv }, env))
 }
 
-/// Render `target_path` and its parent as a `(path_lossy, parent_lossy)` pair of UTF-8-lossy
-/// `Cow<'a, str>`s, preserving the input `Cow`'s borrow discipline.
+/// Render `target_path` and its parent as a `(path_lossy, parent_lossy)` pair of UTF-8-lossy `Cow<'a,
+/// str>`s, preserving the input `Cow`'s borrow discipline.
 ///
 /// - **`Cow::Borrowed`** (Subtree fires — `target_path` is the anchor, borrowed from
 ///   `effect.anchor_path`): both projections borrow with lifetime `'a` on the UTF-8 fast path (Unix
@@ -238,8 +239,8 @@ pub(crate) fn resolve_step<'a>(
 ///   `parent_lossy` falls through `to_string_lossy().into_owned()` on the parent slice because the
 ///   `PathBuf` itself is still needed for the path-side consume that follows.
 ///
-/// Returning both projections from one match keeps the borrow analysis linear: the Subtree arm
-/// yields the borrow once for both keys, so a future caller cannot split the arm across two helper
+/// Returning both projections from one match keeps the borrow analysis linear: the Subtree arm yields
+/// the borrow once for both keys, so a future caller cannot split the arm across two helper
 /// invocations and re-walk the same `Path` twice.
 fn render_target_paths(target_path: Cow<'_, Path>) -> (Cow<'_, str>, Cow<'_, str>) {
     match target_path {
@@ -248,9 +249,9 @@ fn render_target_paths(target_path: Cow<'_, Path>) -> (Cow<'_, str>, Cow<'_, str
             p.parent().map_or(Cow::Borrowed(""), Path::to_string_lossy),
         ),
         Cow::Owned(pb) => {
-            // Compute `parent` while `pb` is still owned here — the closure copies the slice's
-            // bytes into a fresh `String`, so once `map_or_else` returns, no borrow of `pb` remains
-            // and the consume below is unencumbered.
+            // Compute `parent` while `pb` is still owned here — the closure copies the slice's bytes
+            // into a fresh `String`, so once `map_or_else` returns, no borrow of `pb` remains and
+            // the consume below is unencumbered.
             let parent = pb.parent().map_or_else(
                 || Cow::Owned(String::new()),
                 |q| Cow::Owned(q.to_string_lossy().into_owned()),
@@ -279,17 +280,17 @@ fn render_target_paths(target_path: Cow<'_, Path>) -> (Cow<'_, str>, Cow<'_, str
 /// owning hop.
 ///
 /// Takes `&Effect` rather than the two flat fields it reads (`anchor_path` + `anchor_kind`): every
-/// production caller already has the `Effect` in hand, and bundling avoids one parameter shape
-/// where a future cwd-relevant Effect field (e.g. an explicit `working_dir` override) would
-/// otherwise force a signature churn.
+/// production caller already has the `Effect` in hand, and bundling avoids one parameter shape where
+/// a future cwd-relevant Effect field (e.g. an explicit `working_dir` override) would otherwise force
+/// a signature churn.
 ///
 /// **`ResourceKind::Unknown` is unreachable.** The engine's `emit_effects` reads `Profile.kind` via
-/// `unwrap_or(ResourceKind::Dir)` (see `transitions.rs::emit_effects`); Pending Profiles whose
-/// anchor has not classified are additionally filtered at `covering_profiles` before any Effect is
-/// constructed. Together these guarantee that every Effect reaching the actuator carries
-/// `anchor_kind ∈ { File, Dir }`. The `Unknown` arm of this match exists as a typed tripwire — a
-/// future emit path that forgets the `unwrap_or` will panic here in dev rather than surface as an
-/// opaque `ENOTDIR` at spawn time.
+/// `unwrap_or(ResourceKind::Dir)` (see `transitions.rs::emit_effects`); Pending Profiles whose anchor
+/// has not classified are additionally filtered at `covering_profiles` before any Effect is
+/// constructed. Together these guarantee that every Effect reaching the actuator carries `anchor_kind
+/// ∈ { File, Dir }`. The `Unknown` arm of this match exists as a typed tripwire — a future emit path
+/// that forgets the `unwrap_or` will panic here in dev rather than surface as an opaque `ENOTDIR`
+/// at spawn time.
 #[must_use]
 pub(crate) fn compute_cwd(effect: &Effect) -> &Path {
     let anchor_path: &Path = &effect.anchor_path;
@@ -309,8 +310,8 @@ pub(crate) fn compute_cwd(effect: &Effect) -> &Path {
 }
 
 /// Initial capacity for the resolver's per-resolve scratch buffer ([`substitute_argv`]). Sized for
-/// "typical short argv slot" — long enough that most slots accumulate in-place without growth,
-/// small enough that the per-resolve baseline isn't wasteful. Slots longer than this grow scratch's
+/// "typical short argv slot" — long enough that most slots accumulate in-place without growth, small
+/// enough that the per-resolve baseline isn't wasteful. Slots longer than this grow scratch's
 /// allocation once; the grown capacity persists across subsequent slot renders within the same
 /// resolve.
 const SUBSTITUTE_SCRATCH_CAPACITY: usize = 64;
@@ -346,8 +347,8 @@ fn substitute_argv(
 }
 
 /// Render one [`ArgTemplate`] into zero or more argv slots, appending to `out`. Returns `Err` on
-/// the first [`ArgPart::EnvVar`] that resolves to neither a snapshot entry nor a `:-` default
-/// literal — short-circuits to the caller, which fails the plan with `EffectOutcome::Failed`.
+/// the first [`ArgPart::EnvVar`] that resolves to neither a snapshot entry nor a `:-` default literal
+/// — short-circuits to the caller, which fails the plan with `EffectOutcome::Failed`.
 ///
 /// `scratch` is a caller-owned [`String`] reused across calls. Cleared at the top; built up via
 /// `push_str`; cloned (not moved) into `out` at slot emission so the buffer's allocation survives
@@ -430,12 +431,12 @@ fn has_multivalue(arg: &ArgTemplate) -> bool {
 }
 
 /// Walk a multi-value placeholder's source list, yielding each value as `&str` via `emit`. Zero
-/// allocation: every value is borrowed in-place from `effect.exclude` (Excluded) or `diff` (the
-/// five diff-derived variants).
+/// allocation: every value is borrowed in-place from `effect.exclude` (Excluded) or `diff` (the five
+/// diff-derived variants).
 ///
 /// The single-value arms (`Path`, `Relative`, `Anchor`, `Watch`, `Parent`, `Time`) are unreachable
-/// by caller contract — argv routes only the six multi-value variants here, env's
-/// [`env_multivalue`] likewise. The empty fallback satisfies Rust's exhaustiveness.
+/// by caller contract — argv routes only the six multi-value variants here, env's [`env_multivalue`]
+/// likewise. The empty fallback satisfies Rust's exhaustiveness.
 ///
 /// Argv ([`substitute_one`]) tiles a clone of the accumulated prefix per emitted value; env
 /// ([`env_multivalue`]) newline-joins into one owned `String`. Both surfaces share this dispatch —
@@ -496,12 +497,12 @@ fn for_each_multivalue(
     }
 }
 
-/// Newline-joined render of a multi-value placeholder's source list, no trailing newline. Empty
-/// list (or absent diff) short-circuits to `Cow::Borrowed("")` — distinguishable from "one empty
-/// entry" for shell consumers reading via `while read`, and one fewer `String::new()` allocation
-/// per resolve in the common path where the Sub doesn't reference diff-derived placeholders (five
-/// empty multi-value categories collapse to five borrowed empty strings). Non-empty lists allocate
-/// one `String` and emit `Cow::Owned`.
+/// Newline-joined render of a multi-value placeholder's source list, no trailing newline. Empty list
+/// (or absent diff) short-circuits to `Cow::Borrowed("")` — distinguishable from "one empty entry"
+/// for shell consumers reading via `while read`, and one fewer `String::new()` allocation per resolve
+/// in the common path where the Sub doesn't reference diff-derived placeholders (five empty
+/// multi-value categories collapse to five borrowed empty strings). Non-empty lists allocate one
+/// `String` and emit `Cow::Owned`.
 ///
 /// The `first` flag (instead of `out.is_empty()`) preserves the separator when an interior entry is
 /// itself empty.
@@ -529,8 +530,8 @@ fn env_multivalue(p: Placeholder, effect: &Effect, diff: Option<&Diff>) -> Cow<'
 /// not a time worth rendering, and years below 0000 have no RFC 3339 form at all. A reading past
 /// [`Timestamp::MAX`] (late 9999) clamps to it — nothing later is representable. Production
 /// `SystemTime::now()` hits neither edge on a sane host, but a hostile clock or a test fixture can
-/// construct either, and the spawn path must not fail on one. The clamp emits a `tracing::warn!`
-/// at the moment it fires so a wedged clock surfaces in the operator's journal instead of silently
+/// construct either, and the spawn path must not fail on one. The clamp emits a `tracing::warn!` at
+/// the moment it fires so a wedged clock surfaces in the operator's journal instead of silently
 /// rendering the clamped value for every spawn.
 fn format_now(now: SystemTime) -> String {
     let ts = match Timestamp::try_from(now) {
@@ -570,9 +571,9 @@ const SPECTER_ENV_BASE_COUNT: usize = 15;
 /// predictability (e.g., `env | sort` matches positional `getenv` reads).
 ///
 /// `derived` carries the four single-value derivations [`resolve_step`] pre-rendered (`path_lossy`,
-/// `anchor_lossy`, `parent_lossy`, `time_str`); each field moves into the env vec at its
-/// `SPECTER_*` push site so this function and [`substitute_argv`] emit identical bytes for the
-/// corresponding placeholders.
+/// `anchor_lossy`, `parent_lossy`, `time_str`); each field moves into the env vec at its `SPECTER_*`
+/// push site so this function and [`substitute_argv`] emit identical bytes for the corresponding
+/// placeholders.
 ///
 /// Values are `Cow<'a, str>` so the resolver borrows whenever the byte sequence already lives
 /// somewhere stable across the resolve call — the [`Effect`]'s `target_relative` / `sub_name`, the
@@ -581,8 +582,8 @@ const SPECTER_ENV_BASE_COUNT: usize = 15;
 /// [`render_target_paths`] returned `Cow::Borrowed` (Subtree fires on the UTF-8 fast path). Owned
 /// strings are emitted only when synthesising bytes that did not previously exist
 /// (`SPECTER_CORRELATION`'s decimal render, populated multi-value joins, `SPECTER_TIME`'s RFC 3339
-/// string), or when `derived`'s path-derived fields fall through PerFile's Owned arm. Keys are
-/// always `&'static str`.
+/// string), or when `derived`'s path-derived fields fall through PerFile's Owned arm. Keys are always
+/// `&'static str`.
 fn build_env<'a>(
     effect: &'a Effect,
     derived: Derived<'a>,
@@ -704,10 +705,10 @@ mod tests {
         EnvSnapshot::from_map::<_, &str, &str>([])
     }
 
-    /// Convenience wrapper for tests that don't exercise `${specter.time}` / `SPECTER_TIME`
-    /// rendering — pins `now` to the Unix epoch, omits the diff tmp file, and uses an empty env
-    /// snapshot. Time-sensitive tests call [`super::resolve_step`] directly with the instant they
-    /// want; diff-tmp-aware tests pass `diff_path: Some(_)` directly; env-aware tests build a fresh
+    /// Convenience wrapper for tests that don't exercise `${specter.time}` / `SPECTER_TIME` rendering
+    /// — pins `now` to the Unix epoch, omits the diff tmp file, and uses an empty env snapshot.
+    /// Time-sensitive tests call [`super::resolve_step`] directly with the instant they want;
+    /// diff-tmp-aware tests pass `diff_path: Some(_)` directly; env-aware tests build a fresh
     /// snapshot inline.
     fn resolve(e: &Effect) -> (CommandResolved, Vec<EnvVar<'_>>) {
         let exec = exec_of(e);
@@ -724,8 +725,8 @@ mod tests {
         }
     }
 
-    /// The resolver derives `target_path` from `(anchor_path, relative())` at spawn time. Tests
-    /// pass the anchor + relative pair; the helper does no extra dispatch.
+    /// The resolver derives `target_path` from `(anchor_path, relative())` at spawn time. Tests pass
+    /// the anchor + relative pair; the helper does no extra dispatch.
     ///
     /// `scope` selects the `EffectTarget` shape (Subtree ⇒ no per-file segment, PerStableFile ⇒
     /// per-file segment); the resolver then derives `SPECTER_EVENT_KIND` from the shape.
@@ -1023,9 +1024,9 @@ mod tests {
 
     #[test]
     fn format_now_clamps_to_renderable_range() {
-        // Production never reads a clock outside the renderable range on a sane Unix host, but
-        // tests can construct one at either edge. The resolver clamps both so the spawn path can't
-        // fail on a hostile clock.
+        // Production never reads a clock outside the renderable range on a sane Unix host, but tests
+        // can construct one at either edge. The resolver clamps both so the spawn path can't fail
+        // on a hostile clock.
         let pre = SystemTime::UNIX_EPOCH - std::time::Duration::from_secs(1);
         let e = make_effect(
             "x",
@@ -1469,8 +1470,8 @@ mod tests {
 
     #[test]
     fn env_specter_deleted_and_modified_render_their_categories() {
-        // One Diff carrying entries for two categories; each env var pulls from its own list.
-        // Asserts the dispatch in `diff_env_segs` doesn't cross-contaminate.
+        // One Diff carrying entries for two categories; each env var pulls from its own list. Asserts
+        // the dispatch in `diff_env_segs` doesn't cross-contaminate.
         let diff = Diff {
             deleted: smallvec![entry_ref("d1", 1), entry_ref("d2", 2)],
             modified: smallvec![entry_ref("m1", 3)],
@@ -1930,13 +1931,13 @@ mod tests {
 
     // ---------- Cow borrow discipline ----------
     //
-    // When `Effect::target_path` is `Cow::Borrowed` (Subtree fire), `SPECTER_PATH` /
-    // `SPECTER_PARENT` propagate the borrow into `Cow::Borrowed` on the UTF-8 fast path; when it is
-    // `Cow::Owned` (PerFile fire), both fields own. The two assertions below pin one Subtree case
-    // (path + parent in one resolve) and one PerFile case so a future regression that forces an
-    // unconditional `into_owned()` on either field surfaces in the test suite. The empty-multivalue
-    // short-circuit gets its own small assertion since the borrow-vs-owned property there is
-    // independent of `target_path`.
+    // When `Effect::target_path` is `Cow::Borrowed` (Subtree fire), `SPECTER_PATH` / `SPECTER_PARENT`
+    // propagate the borrow into `Cow::Borrowed` on the UTF-8 fast path; when it is `Cow::Owned`
+    // (PerFile fire), both fields own. The two assertions below pin one Subtree case (path + parent
+    // in one resolve) and one PerFile case so a future regression that forces an unconditional
+    // `into_owned()` on either field surfaces in the test suite. The empty-multivalue short-circuit
+    // gets its own small assertion since the borrow-vs-owned property there is independent of
+    // `target_path`.
 
     #[test]
     fn env_specter_path_and_parent_borrow_for_subtree() {
@@ -1968,8 +1969,8 @@ mod tests {
     #[test]
     fn env_specter_path_and_parent_own_for_perfile() {
         // PerFile `target_path = anchor.join(segment)` is a freshly-joined `PathBuf` living only on
-        // the resolve stack; both fields must own their bytes for the env vec to outlive the
-        // resolve call.
+        // the resolve stack; both fields must own their bytes for the env vec to outlive the resolve
+        // call.
         let e = make_effect(
             "x",
             EffectScope::PerStableFile,
@@ -1991,11 +1992,11 @@ mod tests {
 
     #[test]
     fn env_multivalue_borrows_empty_string_when_no_entries() {
-        // `env_multivalue` short-circuits the empty case to `Cow::Borrowed("")` instead of
-        // allocating an empty `String`. The no-diff resolve emits six empty multi-value env vars;
-        // this saves six `String::new()` allocations per resolve on the common path for Subs that
-        // don't reference diff placeholders. One probe per category is enough — they all route
-        // through the same helper.
+        // `env_multivalue` short-circuits the empty case to `Cow::Borrowed("")` instead of allocating
+        // an empty `String`. The no-diff resolve emits six empty multi-value env vars; this saves
+        // six `String::new()` allocations per resolve on the common path for Subs that don't
+        // reference diff placeholders. One probe per category is enough — they all route through
+        // the same helper.
         let e = make_effect(
             "x",
             EffectScope::SubtreeRoot,
@@ -2025,8 +2026,8 @@ mod tests {
 
     // ---------- ${env.<NAME>} ----------
 
-    /// `${env.NAME}` resolves to the snapshot's value when present. Default-bearing form is
-    /// exercised below; together they cover both lexer branches in the resolver pass.
+    /// `${env.NAME}` resolves to the snapshot's value when present. Default-bearing form is exercised
+    /// below; together they cover both lexer branches in the resolver pass.
     #[test]
     fn resolve_env_var_substitutes_from_snapshot() {
         let env = EnvSnapshot::from_map([("HOME", "/home/op")]);
@@ -2076,8 +2077,8 @@ mod tests {
         );
     }
 
-    /// Unset env var with a `:-default` renders the default literal — explicit lenient opt-in.
-    /// Empty default (`${env.X:-}`) renders empty.
+    /// Unset env var with a `:-default` renders the default literal — explicit lenient opt-in. Empty
+    /// default (`${env.X:-}`) renders empty.
     #[test]
     fn resolve_env_var_unset_with_default_renders_default() {
         let env = EnvSnapshot::from_map::<_, &str, &str>([]);

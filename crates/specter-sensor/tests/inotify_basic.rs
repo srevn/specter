@@ -2,8 +2,8 @@
 //! operation, and asserts that the corresponding [`FsEvent`] arrives at [`FsWatcher::drain_ready`].
 //! Mirror of `kqueue_basic.rs`.
 //!
-//! Each test passes the minimum [`ClassSet`] needed to fire the event it asserts on (identity floor
-//! + class-aware mapping):
+//! Each test passes the minimum [`ClassSet`] needed to fire the event it asserts on (identity floor +
+//! class-aware mapping):
 //! - Terminal events ([`FsEvent::Removed`], [`FsEvent::Renamed`]) work with [`ClassSet::EMPTY`]
 //!   because `IDENTITY_FLOOR = IN_DELETE_SELF | IN_MOVE_SELF | IN_UNMOUNT` is OR-ed onto every
 //!   registration.
@@ -41,8 +41,8 @@ fn poll_for(w: &InotifyWatcher) -> Poll {
     poll
 }
 
-/// Drain events from `w` into a `(ResourceId, FsEvent)` accumulator until at least one matches
-/// `pred` or the deadline elapses. Returns the accumulated events. Inotify can emit
+/// Drain events from `w` into a `(ResourceId, FsEvent)` accumulator until at least one matches `pred`
+/// or the deadline elapses. Returns the accumulated events. Inotify can emit
 /// [`WatcherEvent::Overflow`], so the helper records but does not panic on it.
 fn drain_until<F: Fn(&(ResourceId, FsEvent)) -> bool>(
     w: &mut InotifyWatcher,
@@ -280,9 +280,9 @@ fn unwatch_after_event_does_not_panic_on_subsequent_poll() {
     std::fs::write(&path, "changed").unwrap();
     w.unwatch(r_file);
 
-    // Late event drain — kernel may still deliver an event whose wd is now in `draining_wds`.
-    // Watcher drops the event silently; the `IN_IGNORED` consumption clears the flag. Test contract
-    // is "no panic / no error".
+    // Late event drain — kernel may still deliver an event whose wd is now in `draining_wds`. Watcher
+    // drops the event silently; the `IN_IGNORED` consumption clears the flag. Test contract is "no
+    // panic / no error".
     let mut poll = poll_for(&w);
     let mut events = Events::with_capacity(8);
     let mut out: Vec<WatcherEvent> = Vec::new();

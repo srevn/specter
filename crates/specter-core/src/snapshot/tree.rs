@@ -6,12 +6,12 @@
 //! - Snapshots are tree-shaped. Each `DirSnapshot` owns one directory's `lstat` triple ([`DirMeta`]),
 //!   the `ScanConfig` hash they were captured under (`captured_with`), and a `BTreeMap<CompactString,
 //!   ChildEntry>` of direct children (string-keyed — keeps the hash cross-process stable).
-//! - Children are either [`LeafEntry`] (file/symlink/other; no recursion) or [`DirChild`]
-//!   (directory; a sum type of the three things a walk can truthfully say of one —
-//!   `Covered(Arc<DirSnapshot>)`, `Uncovered(FsIdentity)` and `Denied(FsIdentity)`). `Uncovered`
-//!   means the shape does not list the directory (beyond `max_depth`, cross-filesystem, a chain
-//!   terminus); `Denied` that the shape lists it and the walk could not read it. The sum makes the
-//!   discrimination structural rather than `Option`-tagged.
+//! - Children are either [`LeafEntry`] (file/symlink/other; no recursion) or [`DirChild`] (directory;
+//!   a sum type of the three things a walk can truthfully say of one — `Covered(Arc<DirSnapshot>)`,
+//!   `Uncovered(FsIdentity)` and `Denied(FsIdentity)`). `Uncovered` means the shape does not list
+//!   the directory (beyond `max_depth`, cross-filesystem, a chain terminus); `Denied` that the shape
+//!   lists it and the walk could not read it. The sum makes the discrimination structural rather
+//!   than `Option`-tagged.
 //! - A `DirSnapshot` carries no engine-side identity. The walker speaks paths; the engine speaks
 //!   resources; navigation helpers ([`subtree_at_dir`], [`TreeSnapshot::subtree_at`]) take an
 //!   explicit `anchor: ResourceId` so the caller's anchor invariant lives at the call site rather
@@ -29,9 +29,10 @@
 //!   boundary and a denied directory of one identity fold apart). `root_meta.mtime` is **not** folded
 //!   — `dir_hash` is filter-aware identity ("are these snapshots observably the same to the user?"),
 //!   and a directory's mtime bumps on every dirent-block change including filtered-out entries
-//!   (`.DS_Store`, hidden files, excluded paths) the user-configured filter would never present. The
-//!   walker's mtime-skip optimisation reads `root_meta.mtime` as a struct field on [`DirSnapshot`]
-//!   (its own kernel-aware identity); no consumer needs the value composed into the hash.
+//!   (`.DS_Store`, hidden files, excluded paths) the user-configured filter would never present.
+//!   The walker's mtime-skip optimisation reads `root_meta.mtime` as a struct field on
+//!   [`DirSnapshot`] (its own kernel-aware identity); no consumer needs the value composed into the
+//!   hash.
 //! - Both hashes are computed **eagerly at construction** and stored as plain `u128` fields. The
 //!   walker pays SipHash24 on its worker thread (parallel pool); the engine driver reads the field
 //!   via a `const fn` accessor. Eager construction collapses the prior `OnceLock<u128>` cache
@@ -39,13 +40,13 @@
 //!   into a function-of-data invariant: `leaf_hash(l) == compute_leaf_hash(l.fields)` and
 //!   `dir_hash(d) == compute_dir_hash(d.fields)` hold by construction, not by convention.
 //! - The walker may inherit a baseline leaf's hash via [`LeafEntry::from_metadata_or_inherit`] when
-//!   identity fields match — a pure performance optimisation (skips one SipHash24 fold per
-//!   unchanged leaf in a dirent-bumped directory), semantically equivalent to recomputing since the
-//!   inherited value is identical to what recomputation would produce.
+//!   identity fields match — a pure performance optimisation (skips one SipHash24 fold per unchanged
+//!   leaf in a dirent-bumped directory), semantically equivalent to recomputing since the inherited
+//!   value is identical to what recomputation would produce.
 //! - 128-bit width (`siphasher::sip128`): pair-comparison space at scale (`O(levels × bursts ×
 //!   profiles)`) makes 64-bit collision probability uncomfortable; 128 bits is astronomically safe.
-//! - `FsIdentity` folds into a digest only via [`crate::fs_id::encode_into`] (`inode` then
-//!   `device`, each a little-endian `u64`); nested digests (`leaf_hash`, `dir_hash`) fold through
+//! - `FsIdentity` folds into a digest only via [`crate::fs_id::encode_into`] (`inode` then `device`,
+//!   each a little-endian `u64`); nested digests (`leaf_hash`, `dir_hash`) fold through
 //!   `StableHasher::put_u128`, an endian-explicit width. Pinned by
 //!   `fs_id::tests::encode_into_matches_inode_then_device` plus the snapshot goldens so a field
 //!   reorder or encoding change fires at nextest time before goldens silently drift.
@@ -79,8 +80,8 @@ use std::time::SystemTime;
 /// kernel identity guarding against the delete-and-recreate-at-same-path case.
 ///
 /// `mtime` drives the skip; `fs_id` defends against the case where the directory was unlinked and
-/// recreated at the same path between probes (the recreation gets a fresh inode under POSIX
-/// semantics — same name, different identity).
+/// recreated at the same path between probes (the recreation gets a fresh inode under POSIX semantics
+/// — same name, different identity).
 ///
 /// ## Atomicity invariant
 ///
@@ -104,14 +105,14 @@ pub struct DirMeta {
 impl DirMeta {
     /// Construct from a single freshly-`lstat`ed `Metadata`.
     ///
-    /// Both halves are read here, inside the constructor, from the *same* `&Metadata` — this is
-    /// what discharges the atomicity invariant at the type boundary. `Metadata::modified` and
+    /// Both halves are read here, inside the constructor, from the *same* `&Metadata` — this is what
+    /// discharges the atomicity invariant at the type boundary. `Metadata::modified` and
     /// `MetadataExt::ino`/`dev` read fields the sensor's `lstat` already populated; they are *not*
     /// syscalls, so this stays consistent with `core`'s no-I/O discipline (I1).
     ///
-    /// The `UNIX_EPOCH` mtime fallback (platform without a usable modified-time) is centralised
-    /// here — the single production source of a `DirMeta` mtime, so the sentinel cannot vary across
-    /// walker call sites.
+    /// The `UNIX_EPOCH` mtime fallback (platform without a usable modified-time) is centralised here
+    /// — the single production source of a `DirMeta` mtime, so the sentinel cannot vary across walker
+    /// call sites.
     #[cfg(unix)]
     #[must_use]
     pub fn from_metadata(meta: &std::fs::Metadata) -> Self {
@@ -134,8 +135,8 @@ impl DirMeta {
     }
 
     /// Test-only constructor from explicit halves, bypassing the single-`lstat` provenance
-    /// [`DirMeta::from_metadata`] enforces. Compiled only under `cfg(test)` or the `testkit`
-    /// feature, mirroring [`FsIdentity::synthetic`].
+    /// [`DirMeta::from_metadata`] enforces. Compiled only under `cfg(test)` or the `testkit` feature,
+    /// mirroring [`FsIdentity::synthetic`].
     #[cfg(any(test, feature = "testkit"))]
     #[must_use]
     pub const fn synthetic(mtime: SystemTime, fs_id: FsIdentity) -> Self {
@@ -153,8 +154,8 @@ impl DirMeta {
 /// [`LeafEntry::leaf_hash`]. All five fields are private: every production leaf is built from one
 /// `&Metadata` via [`LeafEntry::from_metadata`] / [`LeafEntry::from_metadata_or_inherit`], so the
 /// four identity fields are atomic (one `lstat`) and `leaf_hash == compute_leaf_hash(fields)` holds
-/// by construction. `Clone` / `PartialEq` / `Debug` auto-derive correctly because the hash is a
-/// pure function of the data.
+/// by construction. `Clone` / `PartialEq` / `Debug` auto-derive correctly because the hash is a pure
+/// function of the data.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LeafEntry {
     kind: EntryKind,
@@ -201,10 +202,10 @@ impl LeafEntry {
     /// As [`LeafEntry::from_metadata`], but inherits `baseline`'s `leaf_hash` iff every identity
     /// field matches — eliding one SipHash24 fold per unchanged leaf in a dirent-bumped directory.
     /// Observably equivalent to recomputation: `baseline` was itself built through `from_parts` (or
-    /// `synthetic`), so on a full identity match `baseline.leaf_hash == compute_leaf_hash(kind,
-    /// size, mtime, fs_id)` already — the inherited value *is* the recomputed one. This is the
-    /// single deliberate bypass of `from_parts`; the identity gate makes "transferring the wrong
-    /// hash" unrepresentable. Same non-directory precondition as [`LeafEntry::from_metadata`].
+    /// `synthetic`), so on a full identity match `baseline.leaf_hash == compute_leaf_hash(kind, size,
+    /// mtime, fs_id)` already — the inherited value *is* the recomputed one. This is the single
+    /// deliberate bypass of `from_parts`; the identity gate makes "transferring the wrong hash"
+    /// unrepresentable. Same non-directory precondition as [`LeafEntry::from_metadata`].
     #[cfg(unix)]
     #[must_use]
     pub fn from_metadata_or_inherit(meta: &std::fs::Metadata, baseline: Option<&Self>) -> Self {
@@ -260,8 +261,8 @@ impl LeafEntry {
         self.leaf_hash
     }
 
-    /// Test-only constructor from explicit identity fields, computing `leaf_hash` so fixtures
-    /// uphold the eager-hash invariant too. Bypasses the single-`lstat` provenance
+    /// Test-only constructor from explicit identity fields, computing `leaf_hash` so fixtures uphold
+    /// the eager-hash invariant too. Bypasses the single-`lstat` provenance
     /// [`LeafEntry::from_metadata`] enforces; compiled only under `cfg(test)` or the `testkit`
     /// feature, mirroring [`FsIdentity::synthetic`].
     #[cfg(any(test, feature = "testkit"))]
@@ -337,10 +338,10 @@ const fn entry_kind_from_flags(is_file: bool, is_symlink: bool) -> EntryKind {
 /// Within a Profile — whose `config_hash` freezes the scan shape and its depth bounds, and whose
 /// cross-fs identity bifurcates through `fs_id` rather than this variant — one identity changes
 /// variant one way only: `Denied` → `Covered`, a branch that opened. Between a listed variant and
-/// `Uncovered` a change would need a gate the config froze, and `Covered` → `Denied` would be a
-/// walk denied a directory it held a listing of, where that listing stands in. An entry the shape
-/// filters (`exclude`, a chain's positional match) is absent from the parent's `entries` map — no
-/// variant applies.
+/// `Uncovered` a change would need a gate the config froze, and `Covered` → `Denied` would be a walk
+/// denied a directory it held a listing of, where that listing stands in. An entry the shape filters
+/// (`exclude`, a chain's positional match) is absent from the parent's `entries` map — no variant
+/// applies.
 ///
 /// Subtree mtime is **not** stored on `DirChild` — the canonical mtime lives at
 /// `Covered(_).root_meta.mtime` and is consumed by the walker's mtime-skip directly off the
@@ -348,8 +349,8 @@ const fn entry_kind_from_flags(is_file: bool, is_symlink: bool) -> EntryKind {
 /// (filter-aware identity is independent of kernel-side dirent-block churn).
 ///
 /// Every variant projects a uniform `fs_id()` (sourced from the subtree's `root_meta.fs_id` on
-/// `Covered`, stored directly on the other two); the hash fold tags each variant, so the three
-/// shapes contribute distinct payloads even when their identities coincide.
+/// `Covered`, stored directly on the other two); the hash fold tags each variant, so the three shapes
+/// contribute distinct payloads even when their identities coincide.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DirChild {
     /// The walk listed it. The kernel identity lives at `arc.root_meta.fs_id`.
@@ -362,8 +363,8 @@ pub enum DirChild {
 }
 
 impl DirChild {
-    /// Kernel identity of the directory. For `Covered`, sourced from the subtree's
-    /// `root_meta.fs_id`; for the other two, the stored value. Single source of truth per variant.
+    /// Kernel identity of the directory. For `Covered`, sourced from the subtree's `root_meta.fs_id`;
+    /// for the other two, the stored value. Single source of truth per variant.
     #[must_use]
     pub fn fs_id(&self) -> FsIdentity {
         match self {
@@ -388,8 +389,8 @@ pub enum PriorDir<'a> {
     Listed(&'a Arc<DirSnapshot>),
     /// This very directory, recorded denied.
     Denied,
-    /// Nothing known: no directory under the name, another directory under it, a boundary, or a
-    /// name below a directory the earlier snapshot holds no listing of.
+    /// Nothing known: no directory under the name, another directory under it, a boundary, or a name
+    /// below a directory the earlier snapshot holds no listing of.
     Unseen,
 }
 
@@ -466,21 +467,21 @@ impl ChildEntry {
 // DirSnapshot
 // ---------------------------------------------------------------------------
 
-/// One directory's snapshot. Recursive via `ChildEntry::Dir`'s `Option<Arc<DirSnapshot>>`. The
-/// `Arc` discipline lets splice and the walker's mtime-skip share subtrees across snapshots without
+/// One directory's snapshot. Recursive via `ChildEntry::Dir`'s `Option<Arc<DirSnapshot>>`. The `Arc`
+/// discipline lets splice and the walker's mtime-skip share subtrees across snapshots without
 /// copying.
 ///
 /// ## Immutability boundary
 ///
-/// All data fields are private and there is no mutator, so **no crate outside this module can
-/// desync the eager `dir_hash` or assemble a snapshot from torn observations** — the engine/sensor
-/// lifecycle the seal closes. `root_meta` is an atomic-by-construction [`DirMeta`] (one `lstat`,
-/// via [`DirMeta::from_metadata`]); the sole constructor [`Self::new`] folds `dir_hash` eagerly
-/// from the inputs. Within this module every constructor folds eagerly, so the module — not a
-/// caller convention — is the trust boundary: there is no public surface, in any crate, that
-/// installs a `dir_hash` disagreeing with the data. `Clone` / `PartialEq` / `Debug` auto-derive
-/// correctly because the hash is a pure function of the rest. `Send + Sync` are trivially derived;
-/// compile-time pinned in tests.
+/// All data fields are private and there is no mutator, so **no crate outside this module can desync
+/// the eager `dir_hash` or assemble a snapshot from torn observations** — the engine/sensor lifecycle
+/// the seal closes. `root_meta` is an atomic-by-construction [`DirMeta`] (one `lstat`, via
+/// [`DirMeta::from_metadata`]); the sole constructor [`Self::new`] folds `dir_hash` eagerly from
+/// the inputs. Within this module every constructor folds eagerly, so the module — not a caller
+/// convention — is the trust boundary: there is no public surface, in any crate, that installs a
+/// `dir_hash` disagreeing with the data. `Clone` / `PartialEq` / `Debug` auto-derive correctly
+/// because the hash is a pure function of the rest. `Send + Sync` are trivially derived; compile-time
+/// pinned in tests.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DirSnapshot {
     root_meta: DirMeta,
@@ -540,11 +541,11 @@ impl DirSnapshot {
         self.dir_hash
     }
 
-    /// Look up `name` and return the entry's `LeafEntry` iff present and the entry is a leaf.
-    /// Returns `None` for missing entries and for `Dir` entries.
+    /// Look up `name` and return the entry's `LeafEntry` iff present and the entry is a leaf. Returns
+    /// `None` for missing entries and for `Dir` entries.
     ///
-    /// Sole intended caller is the walker's per-leaf cache-transfer site, which feeds the result into
-    /// [`LeafEntry::from_metadata_or_inherit`] to elide the SipHash24 fold on identity-matching
+    /// Sole intended caller is the walker's per-leaf cache-transfer site, which feeds the result
+    /// into [`LeafEntry::from_metadata_or_inherit`] to elide the SipHash24 fold on identity-matching
     /// baselines. The identity check that gates the inheritance lives in `from_metadata_or_inherit`,
     /// not here — this primitive returns the raw reference; callers compose the gate.
     #[must_use]
@@ -620,8 +621,8 @@ impl TreeSnapshot {
     /// - Any segment fails to resolve via `tree.name` (slot reaped).
     ///
     /// `anchor` is the engine-side `ResourceId` the caller knows the snapshot is rooted at — for
-    /// [`crate::Profile::current`], this is `profile.resource`. Navigation uses `&Tree`
-    /// exclusively; `DirSnapshot` carries no engine identity of its own.
+    /// [`crate::Profile::current`], this is `profile.resource`. Navigation uses `&Tree` exclusively;
+    /// `DirSnapshot` carries no engine identity of its own.
     #[must_use]
     pub fn subtree_at(
         &self,
@@ -654,8 +655,8 @@ const DIR_COVERED_TAG: u8 = 2;
 /// Tag for `DirChild::Uncovered` — a Dir child the snapshot did not descend; its subtree is opaque.
 const DIR_UNCOVERED_TAG: u8 = 3;
 
-/// Tag for `DirChild::Denied` — a Dir child the shape lists that the walk could not read. Apart
-/// from [`DIR_UNCOVERED_TAG`], so a denied directory and a boundary of one identity fold apart.
+/// Tag for `DirChild::Denied` — a Dir child the shape lists that the walk could not read. Apart from
+/// [`DIR_UNCOVERED_TAG`], so a denied directory and a boundary of one identity fold apart.
 const DIR_DENIED_TAG: u8 = 4;
 
 fn compute_leaf_hash(kind: EntryKind, size: u64, mtime: SystemTime, fs_id: FsIdentity) -> u128 {
@@ -686,8 +687,8 @@ fn compute_dir_hash(
     h.put_u64(entries.len() as u64);
 
     // Sequential lex-order fold (BTreeMap iterates in lex order). XOR was rejected: sequential
-    // preserves ordering information and avoids commutative-fold subtleties at no real cost
-    // (entries are already sorted by construction).
+    // preserves ordering information and avoids commutative-fold subtleties at no real cost (entries
+    // are already sorted by construction).
     //
     // Per-variant tags keep the three child shapes unambiguous at the hash level — without a tag, a
     // `Leaf` with `leaf_hash = X` and a `Dir(Covered)` whose subtree's `dir_hash = X` would fold
@@ -773,17 +774,17 @@ pub fn subtree_at_dir(
 }
 
 /// Walk `tree.parent` from `target` up to `anchor` and return the inclusive chain `[anchor, mid_1,
-/// ..., target]`. Returns `None` when `target` is not in `anchor`'s subtree (the parent walk
-/// bottoms out before reaching `anchor`).
+/// ..., target]`. Returns `None` when `target` is not in `anchor`'s subtree (the parent walk bottoms
+/// out before reaching `anchor`).
 ///
 /// Sole helper for navigation that needs to follow the path from an anchor down to one of its
 /// descendants — [`subtree_at_dir`] consumes it as the descent guide for snapshot navigation;
 /// [`splice`] consumes it to know which intermediate `DirSnapshot`s need rebuilding.
 ///
-/// Termination relies on the [`Tree`] acyclicity invariant: each `tree.parent` step strictly
-/// ascends, so the walk reaches `anchor` or bottoms out at a root (`None`) in at most
-/// `depth(target)` steps. The loop is intentionally not depth-bounded here — the bound is a
-/// property of [`Tree`] construction, not a guard this hot path re-checks.
+/// Termination relies on the [`Tree`] acyclicity invariant: each `tree.parent` step strictly ascends,
+/// so the walk reaches `anchor` or bottoms out at a root (`None`) in at most `depth(target)` steps.
+/// The loop is intentionally not depth-bounded here — the bound is a property of [`Tree`]
+/// construction, not a guard this hot path re-checks.
 fn ancestor_chain(
     target: ResourceId,
     anchor: ResourceId,
@@ -840,9 +841,9 @@ pub enum SpliceResult {
 /// off-path subtrees with `prior` via `Arc`. Rebuilds at most `depth(target)` `DirSnapshot`s along
 /// the path-to-anchor.
 ///
-/// `anchor` is the Profile's anchor `ResourceId` — the engine-side identity the caller knows
-/// `prior` is rooted at. It drives `ancestor_chain`'s walk and isn't compared against any snapshot
-/// field; the wire payload is path-and-content only.
+/// `anchor` is the Profile's anchor `ResourceId` — the engine-side identity the caller knows `prior`
+/// is rooted at. It drives `ancestor_chain`'s walk and isn't compared against any snapshot field;
+/// the wire payload is path-and-content only.
 ///
 /// **File-anchored Profiles never call this helper.** Their `Profile.current` is
 /// `TreeSnapshot::File(leaf)`, integrated by an inline write at the relevant `dispatch_*_ok`. The
@@ -869,10 +870,10 @@ pub enum SpliceResult {
 ///   directory the snapshot holds no listing of (a coverage gap), a missing entry, or a `Leaf` at
 ///   an interior segment.
 ///
-/// None is reachable through legitimate filesystem state: the engine roots every probe at a
-/// directory `prior` lists. The caller's prior handle stays alive across the breach (it's an
-/// independent Arc clone), so no integration occurs; the caller emits a Diagnostic so the contract
-/// breach is observable.
+/// None is reachable through legitimate filesystem state: the engine roots every probe at a directory
+/// `prior` lists. The caller's prior handle stays alive across the breach (it's an independent Arc
+/// clone), so no integration occurs; the caller emits a Diagnostic so the contract breach is
+/// observable.
 #[must_use]
 pub fn splice(
     prior: Option<Arc<DirSnapshot>>,
@@ -906,8 +907,8 @@ fn splice_dir_prior(
     let Some(chain) = ancestor_chain(target, anchor, tree) else {
         // Target outside anchor's tree subtree. The caller keeps its prior view (independent Arc
         // clone) and surfaces the contract violation. Wholesale-replacing with `replacement` would
-        // leave `Profile.current` rooted at `target` (not anchor) and violate the snapshot
-        // navigation invariants.
+        // leave `Profile.current` rooted at `target` (not anchor) and violate the snapshot navigation
+        // invariants.
         return SpliceResult::CrossedUncovered(SpliceFailureCause::TargetOutsideAnchorSubtree);
     };
 
@@ -923,8 +924,8 @@ fn splice_dir_prior(
 }
 
 /// Recursive splice helper. Returns `Ok(arc)` on a successful per-level rebuild (or G7
-/// short-circuit); returns `Err(cause)` when navigation can't proceed at this level. The two
-/// failure modes:
+/// short-circuit); returns `Err(cause)` when navigation can't proceed at this level. The two failure
+/// modes:
 /// - [`SpliceFailureCause::SlotReapedMidGraft`] — `tree.name(next_id)` returned `None` for an
 ///   interior segment; the slot's generation moved between burst start and graft commit.
 /// - [`SpliceFailureCause::IntermediateUncovered`] — the prior snapshot's `lookup_covered_dir(name)`
@@ -939,8 +940,8 @@ fn splice_dir_prior(
 /// per splice, plus one `compute_dir_hash` fold per rebuilt ancestor. Worst-case for a 1000-entry
 /// directory at depth-3 splice: ~3000 `ChildEntry` clones plus the BTreeMap's interior-node allocs
 /// (4-8 entries per node ⇒ ~150 node allocs per level). The per-level G7 short-circuit prunes
-/// ancestors above the deepest observable change, so the realistic cost is over the *changed*
-/// prefix of the spine, not the full path.
+/// ancestors above the deepest observable change, so the realistic cost is over the *changed* prefix
+/// of the spine, not the full path.
 fn splice_dir(
     prior: &Arc<DirSnapshot>,
     rest: &[ResourceId],
@@ -955,8 +956,8 @@ fn splice_dir(
         }
         return Ok(replacement);
     };
-    // Slot reaped mid-graft. Engine contract says this can't happen for an observed subtree;
-    // surface as SlotReapedMidGraft so operators can demux it from IntermediateUncovered.
+    // Slot reaped mid-graft. Engine contract says this can't happen for an observed subtree; surface
+    // as SlotReapedMidGraft so operators can demux it from IntermediateUncovered.
     let name = tree
         .name(next_id)
         .ok_or(SpliceFailureCause::SlotReapedMidGraft)?;
@@ -977,8 +978,8 @@ fn splice_dir(
         return Ok(Arc::clone(prior));
     }
 
-    // `prior.lookup_covered_dir(name)` above proved the key exists, so we mutate the cloned entry in
-    // place — `BTreeMap::insert(K, V)` would drop a fresh `CompactString::new(name)` on the floor
+    // `prior.lookup_covered_dir(name)` above proved the key exists, so we mutate the cloned entry
+    // in place — `BTreeMap::insert(K, V)` would drop a fresh `CompactString::new(name)` on the floor
     // here (insert updates the value but never the key when the key was already present in the map).
     let mut new_entries = prior.entries.clone();
     *new_entries.get_mut(name).expect(
@@ -1005,9 +1006,9 @@ fn splice_dir(
 /// pre-order**: `BTreeMap` iteration (lexicographic within a directory) then fixed recursion, so a
 /// directory entry is immediately followed by its whole subtree, before the directory's lexical
 /// siblings. Deterministic and replay-stable (`Diff: PartialEq`) but **not** a flat lexicographic
-/// sort of `parent/child` paths: the two diverge whenever a sibling sorts between a directory and its
-/// children (`d.txt` between `d` and `d/file`, since `/` = 0x2F sorts after `.` = 0x2E). `renamed` is
-/// in baseline-side traversal order, not sorted by `from` (see `pair_renames`).
+/// sort of `parent/child` paths: the two diverge whenever a sibling sorts between a directory and
+/// its children (`d.txt` between `d` and `d/file`, since `/` = 0x2F sorts after `.` = 0x2E).
+/// `renamed` is in baseline-side traversal order, not sorted by `from` (see `pair_renames`).
 ///
 /// Cross-level rename detection: the per-level walk collects deltas keyed by `fs_id`; a
 /// `pair_renames` post-pass then pairs `Created` and `Deleted` across the whole walk into `Renamed`.
@@ -1039,9 +1040,9 @@ pub fn diff_dir_pair(baseline: &DirSnapshot, current: &DirSnapshot) -> Diff {
 /// [`Diff`] over two parallel [`TreeSnapshot`] trees.
 ///
 /// Anchor-shape-dispatching surface: matches the [`TreeSnapshot`] variant pair to [`diff_dir_pair`]
-/// (Dir/Dir) or the private File/File walker. The production consumer is the engine's
-/// `emit_effects` (diffs owned `baseline()` / `current()` [`TreeSnapshot`]s on the driver thread);
-/// test fixtures also use it to diff over both anchor shapes. The typed Dir/Dir hot path
+/// (Dir/Dir) or the private File/File walker. The production consumer is the engine's `emit_effects`
+/// (diffs owned `baseline()` / `current()` [`TreeSnapshot`]s on the driver thread); test fixtures
+/// also use it to diff over both anchor shapes. The typed Dir/Dir hot path
 /// (`specter_engine::reconcile::graft`) calls [`diff_dir_pair`] directly to skip the variant match.
 /// Per-list ordering is [`diff_dir_pair`]'s — stable depth-first pre-order.
 #[must_use]
@@ -1076,9 +1077,9 @@ struct StagedEntry {
     /// When `false`, `pair_renames` skips this entry's `fs_id` from rename matching and routes it
     /// directly to `out.created` / `out.deleted`. Used for parent slots whose identity has flipped
     /// (kind change at the same name, Dir replaced at a different inode): such slots represent
-    /// observably-different entities and are not rename candidates, even when their inodes
-    /// coincide. Descendants of these slots remain eligible — genuine moves into / out of the slot
-    /// surface as Renames.
+    /// observably-different entities and are not rename candidates, even when their inodes coincide.
+    /// Descendants of these slots remain eligible — genuine moves into / out of the slot surface as
+    /// Renames.
     pair_eligible: bool,
 }
 
@@ -1158,9 +1159,9 @@ fn diff_same_name(
     match (pc, nc) {
         (ChildEntry::Leaf(p), ChildEntry::Leaf(n)) => {
             if p.fs_id != n.fs_id {
-                // Same name, different kernel identity ⇒ delete-then-create. Stage as
-                // pair_eligible: each side may legitimately pair with a cross-level entry sharing
-                // its `fs_id` (the user moved the prior file out and a different one in).
+                // Same name, different kernel identity ⇒ delete-then-create. Stage as pair_eligible:
+                // each side may legitimately pair with a cross-level entry sharing its `fs_id` (the
+                // user moved the prior file out and a different one in).
                 stage(rel.clone(), pc, true, staged_deleted);
                 stage(rel, nc, true, staged_created);
             } else if p.leaf_hash() != n.leaf_hash() {
@@ -1214,9 +1215,9 @@ fn diff_same_name(
 }
 
 /// A name whose entity changed between the two snapshots. Each side stages ineligible — the slot
-/// must surface as Deleted + Created, never collapse into a same-name "Rename", even where the
-/// kernel reused the inode across the change — and its descendants stage eligible, so a genuine
-/// move into or out of the slot still pairs as a cross-level Rename against the rest of the walk.
+/// must surface as Deleted + Created, never collapse into a same-name "Rename", even where the kernel
+/// reused the inode across the change — and its descendants stage eligible, so a genuine move into
+/// or out of the slot still pairs as a cross-level Rename against the rest of the walk.
 fn stage_replaced(
     rel: CompactString,
     prior: &ChildEntry,
@@ -1228,11 +1229,11 @@ fn stage_replaced(
     stage(rel, new, false, staged_created);
 }
 
-/// Stage `entry` at `rel` on one side of a diff, then every entry of the listing beneath it,
-/// eligible — the one primitive every staged entry passes through, and so the one gate that keeps a
-/// denied directory out of every diff. Depth-first pre-order: an entry precedes its subtree, and
-/// each level is lex-ordered by its `BTreeMap`. The output is a flat Diff for the Effect API, which
-/// does not care about reap order.
+/// Stage `entry` at `rel` on one side of a diff, then every entry of the listing beneath it, eligible
+/// — the one primitive every staged entry passes through, and so the one gate that keeps a denied
+/// directory out of every diff. Depth-first pre-order: an entry precedes its subtree, and each level
+/// is lex-ordered by its `BTreeMap`. The output is a flat Diff for the Effect API, which does not
+/// care about reap order.
 fn stage(
     rel: CompactString,
     entry: &ChildEntry,
@@ -1260,37 +1261,37 @@ fn stage(
 // Diff single-snapshot constructors
 // ---------------------------------------------------------------------------
 //
-// `all_created` / `all_deleted` are the snapshot ↔ empty transformations. They exist as named
-// methods (rather than `diff_tree(empty, snap)` calls) to avoid allocating an empty `DirSnapshot`
-// per invocation; both reuse the same depth-first pre-order staging recursion as `diff_tree`.
+// `all_created` / `all_deleted` are the snapshot ↔ empty transformations. They exist as named methods
+// (rather than `diff_tree(empty, snap)` calls) to avoid allocating an empty `DirSnapshot` per
+// invocation; both reuse the same depth-first pre-order staging recursion as `diff_tree`.
 //
 // **Asymmetry vs `modified` / `renamed`.** The four `Diff` categories do not have symmetric
 // single-snapshot reductions:
 //
-// - `created` / `deleted`: snapshot ↔ empty has a natural meaning (every entry appeared /
-//   disappeared relative to the empty state).
+// - `created` / `deleted`: snapshot ↔ empty has a natural meaning (every entry appeared / disappeared
+//   relative to the empty state).
 // - `modified`: pairs entries across two non-empty snapshots by identity (same `(inode, device)`,
 //   different `leaf_hash`). One snapshot alone cannot express "modified relative to what" — there
 //   is no implicit prior identity.
-// - `renamed`: pairs entries across two non-empty snapshots by both `(inode, device)` and
-//   `segment`. Requires both endpoints.
+// - `renamed`: pairs entries across two non-empty snapshots by both `(inode, device)` and `segment`.
+//   Requires both endpoints.
 //
 // So `all_modified` / `all_renamed` have no semantically grounded definition, only an arbitrary one
 // (e.g. "every entry as Modified relative to itself") that no engine path would need. They are
 // omitted by design.
 
 impl Diff {
-    /// Construct a [`Diff`] where every entry of `snap` (recursively, into covered subtrees)
-    /// appears as a `Created` entry, in stable depth-first pre-order (the same order
-    /// [`diff_dir_pair`] emits).
+    /// Construct a [`Diff`] where every entry of `snap` (recursively, into covered subtrees) appears
+    /// as a `Created` entry, in stable depth-first pre-order (the same order [`diff_dir_pair`]
+    /// emits).
     ///
-    /// Equivalent to `diff_tree(empty_dirsnapshot, snap)` without the empty `DirSnapshot`
-    /// allocation. Sole intended caller is `specter_engine::reconcile::graft`'s first-graft path
+    /// Equivalent to `diff_tree(empty_dirsnapshot, snap)` without the empty `DirSnapshot` allocation.
+    /// Sole intended caller is `specter_engine::reconcile::graft`'s first-graft path
     /// (`Profile.current == None` ⇒ every entry of the response is new from the engine's
     /// perspective).
     ///
-    /// `modified` / `renamed` are empty by construction — there is no prior snapshot to pair
-    /// entries against; see the module-level asymmetry rationale.
+    /// `modified` / `renamed` are empty by construction — there is no prior snapshot to pair entries
+    /// against; see the module-level asymmetry rationale.
     #[must_use]
     pub fn all_created(snap: &DirSnapshot) -> Self {
         let mut staged: Vec<StagedEntry> = Vec::new();
@@ -1342,18 +1343,18 @@ impl Diff {
 /// **Pairing rules.** A `(deleted, created)` pair becomes a `Rename` iff (1) both sides are
 /// `pair_eligible`, (2) the `fs_id` matches, (3) the `kind` matches, and (4) the `rel` differs.
 /// Same-`rel` candidates are structurally impossible for eligible entries (parent kind changes and
-/// Dir-replace-at-different-fs_id stage their parents ineligible; other staging paths cannot
-/// produce same-rel collisions in the global buffer) — pinned by the `debug_assert` below.
-/// Cross-kind candidates arise from kernel inode reuse across unrelated operations and are not
-/// renames; they fall through to Created+Deleted.
+/// Dir-replace-at-different-fs_id stage their parents ineligible; other staging paths cannot produce
+/// same-rel collisions in the global buffer) — pinned by the `debug_assert` below. Cross-kind
+/// candidates arise from kernel inode reuse across unrelated operations and are not renames; they
+/// fall through to Created+Deleted.
 ///
 /// Output order: unpaired Created/Deleted are emitted in collection order (depth-first pre-order on
-/// each side); Renamed entries are emitted in `staged_deleted`'s iteration order — the
-/// baseline-side depth-first pre-order, not sorted by `from`.
+/// each side); Renamed entries are emitted in `staged_deleted`'s iteration order — the baseline-side
+/// depth-first pre-order, not sorted by `from`.
 ///
-/// The BTreeMap is keyed lookup-only (never iterated), so the canonical `FsIdentity` ord
-/// (inode-first by declaration order) supersedes the pre-migration `(device, inode)` tuple ord with
-/// no observable effect.
+/// The BTreeMap is keyed lookup-only (never iterated), so the canonical `FsIdentity` ord (inode-first
+/// by declaration order) supersedes the pre-migration `(device, inode)` tuple ord with no observable
+/// effect.
 fn pair_renames(
     staged_created: Vec<StagedEntry>,
     staged_deleted: Vec<StagedEntry>,
@@ -1436,9 +1437,9 @@ fn diff_file_pair(b: &LeafEntry, c: &LeafEntry, out: &mut Diff) {
             });
         }
     } else {
-        // Kernel-identity change at the file Profile's anchor: same-segment kind/identity flip.
-        // Emit Deleted + Created (no Rename: a file Profile sees its anchor as one fact, not a
-        // moved name).
+        // Kernel-identity change at the file Profile's anchor: same-segment kind/identity flip. Emit
+        // Deleted + Created (no Rename: a file Profile sees its anchor as one fact, not a moved
+        // name).
         out.deleted.push(EntryRef {
             segment: CompactString::new(""),
             kind: b.kind,

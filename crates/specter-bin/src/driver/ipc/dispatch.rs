@@ -49,13 +49,13 @@ use std::time::{Duration, Instant};
 /// Upper bound on an operator `absorb --for` window, clamped at the driver before the engine step.
 ///
 /// The driver is the sole [`Input::ArmAbsorb`] producer, and the engine derives the window expiry
-/// as `now + duration` (`specter_engine`'s `on_arm_absorb`). `Instant + Duration` panics on
-/// overflow — on a u64-nanosecond `Instant` (macOS) a multi-century `Duration` overflows — so the
-/// duration is clamped here, where every client is covered, rather than guarded with defensive
-/// arithmetic in the (rightly-trusting, as it trusts config) engine.
+/// as `now + duration` (`specter_engine`'s `on_arm_absorb`). `Instant + Duration` panics on overflow
+/// — on a u64-nanosecond `Instant` (macOS) a multi-century `Duration` overflows — so the duration
+/// is clamped here, where every client is covered, rather than guarded with defensive arithmetic in
+/// the (rightly-trusting, as it trusts config) engine.
 ///
-/// **Not a policy cap.** An `absorb` window covers a replication transfer — seconds to hours — so ten
-/// years is unreachable by operator intent, yet leaves >50× headroom below the tightest `Instant`
+/// **Not a policy cap.** An `absorb` window covers a replication transfer — seconds to hours — so
+/// ten years is unreachable by operator intent, yet leaves >50× headroom below the tightest `Instant`
 /// representation (a u64-nanosecond monotonic counter overflows ~584 years past its epoch).
 /// `parse_duration` (CLI) and the engine impose no cap by design; this is the lone overflow guard.
 const MAX_ABSORB_WINDOW: Duration = Duration::from_hours(10 * 365 * 24);
@@ -69,8 +69,8 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// [`ReadOutcome`] return:
     ///
     /// - [`ReadOutcome::PeerGone`] (EOF or unrecoverable read error) ⇒ unconditional
-    ///   [`super::Hub::terminate_conn`]. Any pending write-queue bytes are wasted because the
-    ///   peer's read end has closed.
+    ///   [`super::Hub::terminate_conn`]. Any pending write-queue bytes are wasted because the peer's
+    ///   read end has closed.
     /// - [`ReadOutcome::Continue`] ⇒ pair with [`super::Hub::try_terminate_if_idle`]. The read drain
     ///   may have armed `close_after_flush` (oversize line, or over-cap read accumulator); the
     ///   handler loop may have enqueued response bytes; the queue state at this point is the conn's
@@ -82,14 +82,14 @@ impl<W: FsWatcher> EngineDriver<W> {
     ///
     /// Write-side termination (peer-gone observed during a `drain_writable` call, or a
     /// `close_after_flush` that flushed cleanly) lives on the tick's WRITABLE pass — that pass
-    /// terminates directly via [`super::Hub::terminate_conn`] because it doesn't need any IPC
-    /// handler state.
+    /// terminates directly via [`super::Hub::terminate_conn`] because it doesn't need any IPC handler
+    /// state.
     ///
     /// Returns [`ControlFlow::Break`] iff a handler observed shutdown mid-apply (the
     /// `Reload`/`Disable`/`Enable`/`Absorb` arms can drive `engine.step` + `forward`, and a
     /// downstream-disconnect `forward` propagates Break upward). All other paths return
-    /// [`ControlFlow::Continue`] — including malformed JSON, unknown names, and read failures,
-    /// which surface to the operator as a structured `Err` response or a clean conn close.
+    /// [`ControlFlow::Continue`] — including malformed JSON, unknown names, and read failures, which
+    /// surface to the operator as a structured `Err` response or a clean conn close.
     pub(in crate::driver) fn drain_ipc_lines(
         &mut self,
         read_tokens: &[Token],
@@ -115,8 +115,8 @@ impl<W: FsWatcher> EngineDriver<W> {
             }
             match outcome {
                 ReadOutcome::Continue => {
-                    // Handler loop above may have pushed response bytes into the queue; the
-                    // close-arm may have been set by the read drain's oversize-line guard.
+                    // Handler loop above may have pushed response bytes into the queue; the close-arm
+                    // may have been set by the read drain's oversize-line guard.
                     // try_terminate_if_idle resolves the four combinations into the right action.
                     self.ipc.try_terminate_if_idle(token);
                 }
@@ -168,15 +168,15 @@ impl<W: FsWatcher> EngineDriver<W> {
     ///
     /// # Mutating-verb shutdown gate
     ///
-    /// `Reload`, `Disable`, `Enable`, and `Absorb` are gated on
-    /// `EngineDriver::first_term.is_none()` — once the driver has observed a SIGINT / SIGTERM,
-    /// mutating verbs refuse with [`WireErrorCode::ShuttingDown`]. The actuator is in the middle of
-    /// its grace pipeline; admitting a fresh `engine.step` from `Reload` (which can attach new Subs
-    /// that arm probes), `Disable` / `Enable` (which mutate engine state), or `Absorb` (which arms
-    /// a window and may retro-latch an in-flight burst) would invalidate the shutdown's premise
-    /// that the engine is winding down. Read-only verbs (`Status`, `List`, `Show`) and `Subscribe`
-    /// (bin-local mutation only — flips `conn.role` without touching engine state) stay accessible
-    /// so operators can `tail` the wind-down.
+    /// `Reload`, `Disable`, `Enable`, and `Absorb` are gated on `EngineDriver::first_term.is_none()`
+    /// — once the driver has observed a SIGINT / SIGTERM, mutating verbs refuse with
+    /// [`WireErrorCode::ShuttingDown`]. The actuator is in the middle of its grace pipeline;
+    /// admitting a fresh `engine.step` from `Reload` (which can attach new Subs that arm probes),
+    /// `Disable` / `Enable` (which mutate engine state), or `Absorb` (which arms a window and may
+    /// retro-latch an in-flight burst) would invalidate the shutdown's premise that the engine is
+    /// winding down. Read-only verbs (`Status`, `List`, `Show`) and `Subscribe` (bin-local mutation
+    /// only — flips `conn.role` without touching engine state) stay accessible so operators can
+    /// `tail` the wind-down.
     fn handle_ipc_line(&mut self, token: Token, line: &[u8], now: Instant) -> ControlFlow<()> {
         let trimmed = line
             .strip_suffix(b"\n")
@@ -195,8 +195,8 @@ impl<W: FsWatcher> EngineDriver<W> {
             }
         };
         // Mutating-verb shutdown gate — see the rustdoc above. Lives at this seam (not on each
-        // handler) so the four mutating-verb arms below stay focused on their happy path; the
-        // refusal carries the structured `ShuttingDown` code so operator scripts can branch
+        // handler) so the four mutating-verb arms below stay focused on their happy path; the refusal
+        // carries the structured `ShuttingDown` code so operator scripts can branch
         // deterministically.
         if self.first_term.is_some()
             && matches!(
@@ -337,10 +337,10 @@ impl<W: FsWatcher> EngineDriver<W> {
         ControlFlow::Continue(())
     }
 
-    /// The Sub a mutating verb addresses by `name` — a declared watch, or a dynamic watch's
-    /// template — or `None` once the refusal is answered on `token`: [`WireErrorCode::UnknownSub`]
-    /// for a name no Sub holds, [`WireErrorCode::MintedSubNoOp`] naming the dynamic watch for a Sub
-    /// its template minted.
+    /// The Sub a mutating verb addresses by `name` — a declared watch, or a dynamic watch's template
+    /// — or `None` once the refusal is answered on `token`: [`WireErrorCode::UnknownSub`] for a name
+    /// no Sub holds, [`WireErrorCode::MintedSubNoOp`] naming the dynamic watch for a Sub its template
+    /// minted.
     fn admit_watch(&mut self, token: Token, name: &str) -> Option<SubId> {
         let subs = self.engine.subs();
         let (code, error) = match subs.find_by_name(name) {
@@ -379,11 +379,11 @@ impl<W: FsWatcher> EngineDriver<W> {
     ///    admission would answer that no watch holds it.
     /// 2. [`Self::admit_watch`] admits a watch.
     ///
-    /// On the apply path, the override-set insert runs BEFORE the engine's [`Input::DetachSub`]
-    /// step. The ordering binds the `disabled_runtime ↔ engine` invariant across the engine step:
-    /// any same-tick observer that reads `disabled_runtime` membership sees the override in place
-    /// before the detach emission, so a reload running on the same tick refuses to re-attach in the
-    /// same pass.
+    /// On the apply path, the override-set insert runs BEFORE the engine's [`Input::DetachSub`] step.
+    /// The ordering binds the `disabled_runtime ↔ engine` invariant across the engine step: any
+    /// same-tick observer that reads `disabled_runtime` membership sees the override in place before
+    /// the detach emission, so a reload running on the same tick refuses to re-attach in the same
+    /// pass.
     ///
     /// The reply is acked unconditionally after the work — matching the [`WireRequest::Reload`] ack
     /// discipline. State mutations happen before [`Self::forward`], so the `Ok` ack is truthful
@@ -425,11 +425,11 @@ impl<W: FsWatcher> EngineDriver<W> {
     ///    failure path the runtime state is consistent: the operator's "no longer want this
     ///    suppressed" intent is honoured regardless of whether the TOML can re-attach.
     /// 2. **Re-attach iff the TOML carries the entry active.**
-    ///    [`specter_config::Config::find_active_watch`] returns `None` for both "entry has `enabled
-    ///    = false`" AND "entry left the TOML entirely"; both surface the same
+    ///    [`specter_config::Config::find_active_watch`] returns `None` for both "entry has `enabled =
+    ///    false`" AND "entry left the TOML entirely"; both surface the same
     ///    [`WireErrorCode::TomlDisabled`] to the operator. On a hit, a fresh [`Input::AttachSub`]
-    ///    step drives re-attach, and per-anchor outcomes (Pending descent, AttachPathInvalid)
-    ///    surface via diag fan-out ([`super::Hub::dispatch_to_subscribers`]), not the verb ack.
+    ///    step drives re-attach, and per-anchor outcomes (Pending descent, AttachPathInvalid) surface
+    ///    via diag fan-out ([`super::Hub::dispatch_to_subscribers`]), not the verb ack.
     ///
     /// The reply is acked unconditionally after the work — same discipline as
     /// [`Self::handle_disable`].
@@ -471,14 +471,14 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// firing, folding an expected replication into the settled reference rather than echoing it.
     ///
     /// [`Self::admit_watch`] admits a watch, as for [`Self::handle_disable`]. A dynamic watch that
-    /// holds no match arms nothing and is acked all the same: the verb reaches the matches the
-    /// watch holds when it is asked, and refusing would stop an `absorb && rsync` exactly where the
-    /// rsync is what creates them.
+    /// holds no match arms nothing and is acked all the same: the verb reaches the matches the watch
+    /// holds when it is asked, and refusing would stop an `absorb && rsync` exactly where the rsync
+    /// is what creates them.
     ///
-    /// On the apply path the operator's `duration_ms` is rebuilt into a [`Duration`] **and
-    /// clamped** to [`MAX_ABSORB_WINDOW`] before the engine step — the lone overflow guard for the
-    /// feature (see that constant). A `None` duration threads through as the engine's
-    /// consume-on-first default (one `settle` interval).
+    /// On the apply path the operator's `duration_ms` is rebuilt into a [`Duration`] **and clamped**
+    /// to [`MAX_ABSORB_WINDOW`] before the engine step — the lone overflow guard for the feature
+    /// (see that constant). A `None` duration threads through as the engine's consume-on-first
+    /// default (one `settle` interval).
     ///
     /// The reply is acked unconditionally after the work — same discipline as
     /// [`Self::handle_disable`] / [`Self::handle_enable`].

@@ -29,8 +29,8 @@ pub struct ValidationIssue {
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum IssueKind {
     /// User-supplied `[[watch]] name` is empty. Distinct from [`Self::EmptyLogPath`] (the
-    /// file-destination path) and [`Self::EmptyPath`] (the watch path) so operator-triage
-    /// categories stay one-to-one with their fields.
+    /// file-destination path) and [`Self::EmptyPath`] (the watch path) so operator-triage categories
+    /// stay one-to-one with their fields.
     EmptyName,
     /// `[log] destination = "file"` with no `[log] path` (and no `--log-path` CLI override). The
     /// `path` field is required iff the destination resolves to `File`. Distinct from
@@ -41,16 +41,16 @@ pub enum IssueKind {
     EmptyPath,
     /// `[[watch]] path` contains a `..` component (anywhere). Maps from
     /// `PathError::ContainsParentDir`. The operator must supply a literal absolute path without
-    /// parent-dir traversal — `..` segments would silently change filesystem semantics by
-    /// collapsing one symlink boundary.
+    /// parent-dir traversal — `..` segments would silently change filesystem semantics by collapsing
+    /// one symlink boundary.
     PathContainsParentDir,
     /// `[[watch]] path` canonicalisation hit a non-`NotFound` `io::Error` — `PermissionDenied`
     /// (EACCES), symlink loop (ELOOP), non-directory in path (ENOTDIR), EIO, etc. Maps from
     /// `PathError::Inaccessible`. The detail line carries the cursor at fault and the underlying
     /// error so operators can distinguish the failure class without reaching for `strace` / `dtruss`.
     PathInaccessible,
-    /// `[[watch]] path` canonicalised to a buffer carrying non-UTF-8 segments — typically via
-    /// symlink resolution onto a non-UTF-8 byte path. Maps from `PathError::NonUtf8`. The engine's
+    /// `[[watch]] path` canonicalised to a buffer carrying non-UTF-8 segments — typically via symlink
+    /// resolution onto a non-UTF-8 byte path. Maps from `PathError::NonUtf8`. The engine's
     /// [`specter_core::Tree::parse_attach_path`] gate would reject the path; surface up-front so
     /// the validator's contract ("ok ⇒ engine accepts the path") holds.
     NonUtf8Path,
@@ -87,13 +87,13 @@ pub enum IssueKind {
     InvalidPattern,
     /// The watch's event mask does not cover the classes its scan shape needs to witness quiescence
     /// over a settle window — for a subtree watch, CONTENT. Advisory, never fatal: emitted by
-    /// [`crate::Config::warnings`], never by `validate`. The configuration is documented and
-    /// intended (the hash-channel safety net for `mmap` / async-I/O / `splice(2)` writers whose
-    /// in-place writes the kernel may not surface as events), but its price is structural: every
-    /// fire must prove quiescence through two consecutive agreeing full subtree walks at the anchor
-    /// with mtime-skip disabled, instead of one event-scoped walk. The warning makes that cost
-    /// visible at config load; the detail carries the trade-off and the opt-out (add `"content"` to
-    /// `events` when no such writers exist).
+    /// [`crate::Config::warnings`], never by `validate`. The configuration is documented and intended
+    /// (the hash-channel safety net for `mmap` / async-I/O / `splice(2)` writers whose in-place
+    /// writes the kernel may not surface as events), but its price is structural: every fire must
+    /// prove quiescence through two consecutive agreeing full subtree walks at the anchor with
+    /// mtime-skip disabled, instead of one event-scoped walk. The warning makes that cost visible
+    /// at config load; the detail carries the trade-off and the opt-out (add `"content"` to `events`
+    /// when no such writers exist).
     EventsIncompleteMask,
     /// `actions[i].timeout` is set on an action variant that doesn't support a top-level timeout.
     /// v1: only `exec` accepts it. Future variants (`pipe`, `conditional`) set timeouts on their
@@ -104,10 +104,10 @@ pub enum IssueKind {
     /// child before it makes any progress, which is almost certainly a typo. Operators wanting "no
     /// deadline" omit the field entirely.
     TimeoutZero,
-    /// `actions[i]` partially sets the conditional triple: `when` without `then`, or `then` /
-    /// `else` without `when`. The grammar requires both `when` and `then` together; `else` is
-    /// optional. Fires before the conditional body is validated so per-branch errors don't pile on
-    /// a structurally-broken entry.
+    /// `actions[i]` partially sets the conditional triple: `when` without `then`, or `then` / `else`
+    /// without `when`. The grammar requires both `when` and `then` together; `else` is optional.
+    /// Fires before the conditional body is validated so per-branch errors don't pile on a
+    /// structurally-broken entry.
     ConditionalIncomplete,
     /// `actions[i]` is a fully-formed conditional with both `then = []` and `else = []` (or `else`
     /// absent). The predicate would run for no observable effect; almost certainly an operator
@@ -158,9 +158,9 @@ impl fmt::Display for ConfigError {
             },
             Self::Validate { path, errors } => {
                 // `Path::display()` implements `Display`, so write the header through the formatter
-                // directly instead of routing through a transient `String` allocation. The
-                // `<inline>` literal stands in for the file-less (string-source) case where
-                // `Config::from_str` is the entry point.
+                // directly instead of routing through a transient `String` allocation. The `<inline>`
+                // literal stands in for the file-less (string-source) case where `Config::from_str`
+                // is the entry point.
                 let n = errors.len();
                 match path {
                     Some(p) => writeln!(f, "{}: {n} validation error(s):", p.display())?,
@@ -268,11 +268,11 @@ const fn kind_label(k: IssueKind) -> &'static str {
 }
 
 impl ValidationIssue {
-    /// Map a [`specter_core::program::ProgramError`] into the validation-issue surface. Every
-    /// variant collapses to [`IssueKind::LoweringInternal`] — none are reachable from a correct
-    /// lowering pass, but the validator captures them as issues rather than panicking. The "program
-    /// too large" case is not representable on the source error (the builder panics on emit as a
-    /// precondition failure — physically impossible to load).
+    /// Map a [`specter_core::program::ProgramError`] into the validation-issue surface. Every variant
+    /// collapses to [`IssueKind::LoweringInternal`] — none are reachable from a correct lowering
+    /// pass, but the validator captures them as issues rather than panicking. The "program too large"
+    /// case is not representable on the source error (the builder panics on emit as a precondition
+    /// failure — physically impossible to load).
     pub(crate) fn from_program_error(
         e: &specter_core::program::ProgramError,
         watch_index: Option<usize>,

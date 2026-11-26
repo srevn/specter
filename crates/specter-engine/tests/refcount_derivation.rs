@@ -76,8 +76,8 @@ fn subs_at_len_is_the_sole_derived_count_across_attach_detach() {
     );
     assert_eq!(e.subs().at(pid).len(), 3, "count climbs back to three");
 
-    // Drain to empty. Each detach derives the next count from the registry alone; the last one
-    // leaves zero.
+    // Drain to empty. Each detach derives the next count from the registry alone; the last one leaves
+    // zero.
     for (sid, expected) in [(s1, 2), (s3, 1), (s4, 0)] {
         e.step(Input::DetachSub(sid), now);
         assert_eq!(

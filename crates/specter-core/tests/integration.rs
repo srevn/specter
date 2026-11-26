@@ -179,9 +179,9 @@ fn detach_clears_back_references_on_both_sides() {
 #[test]
 fn rename_after_detach_yields_fresh_id() {
     // Mimics the engine's rename handling: detach Profile → vacate + try_reap → ensure with a new
-    // segment. The cascade in `try_reap` also frees the now-orphaned `/dir` parent (no other
-    // claims), so the post-reap re-attach re-creates the full path — the engine's own
-    // `attach_sub_inner` does exactly this via `materialize_path_or_pending`.
+    // segment. The cascade in `try_reap` also frees the now-orphaned `/dir` parent (no other claims),
+    // so the post-reap re-attach re-creates the full path — the engine's own `attach_sub_inner` does
+    // exactly this via `materialize_path_or_pending`.
     let mut tree = Tree::new();
     let mut profiles = ProfileMap::new();
     let parent = tree.ensure_root("/dir", ResourceRole::User);

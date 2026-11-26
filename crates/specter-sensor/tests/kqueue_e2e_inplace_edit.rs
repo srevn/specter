@@ -1,6 +1,6 @@
-//! In-place file edit (`echo 'test' > file.txt`) inside a subtree-root watched directory does
-//! **not** bump the parent directory's mtime on APFS / HFS+, so a `STRUCTURE`-only watch on the
-//! parent emits no event. The fix: when the user's events mask includes `CONTENT`, the engine sets
+//! In-place file edit (`echo 'test' > file.txt`) inside a subtree-root watched directory does **not**
+//! bump the parent directory's mtime on APFS / HFS+, so a `STRUCTURE`-only watch on the parent emits
+//! no event. The fix: when the user's events mask includes `CONTENT`, the engine sets
 //! `has_per_file_fds = true` and registers a per-file FD on every covered Leaf (driven by
 //! `apply_diff_to_tree` / `ensure_descendant` in `crates/specter-engine/src/reconcile.rs`). The
 //! kernel then emits `NOTE_WRITE` plus `NOTE_EXTEND` on the file's own FD; the watcher normalizes
@@ -99,9 +99,9 @@ fn drain_for(w: &mut KqueueWatcher, dur: Duration) -> Vec<WatcherEvent> {
 /// - Per-leaf file watched with CONTENT (File-only fflags: NOTE_WRITE | NOTE_EXTEND).
 ///
 /// On APFS / HFS+, an in-place rewrite of `file.txt` does NOT modify the parent dir's mtime — the
-/// dir's `NOTE_WRITE` does not fire. Without the per-file FD, the engine would never see this
-/// change. With the per-file FD, the kernel emits `NOTE_WRITE` on the file directly, which the
-/// watcher normalizes to `FsEvent::ContentChanged`.
+/// dir's `NOTE_WRITE` does not fire. Without the per-file FD, the engine would never see this change.
+/// With the per-file FD, the kernel emits `NOTE_WRITE` on the file directly, which the watcher
+/// normalizes to `FsEvent::ContentChanged`.
 #[test]
 fn in_place_edit_fires_content_changed_on_per_file_fd() {
     let tmp = TempDir::new().unwrap();
@@ -143,9 +143,9 @@ fn in_place_edit_fires_content_changed_on_per_file_fd() {
 /// edits. This is the exact failure mode the event-filtering primitive's default mask was designed
 /// to fix.
 ///
-/// The test asserts the absence of an event for ~300 ms — long enough to be confident that the
-/// kernel isn't going to deliver one. If APFS or HFS+ ever changes its mtime semantics this test
-/// will fail and the design rationale needs revisiting.
+/// The test asserts the absence of an event for ~300 ms — long enough to be confident that the kernel
+/// isn't going to deliver one. If APFS or HFS+ ever changes its mtime semantics this test will fail
+/// and the design rationale needs revisiting.
 #[test]
 fn in_place_edit_does_not_fire_on_dir_watch_alone() {
     let tmp = TempDir::new().unwrap();
@@ -166,9 +166,9 @@ fn in_place_edit_does_not_fire_on_dir_watch_alone() {
 
     let out = drain_for(&mut w, Duration::from_millis(300));
 
-    // The dir's STRUCTURE watch must NOT fire on an in-place edit. If it does, the documented
-    // design assumption (APFS/HFS+ doesn't bump parent mtime on in-place writes) is violated and
-    // the rationale needs revisiting.
+    // The dir's STRUCTURE watch must NOT fire on an in-place edit. If it does, the documented design
+    // assumption (APFS/HFS+ doesn't bump parent mtime on in-place writes) is violated and the
+    // rationale needs revisiting.
     let dir_fired = out.iter().any(|ev| {
         matches!(
             ev,

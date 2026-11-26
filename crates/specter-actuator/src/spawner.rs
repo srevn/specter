@@ -2,11 +2,11 @@
 //!
 //! The split — three small traits instead of one — exists because `std::process::Child::wait`
 //! consumes `&mut self`, and the wait thread owns the `Child` for the duration of the wait, while
-//! the controller thread may need to send signals to the same child during shutdown.
-//! [`ChildWaiter`] is owned by the wait thread; [`ChildSignaler`] is owned by the controller; both
-//! share a one-shot lifecycle flag (the `crate::lifecycle::DeadFlag` protocol primitive in
-//! production *and* in the test mock) so signals to a reaped child short-circuit at the protocol
-//! layer instead of racing PID-reuse.
+//! the controller thread may need to send signals to the same child during shutdown. [`ChildWaiter`]
+//! is owned by the wait thread; [`ChildSignaler`] is owned by the controller; both share a one-shot
+//! lifecycle flag (the `crate::lifecycle::DeadFlag` protocol primitive in production *and* in the
+//! test mock) so signals to a reaped child short-circuit at the protocol layer instead of racing
+//! PID-reuse.
 
 use specter_core::EffectOutcome;
 use std::borrow::Cow;
@@ -21,8 +21,8 @@ use std::sync::Arc;
 /// str>` so the resolver can borrow from the [`specter_core::Effect`] (anchor path lossy-rendered,
 /// `target_relative`, `sub_name`, etc.) when the data is already there, and own only the strings it
 /// genuinely synthesises (newline-joined diff lists, formatted timestamp, parent-dir lossy, joined
-/// target path). The trait shape thereby matches the producer's natural lifetimes instead of
-/// forcing a flatten-to-owned hop.
+/// target path). The trait shape thereby matches the producer's natural lifetimes instead of forcing
+/// a flatten-to-owned hop.
 ///
 /// The lifetime parameter `'a` ties the borrow to the source data: in production, the resolver
 /// returns a `Vec<EnvVar<'_>>` borrowing from the `Effect` and the optional diff-tmp path, both of
@@ -45,12 +45,12 @@ pub trait Spawner: Send {
     fn spawn(&self, argv: &[String], env: &[EnvVar<'_>], cwd: &Path) -> io::Result<SpawnHandles>;
 
     /// Spawn N stages wired stdout→stdin, returning their [`PipeSpawnHandles`]. The producer-side
-    /// of stage K writes to a pipe whose read-end is the consumer-side stdin of stage K+1; the
-    /// kernel handles the SIGPIPE chain when an upstream stage exits.
+    /// of stage K writes to a pipe whose read-end is the consumer-side stdin of stage K+1; the kernel
+    /// handles the SIGPIPE chain when an upstream stage exits.
     ///
     /// On partial-spawn failure (stage K's spawn raises [`io::Error`]), implementations must roll
-    /// back: SIGKILL + `reap_blocking` every prior stage and close every pipe fd in the parent
-    /// before returning the error. Returning leaves no zombies and no orphan pipe fds.
+    /// back: SIGKILL + `reap_blocking` every prior stage and close every pipe fd in the parent before
+    /// returning the error. Returning leaves no zombies and no orphan pipe fds.
     fn spawn_pipe(&self, stages: &[StageSpec<'_>], cwd: &Path) -> io::Result<PipeSpawnHandles>;
 }
 
@@ -75,9 +75,9 @@ pub struct StageSpec<'a> {
 /// [`crate::pipe::CombinedSignaler`], and the controller's local `stage_signalers` handle — at the
 /// cost of one refcount bump per co-owner instead of cloning the slice three times.
 pub struct PipeSpawnHandles {
-    /// Pid of the *last* stage — what an operator inspecting the pipe via `ps` would call "the pid of
-    /// this pipe". The actuator surfaces this via `pool::state::RunningJob::pid` and uses it only for
-    /// log lines; the per-stage signalers carry their own pids internally for syscall routing.
+    /// Pid of the *last* stage — what an operator inspecting the pipe via `ps` would call "the pid
+    /// of this pipe". The actuator surfaces this via `pool::state::RunningJob::pid` and uses it only
+    /// for log lines; the per-stage signalers carry their own pids internally for syscall routing.
     pub last_pid: u32,
     /// Aggregating waiter: waits on every stage concurrently and applies pipefail-on semantics.
     /// Consumed once via `Box<dyn ChildWaiter>::wait`.
@@ -137,26 +137,27 @@ pub trait ChildWaiter: Send {
 
 /// Held by the controller; consulted on shutdown and on the wait-thread-spawn-failure recovery path.
 ///
-/// `Send + Sync` lets the controller move signaler boxes between thread-local maps without
-/// ceremony. Implementations short-circuit when their paired waiter has already returned
-/// (production and the test mock both use the shared `crate::lifecycle::DeadFlag`); ESRCH from the
-/// actual `kill(2)` is collapsed to `Ok(())` as a defense-in-depth layer.
+/// `Send + Sync` lets the controller move signaler boxes between thread-local maps without ceremony.
+/// Implementations short-circuit when their paired waiter has already returned (production and the
+/// test mock both use the shared `crate::lifecycle::DeadFlag`); ESRCH from the actual `kill(2)` is
+/// collapsed to `Ok(())` as a defense-in-depth layer.
 ///
-/// The lifecycle ratchet — [`Self::is_dead`] (read) paired with [`Self::mark_dead`] (write) — is the
-/// protocol-level surface. The `ChildWaiter` impl is the canonical early publisher (the crate-private
-/// `OsChildWaiter::wait` marks dead before returning); wrapper sites that `catch_unwind` a waiter
-/// call [`Self::mark_dead`] as a backstop in case the impl panicked before reaching its own publish.
+/// The lifecycle ratchet — [`Self::is_dead`] (read) paired with [`Self::mark_dead`] (write) — is
+/// the protocol-level surface. The `ChildWaiter` impl is the canonical early publisher (the
+/// crate-private `OsChildWaiter::wait` marks dead before returning); wrapper sites that
+/// `catch_unwind` a waiter call [`Self::mark_dead`] as a backstop in case the impl panicked before
+/// reaching its own publish.
 ///
-/// Neither layer fully closes the PID-reuse race: between `child.wait()` returning (kernel reaps the
-/// zombie; pid eligible for reuse) and the waiter setting the shared flag, a brief window exists
+/// Neither layer fully closes the PID-reuse race: between `child.wait()` returning (kernel reaps
+/// the zombie; pid eligible for reuse) and the waiter setting the shared flag, a brief window exists
 /// where a signal could land on an unrelated process at the same pid. ESRCH-collapse does not help
 /// here — a reused pid points at a real process and the syscall returns success. The window is small
 /// but live on systems with high pid pressure; v2 may switch to process descriptors (pidfd / pdfork).
 ///
 /// `OsChildWaiter::wait` lives in the crate-private `super::os`.
 pub trait ChildSignaler: Send + Sync {
-    /// Send SIGTERM. ESRCH (child already gone) is collapsed to `Ok(())`. Short-circuits to
-    /// `Ok(())` if the paired waiter has already reported completion.
+    /// Send SIGTERM. ESRCH (child already gone) is collapsed to `Ok(())`. Short-circuits to `Ok(())`
+    /// if the paired waiter has already reported completion.
     fn signal_term(&self) -> io::Result<()>;
     /// Send SIGKILL. Same ESRCH-collapse + short-circuit as [`Self::signal_term`].
     fn signal_kill(&self) -> io::Result<()>;
@@ -172,9 +173,9 @@ pub trait ChildSignaler: Send + Sync {
     /// path is idempotent. `EINTR` is retried internally.
     ///
     /// Production impls mark the shared dead-flag unconditionally after the underlying `waitpid`
-    /// returns (success OR failure) so any later `signal_term` / `signal_kill` against the
-    /// (reusable) pid short-circuits at the protocol layer — same guarantee the paired waiter
-    /// provides on the normal path.
+    /// returns (success OR failure) so any later `signal_term` / `signal_kill` against the (reusable)
+    /// pid short-circuits at the protocol layer — same guarantee the paired waiter provides on the
+    /// normal path.
     fn reap_blocking(&self) -> io::Result<()>;
     /// `true` once the paired waiter has reported completion (or [`Self::reap_blocking`] /
     /// [`Self::mark_dead`] has run). Lets co-owning threads short-circuit on natural completion —
@@ -186,14 +187,14 @@ pub trait ChildSignaler: Send + Sync {
     /// Publish "paired child is reaped; signal syscalls would race PID reuse." Idempotent — the
     /// underlying flag is a one-shot ratchet.
     ///
-    /// The protocol-level write that pairs with [`Self::is_dead`]. Wrapper sites that
-    /// `catch_unwind` a [`ChildWaiter::wait`] invocation (the controller's `wait_loop`, and the
-    /// per-stage closures inside the crate-private `PipeWaiter`) call this after the catch, so a
-    /// panicking waiter impl that didn't reach its own write site still publishes — closing the
-    /// PID-reuse window at the protocol layer. On the happy path the [`ChildWaiter::wait`] impl is
-    /// the early publisher; this trait-level write is the additive backstop, idempotent against it.
+    /// The protocol-level write that pairs with [`Self::is_dead`]. Wrapper sites that `catch_unwind`
+    /// a [`ChildWaiter::wait`] invocation (the controller's `wait_loop`, and the per-stage closures
+    /// inside the crate-private `PipeWaiter`) call this after the catch, so a panicking waiter impl
+    /// that didn't reach its own write site still publishes — closing the PID-reuse window at the
+    /// protocol layer. On the happy path the [`ChildWaiter::wait`] impl is the early publisher; this
+    /// trait-level write is the additive backstop, idempotent against it.
     ///
-    /// The crate-private `CombinedSignaler::mark_dead` fans the call out to every per-stage
-    /// signaler, so a pipe-level wrapper closes the window for all stages with one call.
+    /// The crate-private `CombinedSignaler::mark_dead` fans the call out to every per-stage signaler,
+    /// so a pipe-level wrapper closes the window for all stages with one call.
     fn mark_dead(&self);
 }

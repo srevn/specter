@@ -95,8 +95,8 @@ fn anchor_claim_purged_then_detach_no_panic() {
 
 #[test]
 fn anchor_claim_purged_for_two_profiles_clears_kind_on_both() {
-    // Two Profiles share an anchor classified as Dir. WatchOpRejected on the anchor purges the
-    // kernel watch and runs `finalize_anchor_lost` for each anchor claimer; the helper's
+    // Two Profiles share an anchor classified as Dir. WatchOpRejected on the anchor purges the kernel
+    // watch and runs `finalize_anchor_lost` for each anchor claimer; the helper's
     // `discard_anchor_state` must clear `Profile.kind` on each so any subsequent recovery uses the
     // safe Subtree fallback rather than misrouting against a recreated anchor of a different shape.
     let mut e = Engine::new();
@@ -290,9 +290,9 @@ fn watch_root_parent_claim_purged_then_reap_no_panic() {
 
 #[test]
 fn descent_prefix_claim_purged_then_anchor_appears_no_recovery() {
-    // Pending Profile with prefix=/foo. WatchOpRejected at /foo purges the descent. The Profile
-    // parks (`ProfileState::Parked`); operator restart is required to recover (no automatic
-    // recovery via parent's StructureChanged because the parent watch failed).
+    // Pending Profile with prefix=/foo. WatchOpRejected at /foo purges the descent. The Profile parks
+    // (`ProfileState::Parked`); operator restart is required to recover (no automatic recovery via
+    // parent's StructureChanged because the parent watch failed).
     let mut e = Engine::new();
     let foo = e
         .tree_mut()

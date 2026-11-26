@@ -27,11 +27,11 @@ use super::{program, project_wall, settle_ms};
 /// Resolve `name` and emit the matching [`ShowResponse`] arm.
 ///
 /// Resolution is total:
-/// 1. `engine.subs().find_by_name(name)` resolves to a Sub. If a request declared it (no
-///    `minted_by`, templates included) → `Active`; if a template minted it → `Unknown` (the verb's
-///    contract: minted Subs are reached through `list`, not `show`). A minted-Sub hit
-///    short-circuits to `Unknown` rather than falling through, because by the `@`-byte reservation
-///    a synthesised name never appears in `disabled_runtime` or `config.watches`.
+/// 1. `engine.subs().find_by_name(name)` resolves to a Sub. If a request declared it (no `minted_by`,
+///    templates included) → `Active`; if a template minted it → `Unknown` (the verb's contract:
+///    minted Subs are reached through `list`, not `show`). A minted-Sub hit short-circuits to
+///    `Unknown` rather than falling through, because by the `@`-byte reservation a synthesised name
+///    never appears in `disabled_runtime` or `config.watches`.
 /// 2. `disabled_runtime.contains(name)?`  → `Disabled { Runtime }`
 /// 3. `config.watches[*].name == name && !enabled` → `Disabled { Toml }`
 /// 4. otherwise → `Unknown`
@@ -84,8 +84,8 @@ pub(crate) fn show(
 /// every other concurrent session during incidents. The engine's own panic discipline (the
 /// `ProbeSlot` tripwire, the registry `debug_assert!`s) catches the breach loudly engine-side.
 ///
-/// `anchor: Option<WirePath>`: `None` signals "anchor vanished / not yet resolved" (a Pending
-/// descent in flight, an Unwatch event that hasn't reconciled). The shape mirrors
+/// `anchor: Option<WirePath>`: `None` signals "anchor vanished / not yet resolved" (a Pending descent
+/// in flight, an Unwatch event that hasn't reconciled). The shape mirrors
 /// [`crate::ipc::protocol::ListRow::anchor`].
 fn project_details(
     sid: SubId,
@@ -177,9 +177,9 @@ mod tests {
     use std::collections::BTreeSet;
     use std::time::{Duration, Instant};
 
-    /// An engine-attached name returns `Active` with a populated `SubDetails`. Anchor is
-    /// `Some(path)` for a freshly attached Sub (the engine descends synchronously when the path
-    /// exists); `last_fired_at` is `None` until first fire.
+    /// An engine-attached name returns `Active` with a populated `SubDetails`. Anchor is `Some(path)`
+    /// for a freshly attached Sub (the engine descends synchronously when the path exists);
+    /// `last_fired_at` is `None` until first fire.
     #[test]
     fn show_active_returns_full_details() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -271,8 +271,8 @@ mod tests {
         }
     }
 
-    /// A name that appears nowhere returns `Unknown`. Operators chain `specter show foo &&
-    /// do-thing` to gate on this.
+    /// A name that appears nowhere returns `Unknown`. Operators chain `specter show foo && do-thing`
+    /// to gate on this.
     #[test]
     fn show_unknown_for_typo() {
         let engine = Engine::new();
@@ -320,8 +320,8 @@ mod tests {
     /// An armed-and-live `absorb` window projects to the spawn payload's `absorb = Some(..)` with
     /// the matching mode, and an inert (expired) window projects to `None` — the projection's
     /// `expiry > now` live-gate. `absorb_count` projects independently (0 here — arming does not
-    /// fold). Arming with `Some(duration)` yields `PersistUntil`; the window's `expiry` is `arm_now
-    /// + duration`, so a `now` before it is live and a `now` past it is inert.
+    /// fold). Arming with `Some(duration)` yields `PersistUntil`; the window's `expiry` is `arm_now +
+    /// duration`, so a `now` before it is live and a `now` past it is inert.
     #[test]
     fn show_absorb_window_live_gated_by_now() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -456,9 +456,9 @@ mod tests {
         }
     }
 
-    /// A discovery **template** is operator-declared (no `minted_by`), so `show` resolves it
-    /// `Active` like any static watch — only the minted set maps to `Unknown`. The fixture goes
-    /// through the real config lowering: a glob-bearing path lowers to a template.
+    /// A discovery **template** is operator-declared (no `minted_by`), so `show` resolves it `Active`
+    /// like any static watch — only the minted set maps to `Unknown`. The fixture goes through the
+    /// real config lowering: a glob-bearing path lowers to a template.
     #[test]
     fn show_discovery_template_returns_active() {
         let tmp = tempfile::TempDir::new().unwrap();

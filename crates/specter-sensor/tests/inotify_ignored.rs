@@ -124,10 +124,10 @@ fn delete_self_then_in_ignored_clears_per_resource_state() {
         "expected Removed before IN_IGNORED cleanup; got {out:?}"
     );
 
-    // Recreate the file at the same path and re-watch the same ResourceId. With the
-    // spontaneous-reap cleanup, this goes through the fresh-watch path (no entry in
-    // `by_resource[r]`) and installs anew. A subsequent write must fire `ContentChanged`, proving
-    // the cleanup left no stale state behind.
+    // Recreate the file at the same path and re-watch the same ResourceId. With the spontaneous-reap
+    // cleanup, this goes through the fresh-watch path (no entry in `by_resource[r]`) and installs
+    // anew. A subsequent write must fire `ContentChanged`, proving the cleanup left no stale state
+    // behind.
     std::fs::write(&path, "y").unwrap();
     w.watch(r, &path, ResourceKind::File, ClassSet::CONTENT)
         .expect("post-spontaneous-reap watch must succeed via fresh-watch path");
@@ -149,11 +149,11 @@ fn delete_self_then_in_ignored_clears_per_resource_state() {
 
 #[test]
 fn unwatch_then_redrain_clears_draining_flag() {
-    // Watcher-initiated path: `unwatch(r)` marks the wd as draining and calls `rm_watch`. The
-    // kernel queues `IN_IGNORED` synchronously; the next drain consumes it and clears
-    // `draining_wds[wd]`. We can't observe `draining_wds` directly from outside the crate, so we
-    // test the behavioral equivalent: after the drain, the same ResourceId can be watched again at
-    // a fresh path without conflict.
+    // Watcher-initiated path: `unwatch(r)` marks the wd as draining and calls `rm_watch`. The kernel
+    // queues `IN_IGNORED` synchronously; the next drain consumes it and clears `draining_wds[wd]`.
+    // We can't observe `draining_wds` directly from outside the crate, so we test the behavioral
+    // equivalent: after the drain, the same ResourceId can be watched again at a fresh path without
+    // conflict.
     let tmp = TempDir::new().unwrap();
     let p1 = tmp.path().join("a.txt");
     let p2 = tmp.path().join("b.txt");
@@ -168,8 +168,8 @@ fn unwatch_then_redrain_clears_draining_flag() {
         .unwrap();
     w.unwatch(r);
 
-    // Allow the drain loop to consume the `IN_IGNORED` for the prior wd. A small deadline is
-    // enough; the kernel queues `IN_IGNORED` synchronously at `rm_watch`.
+    // Allow the drain loop to consume the `IN_IGNORED` for the prior wd. A small deadline is enough;
+    // the kernel queues `IN_IGNORED` synchronously at `rm_watch`.
     drain_for(&mut w, Duration::from_millis(100));
 
     // Fresh watch on a different path. If draining state had leaked, the new wd would land in

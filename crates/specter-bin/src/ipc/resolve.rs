@@ -1,7 +1,7 @@
 //! Socket-path resolution **policy** — one decision shared by both roles, projected two ways.
 //!
-//! The daemon *commits* a single path to bind; the client *probes* an ordered candidate list,
-//! taking the first that answers. These are not two independent resolvers: they read the **same**
+//! The daemon *commits* a single path to bind; the client *probes* an ordered candidate list, taking
+//! the first that answers. These are not two independent resolvers: they read the **same**
 //! [`Resolution`] value and differ only in how they consume it.
 //!
 //! - The daemon (which cannot probe — it binds exactly one path) projects via
@@ -79,8 +79,9 @@ const SUN_MAX: usize = 104;
 /// `temp_sibling` code that emits the `.tmp.<pid>` format, so the reserve cannot drift from the
 /// format it guards. `bind_socket_atomic` binds the staging name *before* renaming onto the committed
 /// path, so the staging name — not the committed path — is the longest entry the kernel ever stores
-/// in `sun_path`; reserving its worst-case width makes any path that passes [`validate`] also fit at
-/// bind time. Convention paths are far shorter; this bound guards only operator-supplied overrides.
+/// in `sun_path`; reserving its worst-case width makes any path that passes [`validate`] also fit
+/// at bind time. Convention paths are far shorter; this bound guards only operator-supplied
+/// overrides.
 const MAX_SOCKET_PATH_LEN: usize = SUN_MAX - super::sockpath::STAGING_SUFFIX_MAX - 1;
 
 /// Where a resolved socket path came from — drives both-side diagnostics and (for the daemon) the
@@ -106,8 +107,8 @@ pub(crate) enum SocketSource {
 }
 
 impl SocketSource {
-    /// Short label naming this source in a client probe-failure list, e.g. `cannot reach the
-    /// daemon; tried: <path> (session runtime)`.
+    /// Short label naming this source in a client probe-failure list, e.g. `cannot reach the daemon;
+    /// tried: <path> (session runtime)`.
     #[must_use]
     pub(crate) const fn label(self) -> &'static str {
         match self {
@@ -166,10 +167,10 @@ pub(crate) enum DaemonHint {
 impl fmt::Display for DaemonHint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // The universal escape, shared by every convention variant: a convention path renders its
-        // source-specific provisioning clause, then "; otherwise " + this escape. An
-        // operator-chosen path has no provisioning mechanism (`None` below) and renders the bare
-        // creation advice alone — re-suggesting the `--socket` / `SPECTER_SOCK` the operator
-        // already passed would be circular.
+        // source-specific provisioning clause, then "; otherwise " + this escape. An operator-chosen
+        // path has no provisioning mechanism (`None` below) and renders the bare creation advice
+        // alone — re-suggesting the `--socket` / `SPECTER_SOCK` the operator already passed would
+        // be circular.
         const ESCAPE: &str =
             "create the parent directory, or override with --socket <path> / SPECTER_SOCK=<path>";
         let provisioning: Option<&'static str> = match self {
@@ -246,13 +247,13 @@ impl Resolution {
 }
 
 /// Why an explicit override could not be turned into a bindable path. Only an explicit override
-/// (`--socket` / `$SPECTER_SOCK`) surfaces this: the env-derived Linux session path also runs
-/// through [`validate`], but its failure is swallowed (`.ok()`) and falls through to the system
-/// path rather than aborting resolution.
+/// (`--socket` / `$SPECTER_SOCK`) surfaces this: the env-derived Linux session path also runs through
+/// [`validate`], but its failure is swallowed (`.ok()`) and falls through to the system path rather
+/// than aborting resolution.
 #[derive(Debug)]
 pub(crate) enum ResolveError {
-    /// A relative override. AF_UNIX needs an absolute path, and a relative one would silently
-    /// depend on the daemon's CWD.
+    /// A relative override. AF_UNIX needs an absolute path, and a relative one would silently depend
+    /// on the daemon's CWD.
     Relative { source: SocketSource, path: PathBuf },
     /// An override whose byte length, plus the bind-time staging suffix, would overflow `sun_path`.
     TooLong {
@@ -290,8 +291,8 @@ impl fmt::Display for ResolveError {
 
 impl std::error::Error for ResolveError {}
 
-/// Resolve the socket path into the single [`Resolution`] both roles consume. Pure: every
-/// environment read flows through `getenv`.
+/// Resolve the socket path into the single [`Resolution`] both roles consume. Pure: every environment
+/// read flows through `getenv`.
 ///
 /// Precedence: `--socket` (`cli_socket`) > `$SPECTER_SOCK` > the per-platform convention cascade.
 pub(crate) fn resolve<F>(cli_socket: Option<&Path>, getenv: F) -> Result<Resolution, ResolveError>
@@ -322,9 +323,9 @@ where
     Ok(None)
 }
 
-/// The per-platform convention cascade. Linux reads `$XDG_RUNTIME_DIR` to decide between the
-/// session daemon (with the system path as a fall-through tail) and the system daemon alone; macOS
-/// and BSD have a single fixed location and ignore the environment.
+/// The per-platform convention cascade. Linux reads `$XDG_RUNTIME_DIR` to decide between the session
+/// daemon (with the system path as a fall-through tail) and the system daemon alone; macOS and BSD
+/// have a single fixed location and ignore the environment.
 #[cfg(target_os = "linux")]
 fn convention<F>(getenv: &F) -> Candidates
 where
@@ -386,8 +387,8 @@ const fn candidate(source: SocketSource, path: PathBuf) -> SocketCandidate {
 
 /// Enforce the absolute-only + `sun_path`-length rule on a path whose shape is not guaranteed by
 /// construction — an explicit override (`--socket` / `$SPECTER_SOCK`) or the env-derived Linux
-/// session path. The length budget reserves the bind-time staging suffix, so a path that passes
-/// here also fits when `bind_socket_atomic` stages it.
+/// session path. The length budget reserves the bind-time staging suffix, so a path that passes here
+/// also fits when `bind_socket_atomic` stages it.
 fn validate(path: &Path, source: SocketSource) -> Result<SocketCandidate, ResolveError> {
     if !path.is_absolute() {
         return Err(ResolveError::Relative {
@@ -428,8 +429,8 @@ pub(crate) fn env_os(key: &str) -> Option<OsString> {
 mod tests {
     use super::*;
 
-    /// Build a `getenv` closure from explicit key→value pairs; any key not listed resolves to
-    /// absent. Keeps each test's environment shape visible at the call site.
+    /// Build a `getenv` closure from explicit key→value pairs; any key not listed resolves to absent.
+    /// Keeps each test's environment shape visible at the call site.
     fn env_of<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<OsString> + 'a {
         move |key| {
             pairs
@@ -497,8 +498,8 @@ mod tests {
         ));
     }
 
-    /// The length check reserves the bind-time staging suffix: a path at exactly the limit
-    /// resolves, one byte longer is rejected.
+    /// The length check reserves the bind-time staging suffix: a path at exactly the limit resolves,
+    /// one byte longer is rejected.
     #[test]
     fn resolve_overlength_override_rejected_at_staging_threshold() {
         let at_limit = format!("/{}", "a".repeat(MAX_SOCKET_PATH_LEN - 1));

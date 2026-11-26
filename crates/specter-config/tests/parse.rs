@@ -247,8 +247,8 @@ fn exec_env_invalid_name_yields_validation_error() {
 
 // ----- Conditional actions (`when` / `then` / `else`) -----
 
-/// Conditional with `when` + `then` lowers to a two-op program: predicate op (Exec body, `on_failed
-/// = Escape` — "branch, not guard") then the then-branch's Exec op. With no `else`, the predicate's
+/// Conditional with `when` + `then` lowers to a two-op program: predicate op (Exec body, `on_failed =
+/// Escape` — "branch, not guard") then the then-branch's Exec op. With no `else`, the predicate's
 /// `on_failed = Escape` (the "branch, not guard" outcome elision — predicate Failed terminates the
 /// plan Ok without propagating).
 #[test]
@@ -334,8 +334,8 @@ fn conditional_predicate_carries_per_step_timeout() {
 }
 
 /// `when` without `then` is rejected at the variant-completeness gate as
-/// [`IssueKind::ConditionalIncomplete`]. Operators get a single, clear "you wrote half a
-/// conditional" error.
+/// [`IssueKind::ConditionalIncomplete`]. Operators get a single, clear "you wrote half a conditional"
+/// error.
 #[test]
 fn conditional_when_without_then_is_rejected() {
     let toml = "[[watch]]\nname = \"c\"\npath = \"/\"\n\
@@ -382,8 +382,8 @@ fn conditional_empty_then_and_no_else_is_rejected() {
 
 /// Empty `then` with non-empty `else` is allowed — operationally equivalent to a negated predicate
 /// (run else iff predicate failed). Lowers to a 2-op program: predicate then else-Exec. The empty
-/// then-block contributes no ops; the predicate's `on_ok` resolves to `Escape` (the empty
-/// then-tail's escape — skip past else on Ok). `on_failed` continues into the else-Exec.
+/// then-block contributes no ops; the predicate's `on_ok` resolves to `Escape` (the empty then-tail's
+/// escape — skip past else on Ok). `on_failed` continues into the else-Exec.
 #[test]
 fn conditional_empty_then_nonempty_else_is_allowed() {
     let toml = "[[watch]]\nname = \"c\"\npath = \"/\"\n\

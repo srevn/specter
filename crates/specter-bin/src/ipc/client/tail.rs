@@ -17,17 +17,17 @@
 //!
 //! `--filter` is OR across variants — `--filter sub_fired --filter sub_detached` admits either one.
 //! Empty filter (the default) admits every variant. Filter validation lives in the handler, not in
-//! clap's `value_parser`, because the vocabulary is owned by the wire crate
-//! ([`KNOWN_WIRE_VARIANTS`]) and `specter-config` should not depend on `specter-bin`'s wire shape.
-//! `run` reports an unknown tag through [`connect::emit_error`] ("specter tail: unknown filter …"),
-//! matching the other verbs' diagnostics.
+//! clap's `value_parser`, because the vocabulary is owned by the wire crate ([`KNOWN_WIRE_VARIANTS`])
+//! and `specter-config` should not depend on `specter-bin`'s wire shape. `run` reports an unknown
+//! tag through [`connect::emit_error`] ("specter tail: unknown filter …"), matching the other verbs'
+//! diagnostics.
 //!
 //! # Output buffering
 //!
-//! Stdout is locked once for the loop's duration so per-line writes reach the kernel pipe
-//! immediately on each `flush()`. Operators piping to `jq` / `grep` see one line at a time without
-//! depending on Rust's per-process stdout buffering policy (which is block-buffered when piped,
-//! line-buffered on a tty).
+//! Stdout is locked once for the loop's duration so per-line writes reach the kernel pipe immediately
+//! on each `flush()`. Operators piping to `jq` / `grep` see one line at a time without depending on
+//! Rust's per-process stdout buffering policy (which is block-buffered when piped, line-buffered on
+//! a tty).
 
 use specter_config::{OutputFormat, TailArgs};
 use std::io::{self, Write};
@@ -141,9 +141,9 @@ fn should_emit(wire: &WireDiagnostic, filter: &[String]) -> bool {
 ///
 /// `buf` is the caller's reused render buffer — the Human branch clears and refills it through
 /// [`diag::render`]'s writer-shape surface (painting via `sty`); the Json branch is untouched and
-/// goes through [`encode_line`]'s owned [`Vec<u8>`] path, ignoring `sty`. Threading the buffer
-/// keeps the per-event amortization legible at the call site without inlining the I/O error
-/// matching into the stream loop.
+/// goes through [`encode_line`]'s owned [`Vec<u8>`] path, ignoring `sty`. Threading the buffer keeps
+/// the per-event amortization legible at the call site without inlining the I/O error matching into
+/// the stream loop.
 ///
 /// JSON output re-serializes the parsed [`WireDiagnostic`] rather than passing through the daemon's
 /// original bytes. Serde derive is symmetric over the wire's `#[serde]` tags, so the re-serialized

@@ -34,11 +34,11 @@ fn set_relative(seg: &'static str) -> impl FnOnce(&mut Effect) {
 /// Spawn a script that writes the given env-var to a captured file, then asserts on its content.
 ///
 /// The actuator-side resolver derives every `SPECTER_*` env value from the substitution-domain
-/// projection on [`Effect`] — there is no `Effect.env` field to push pairs onto. To assert "the
-/// child sees `name=expected`" the helper takes a `setup` closure that mutates the resolver's
-/// *inputs* (e.g., set `e.target_relative` to assert on `SPECTER_PATH`, since `target_path` is now
-/// derived as `anchor_path.join(target_relative)`); the resolver's render-time output is what the
-/// spawned process observes via `getenv`.
+/// projection on [`Effect`] — there is no `Effect.env` field to push pairs onto. To assert "the child
+/// sees `name=expected`" the helper takes a `setup` closure that mutates the resolver's *inputs*
+/// (e.g., set `e.target_relative` to assert on `SPECTER_PATH`, since `target_path` is now derived
+/// as `anchor_path.join(target_relative)`); the resolver's render-time output is what the spawned
+/// process observes via `getenv`.
 ///
 /// `expected_for` derives the expected value from the spawn cwd so that `SPECTER_ANCHOR` (which
 /// doubles as cwd) can assert against the tempdir's actual path; cases whose expected value is
@@ -133,12 +133,12 @@ fn child_receives_specter_forced_zero() {
 
 #[test]
 fn child_receives_specter_created_newline_separated() {
-    // End-to-end witness for the diff-derived list env vars: a populated `Effect.diff.created`
-    // lands in the spawned child's `SPECTER_CREATED` newline-joined, no trailing newline.
-    // Resolver-level rendering is pinned by the unit tests; this test pins that the
-    // `cmd.envs(env.iter()...)` plumbing in `OsSpawner` propagates the value byte-for-byte through
-    // `execve`. The four sibling vars (`DELETED`/`MODIFIED`/`RENAMED_FROM`/`RENAMED_TO`) ride the
-    // same plumbing — no separate integration test is justified.
+    // End-to-end witness for the diff-derived list env vars: a populated `Effect.diff.created` lands
+    // in the spawned child's `SPECTER_CREATED` newline-joined, no trailing newline. Resolver-level
+    // rendering is pinned by the unit tests; this test pins that the `cmd.envs(env.iter()...)`
+    // plumbing in `OsSpawner` propagates the value byte-for-byte through `execve`. The four sibling
+    // vars (`DELETED`/`MODIFIED`/`RENAMED_FROM`/`RENAMED_TO`) ride the same plumbing — no separate
+    // integration test is justified.
     let dir = tempfile::tempdir().expect("tempdir");
     let out_path = dir.path().join("out");
     let cwd = dir.path().to_path_buf();
@@ -305,8 +305,8 @@ fn tmp_diff_file_cleaned_up_after_completion() {
     let recorded_path = std::fs::read_to_string(&path_record).expect("read path");
     assert!(!recorded_path.is_empty(), "child captured a path");
     // Wait briefly for the wait thread's cleanup. The shutdown above joins the controller, but the
-    // wait thread runs cleanup before sending Reaped, so by the time EffectComplete arrives the
-    // file is gone.
+    // wait thread runs cleanup before sending Reaped, so by the time EffectComplete arrives the file
+    // is gone.
     let p = Path::new(&recorded_path);
     assert!(!p.exists(), "tmp file removed after wait");
 }

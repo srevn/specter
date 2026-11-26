@@ -1,7 +1,7 @@
 //! `Diff`, `EntryRef`, `Rename` — the flat delta type the Effect API consumes.
 //!
-//! The classification function lives in [`crate::snapshot::tree::diff_tree`] — it walks two
-//! parallel `Snapshot` trees lock-step and emits this flat shape.
+//! The classification function lives in [`crate::snapshot::tree::diff_tree`] — it walks two parallel
+//! `Snapshot` trees lock-step and emits this flat shape.
 //!
 //! Output ordering: each list is in stable depth-first pre-order — `BTreeMap` iteration
 //! (lexicographic within a directory) plus fixed recursion, so a directory entry is immediately

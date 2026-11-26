@@ -7,9 +7,9 @@
 //!
 //! 1. **Correlation monotonicity for the probe id space.** The engine-wide mint floor is the bare
 //!    `Engine.correlations` [`crate::counter::MonotonicCounter`] field, driven solely by
-//!    [`Engine::mint_probe_correlation`]. The phantom-typed counter makes cross-space misuse
-//!    (minting a [`specter_core::CorrelationId`] from it, or vice versa) a compile error, and
-//!    saturation an unconditional panic.
+//!    [`Engine::mint_probe_correlation`]. The phantom-typed counter makes cross-space misuse (minting
+//!    a [`specter_core::CorrelationId`] from it, or vice versa) a compile error, and saturation an
+//!    unconditional panic.
 //! 2. **State-derived projections.** [`Engine::profile_probe_gate`] is the response path's sole
 //!    projection: one `profiles` resolution yielding the gated correlation (the staleness identity)
 //!    *and* the routing class ([`ProfileProbeRoute`]) together, so a `ProbeResponse` resolves the
@@ -21,21 +21,21 @@
 //!    `ProbeSlot::disarm` is the slot-level consume, [`Engine::take_owner_probe`] the state-level
 //!    disarm, [`Engine::cancel_owner_probe`] the engine+wire consume-plus-`Cancel` choke every
 //!    abandon site routes through.
-//! 3. **Request emission.** [`Engine::emit_owner_probe`] is the sole [`ProbeOp::Probe`]
-//!    construction site — one choke that resolves the owner's state *once*, reads the correlation
-//!    **back off the armed slot** (so armed-iff-emitted is structural — an empty/absent slot emits
-//!    nothing and no second copy of the correlation can diverge), materializes the per-carrier
-//!    proof obligation (the pre-fire Standard burst's `dirty` captured paths as `Chains`;
-//!    `WholeSubtree` for Seed and the post-fire Rebase, neither of which has a trustworthy prior to
-//!    skip against), and renders the kind-dispatched wire. Every read is immutable: the choke is a
-//!    pure `&self` state→wire projection (like Descent), with no accumulator drain — the fire-tail
-//!    residual reset is owned by `transition_to_rebasing`, not the emission path. It reads engine
-//!    state, so it homes here without the SRP compromise the prior stateless `emit_*` constructors
-//!    carried. Read-back and the launch sites' loud arm are **co-required**, not redundant:
-//!    read-back guarantees no orphaned correlation reaches the wire; the loud arm guarantees an
-//!    arm-guard miss is a crash, not a silent no-probe wedge. Neither subsumes the other. The gate
-//!    (item 2) is the response-side twin — same one-resolution shape, disjoint concern (route demux
-//!    vs. wire emission), so emission never depends on the response-shaped route enum.
+//! 3. **Request emission.** [`Engine::emit_owner_probe`] is the sole [`ProbeOp::Probe`] construction
+//!    site — one choke that resolves the owner's state *once*, reads the correlation **back off the
+//!    armed slot** (so armed-iff-emitted is structural — an empty/absent slot emits nothing and no
+//!    second copy of the correlation can diverge), materializes the per-carrier proof obligation
+//!    (the pre-fire Standard burst's `dirty` captured paths as `Chains`; `WholeSubtree` for Seed
+//!    and the post-fire Rebase, neither of which has a trustworthy prior to skip against), and
+//!    renders the kind-dispatched wire. Every read is immutable: the choke is a pure `&self`
+//!    state→wire projection (like Descent), with no accumulator drain — the fire-tail residual reset
+//!    is owned by `transition_to_rebasing`, not the emission path. It reads engine state, so it homes
+//!    here without the SRP compromise the prior stateless `emit_*` constructors carried. Read-back
+//!    and the launch sites' loud arm are **co-required**, not redundant: read-back guarantees no
+//!    orphaned correlation reaches the wire; the loud arm guarantees an arm-guard miss is a crash,
+//!    not a silent no-probe wedge. Neither subsumes the other. The gate (item 2) is the response-side
+//!    twin — same one-resolution shape, disjoint concern (route demux vs. wire emission), so emission
+//!    never depends on the response-shaped route enum.
 //! 4. **Consume-once tripwire.** [`DispatchLedger`] (debug builds only) records the high-water
 //!    correlation dispatched per owner. The structural laws (arm-once on the core slot, disarm-once
 //!    via [`Engine::take_owner_probe`]) make a double-dispatch unconstructable; the ledger is the
@@ -58,10 +58,10 @@ use std::sync::Arc;
 /// A carrier can only be a `Pending` descent or an `Active` pre-/post-fire burst, so the route is
 /// total over exactly those three shapes. The response handler matches this directly.
 ///
-/// Computed by [`Engine::profile_probe_gate`] from the Profile's *current* state alongside the
-/// gated correlation, so it is the minimal non-derivable read. It is [`Copy`] and is captured
-/// *before* the slot is disarmed: disarm empties the slot but leaves the carrier's variant intact,
-/// so a route captured first stays valid through dispatch.
+/// Computed by [`Engine::profile_probe_gate`] from the Profile's *current* state alongside the gated
+/// correlation, so it is the minimal non-derivable read. It is [`Copy`] and is captured *before*
+/// the slot is disarmed: disarm empties the slot but leaves the carrier's variant intact, so a route
+/// captured first stays valid through dispatch.
 ///
 /// `Verifying` carries `(intent, forced)` because those drive the per-intent fan-out and are not
 /// recoverable from the state variant alone. `Rebasing` carries `forced` — the post-fire mirror of
@@ -96,9 +96,9 @@ pub(crate) enum ProfileProbeRoute {
 /// [`DescentOutcome`] — a vanished anchor or a root I/O error is route-agnostic.
 #[derive(Debug)]
 pub(crate) enum ProofOutcome {
-    /// `AnchorFile` request returned a leaf observation. A single `lstat` has no mtime-skip
-    /// concept, so the lowering injects [`ProofAuthority::Authoritative`] — the wire carries no
-    /// certificate on this arm.
+    /// `AnchorFile` request returned a leaf observation. A single `lstat` has no mtime-skip concept,
+    /// so the lowering injects [`ProofAuthority::Authoritative`] — the wire carries no certificate
+    /// on this arm.
     AnchorOk(LeafEntry),
     /// `Subtree` request returned a directory observation plus the walker-stamped [`ProofAuthority`].
     SubtreeProven {
@@ -120,8 +120,8 @@ pub(crate) enum ProofOutcome {
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum DescentOutcome {
     /// The structural answer about the awaited head segment: `Some(kind)` — present, advance or
-    /// materialize; `None` — absent under a healthy prefix, park on the standing absence
-    /// observation. Carries no proof.
+    /// materialize; `None` — absent under a healthy prefix, park on the standing absence observation.
+    /// Carries no proof.
     SegmentObserved { kind: Option<EntryKind> },
     /// Prefix absent — routed to the descent rewind / abandon terminal.
     Vanished,
@@ -198,8 +198,9 @@ pub(crate) struct DispatchLedger {
 #[cfg(debug_assertions)]
 impl DispatchLedger {
     /// Record that `correlation` was routed into a `dispatch_*` arm for `owner`, asserting it is
-    /// strictly greater than every correlation previously dispatched for that owner. Sole caller: the
-    /// response handler, immediately after the slot is disarmed and before the outcome is dispatched.
+    /// strictly greater than every correlation previously dispatched for that owner. Sole caller:
+    /// the response handler, immediately after the slot is disarmed and before the outcome is
+    /// dispatched.
     pub(crate) fn record(&mut self, owner: ProfileId, correlation: ProbeCorrelation) {
         let prior = self.high_water.insert(owner, correlation);
         debug_assert!(
@@ -210,27 +211,28 @@ impl DispatchLedger {
         );
     }
 
-    /// Drop `owner`'s high-water entry, bounding the ledger's memory under owner churn — without this
-    /// the `BTreeMap` would grow with the cumulative count of distinct `ProfileId` values ever
-    /// observed (property tests / fuzzers that attach and reap repeatedly). Correctness-preserving: a
-    /// re-attach at the same `SlotMap` slot bumps the generation, so the re-formed generational id is
-    /// distinct and starts a fresh high-water regardless of this remove; the engine-wide monotone
-    /// mint preserves the strictly-greater invariant either way. Sole caller: `reap_profile`,
-    /// immediately after the cancel that disarms the owner's slot for the last time.
+    /// Drop `owner`'s high-water entry, bounding the ledger's memory under owner churn — without
+    /// this the `BTreeMap` would grow with the cumulative count of distinct `ProfileId` values ever
+    /// observed (property tests / fuzzers that attach and reap repeatedly). Correctness-preserving:
+    /// a re-attach at the same `SlotMap` slot bumps the generation, so the re-formed generational
+    /// id is distinct and starts a fresh high-water regardless of this remove; the engine-wide
+    /// monotone mint preserves the strictly-greater invariant either way. Sole caller:
+    /// `reap_profile`, immediately after the cancel that disarms the owner's slot for the last time.
     pub(crate) fn forget(&mut self, owner: ProfileId) {
         self.high_water.remove(&owner);
     }
 }
 
 impl Engine {
-    /// The owner's in-flight probe correlation, or `None` if it has none. A pure projection over the
-    /// owner's state: every probe-bearing carrier (descent / verify / rebase) homes its correlation
-    /// on a [`specter_core::ProbeSlot`] in exactly one state variant, so reading that variant's slot
-    /// is the single source of truth. This is the staleness identity the response path gates on.
+    /// The owner's in-flight probe correlation, or `None` if it has none. A pure projection over
+    /// the owner's state: every probe-bearing carrier (descent / verify / rebase) homes its
+    /// correlation on a [`specter_core::ProbeSlot`] in exactly one state variant, so reading that
+    /// variant's slot is the single source of truth. This is the staleness identity the response
+    /// path gates on.
     ///
     /// `pub` (not `pub(crate)`) — the engine crate's `tests/` directory is an external crate from a
-    /// Rust visibility standpoint, and ~35 integration-test call sites depend on this for
-    /// probe-state assertions.
+    /// Rust visibility standpoint, and ~35 integration-test call sites depend on this for probe-state
+    /// assertions.
     #[must_use]
     pub fn pending_probe_for(&self, owner: ProfileId) -> Option<ProbeCorrelation> {
         self.profiles
@@ -249,10 +251,10 @@ impl Engine {
     /// [`Copy`]; the caller gates on the correlation, disarms once, then dispatches on the route —
     /// the disarm leaves the carrier variant intact, so the route stays valid through dispatch.
     ///
-    /// `Some((correlation, route))` iff the Profile is in a probe-bearing carrier with an armed
-    /// slot; `None` otherwise — an absent `ProfileId`, a non-probe-bearing phase (`Idle` /
-    /// `Batching` / `Draining` / `Awaiting` / `Settling`), or no probe in flight — ⇒ the caller
-    /// emits `StaleProbeResponse`. "Armed slot but no route" is unrepresentable: every state whose
+    /// `Some((correlation, route))` iff the Profile is in a probe-bearing carrier with an armed slot;
+    /// `None` otherwise — an absent `ProfileId`, a non-probe-bearing phase (`Idle` / `Batching` /
+    /// `Draining` / `Awaiting` / `Settling`), or no probe in flight — ⇒ the caller emits
+    /// `StaleProbeResponse`. "Armed slot but no route" is unrepresentable: every state whose
     /// `probe_correlation` is `Some` is, by the same case split, a routable carrier, so there is no
     /// armed-but-unroutable arm — that case folds structurally into this single `None`.
     ///
@@ -298,22 +300,22 @@ impl Engine {
     /// **Deferred type-honest end-state.** The `mint → arm` gap is the one edge
     /// [`specter_core::ProbeSlot`]'s linear discipline does not cover — its `arm` re-acquire assert
     /// and `Drop` tripwire begin only once the correlation is on the slot. The honest end-state is
-    /// a linear non-`Copy` `#[must_use]` mint token consumed by `arm`/`armed`, with a `Drop`
-    /// tripwire if dropped un-armed, turning `mint`-without-`arm` into a compile/`Drop` error (the
-    /// same shape `ids.rs` defers for `Minted<T>`). Not built: the emission choke
-    /// ([`Self::emit_owner_probe`]'s read-back) already makes armed-iff-emitted structural and the
-    /// launch sites' loud arm makes an arm miss fatal, so the token would buy only
-    /// compile-error-vs-panic on an already-unreachable branch — not worth threading a move-only
-    /// token through every launch path under single-user alpha.
+    /// a linear non-`Copy` `#[must_use]` mint token consumed by `arm`/`armed`, with a `Drop` tripwire
+    /// if dropped un-armed, turning `mint`-without-`arm` into a compile/`Drop` error (the same shape
+    /// `ids.rs` defers for `Minted<T>`). Not built: the emission choke ([`Self::emit_owner_probe`]'s
+    /// read-back) already makes armed-iff-emitted structural and the launch sites' loud arm makes
+    /// an arm miss fatal, so the token would buy only compile-error-vs-panic on an
+    /// already-unreachable branch — not worth threading a move-only token through every launch path
+    /// under single-user alpha.
     #[must_use]
     pub(crate) fn mint_probe_correlation(&mut self) -> ProbeCorrelation {
         self.correlations.next()
     }
 
-    /// Consume the owner's in-flight probe and return its correlation (`None` if none was in
-    /// flight). Disarms the owner's state-resident slot — descent / verify / rebase. The single
-    /// consume primitive both the response path and the cancel path route through; one owner is in
-    /// one state variant holding one slot, so the disarm is unambiguous.
+    /// Consume the owner's in-flight probe and return its correlation (`None` if none was in flight).
+    /// Disarms the owner's state-resident slot — descent / verify / rebase. The single consume
+    /// primitive both the response path and the cancel path route through; one owner is in one state
+    /// variant holding one slot, so the disarm is unambiguous.
     ///
     /// **Two consumer classes share this seam; the [`DispatchLedger`] recording protocol
     /// distinguishes them.** Both classes disarm here — yielding the same `Some(correlation)` on a
@@ -341,10 +343,10 @@ impl Engine {
     /// Consume the owner's in-flight probe and emit [`ProbeOp::Cancel`] iff one was in flight. The
     /// disarm *is* the consume, atomic with the Cancel emission within this one `&mut self` window.
     ///
-    /// Sole "consume + emit Cancel" choke point used at every cancel site —
-    /// `event_drives_batching`, `finalize_anchor_lost`, `on_watch_op_rejected`'s descent purge, and
-    /// `reap_profile`. Idempotent when no probe is in flight. Inlining at each site loses the named
-    /// contract that "you must Cancel if-and-only-if a probe was outstanding".
+    /// Sole "consume + emit Cancel" choke point used at every cancel site — `event_drives_batching`,
+    /// `finalize_anchor_lost`, `on_watch_op_rejected`'s descent purge, and `reap_profile`. Idempotent
+    /// when no probe is in flight. Inlining at each site loses the named contract that "you must
+    /// Cancel if-and-only-if a probe was outstanding".
     pub(crate) fn cancel_owner_probe(&mut self, owner: ProfileId, out: &mut StepOutput) {
         if self.take_owner_probe(owner).is_some() {
             out.push_probe_op(ProbeOp::Cancel { owner });
@@ -357,12 +359,12 @@ impl Engine {
     ///
     /// This is the **graceful-shutdown probe drain**. The linear [`specter_core::ProbeSlot`] `Drop`
     /// tripwire fires if the `Engine` is dropped with a probe still armed, and a normal shutdown
-    /// routinely coincides with one in flight (every settle / verify / rebase / descent window). The
-    /// driver calls this once when a tick resolves to shutdown, before the engine is torn down; every
-    /// consume routes through the crate-private `cancel_owner_probe` — the same disarm-then-`Cancel`
-    /// choke every internal abandon site uses — so the slot is consumed (not forgotten, not leaked)
-    /// and a graceful exit is silent. The guard stays fully effective: a genuine mid-`step` orphan
-    /// still panics during that step, long before any shutdown drain runs.
+    /// routinely coincides with one in flight (every settle / verify / rebase / descent window).
+    /// The driver calls this once when a tick resolves to shutdown, before the engine is torn down;
+    /// every consume routes through the crate-private `cancel_owner_probe` — the same
+    /// disarm-then-`Cancel` choke every internal abandon site uses — so the slot is consumed (not
+    /// forgotten, not leaked) and a graceful exit is silent. The guard stays fully effective: a
+    /// genuine mid-`step` orphan still panics during that step, long before any shutdown drain runs.
     ///
     /// Tests that freeze a Profile mid-flight reuse this for the *same* teardown before dropping a
     /// local `Engine`, so a test models the real shutdown path, not a test-only fiction. `pub`
@@ -371,8 +373,8 @@ impl Engine {
     ///
     /// Snapshot-then-consume: the `probe_correlation` projection borrows `&self`, the disarm needs
     /// `&mut self`, so they can't overlap; one owner is one state variant holding one slot, so every
-    /// armed slot is enumerated exactly once. Output is [`StepOutput::sort_for_emission`]-sealed like
-    /// every other `StepOutput`-returning entry point — `forward` assumes a resealed value.
+    /// armed slot is enumerated exactly once. Output is [`StepOutput::sort_for_emission`]-sealed
+    /// like every other `StepOutput`-returning entry point — `forward` assumes a resealed value.
     #[must_use]
     pub fn cancel_all_in_flight_probes(&mut self) -> StepOutput {
         let mut out = StepOutput::default();
@@ -390,8 +392,8 @@ impl Engine {
 
     /// The sole [`ProbeOp::Probe`] emission choke. Every launch path — Seed / Verify / Rebase,
     /// `Pending` descent — is `mint → arm-or-construct-armed → emit_owner_probe(owner)`; the caller
-    /// passes nothing but the owner. Pushes **exactly one** `ProbeOp::Probe` for an owner whose
-    /// slot is armed, and **nothing** for an owner whose slot is empty/absent: armed-iff-emitted is
+    /// passes nothing but the owner. Pushes **exactly one** `ProbeOp::Probe` for an owner whose slot
+    /// is armed, and **nothing** for an owner whose slot is empty/absent: armed-iff-emitted is
     /// structural here, because the correlation on the wire is the one read back off the slot
     /// ([`Self::probe_emission_request`]), not a caller-threaded copy that could outlive a skipped
     /// arm.
@@ -414,15 +416,15 @@ impl Engine {
 
     /// Resolve `owner`'s state **once** into the wire it should emit, or `None` if its slot is
     /// empty/absent (⇒ no probe). The emission-side twin of the response gate
-    /// ([`Self::profile_probe_gate`]): the same one-resolution shape, the disjoint concern. The
-    /// gates yield the `Copy` route the *response* demuxes on; this yields the owned `ProbeRequest`
-    /// the *request* carries — heavier (the scan-config handle, baseline `Arc`, the proof
-    /// obligation), so it is deliberately a separate function rather than a gate caller; emission
-    /// never depends on the response-shaped route enums.
+    /// ([`Self::profile_probe_gate`]): the same one-resolution shape, the disjoint concern. The gates
+    /// yield the `Copy` route the *response* demuxes on; this yields the owned `ProbeRequest` the
+    /// *request* carries — heavier (the scan-config handle, baseline `Arc`, the proof obligation),
+    /// so it is deliberately a separate function rather than a gate caller; emission never depends
+    /// on the response-shaped route enums.
     ///
     /// A pure `&self` state→wire projection — like Descent, no accumulator drain. The post-fire
-    /// fire-tail residual reset is owned by `transition_to_rebasing` (the category-(a) phase
-    /// helper), not the emission path, so this choke reaches no burst-mut at all.
+    /// fire-tail residual reset is owned by `transition_to_rebasing` (the category-(a) phase helper),
+    /// not the emission path, so this choke reaches no burst-mut at all.
     ///
     /// Two passes under **one** `profiles` resolution:
     ///
@@ -430,17 +432,17 @@ impl Engine {
     ///    slot* (`?` ⇒ an empty slot returns `None` and nothing is emitted — the structural
     ///    armed-iff-emitted property), and resolve `(target, forced)` from the same match.
     /// 2. **Render the wire** via `&self.tree`. Descent carries the prefix path plus the awaited
-    ///    head segment; Verify / Rebase kind-dispatch — `Some(File)` ⇒ `AnchorFile`, else ⇒
-    ///    `Subtree` with the Profile's `(config, config_hash)`, `baseline_subtree`, and the
-    ///    per-carrier [`specter_core::ProofObligation`], keyed on
-    ///    [`specter_core::Profile::event_chains_prove_quiescence`]: an events-complete Standard
-    ///    burst ⇒ `Chains` over the [`specter_core::NonEmptyPathSet`] from the persisting `dirty`'s
-    ///    captured paths (degrading to `WholeSubtree` when the projection is empty — production
-    ///    never reaches that arm but the type wrapper makes a silently-chainless `Chains`
-    ///    unrepresentable); Seed, events-incomplete Standard, and Rebase ⇒ `WholeSubtree` — no
-    ///    trustworthy prior, or a stream that cannot witness in-place writes — built lazily, never
-    ///    for a File anchor. The kind rule lives here exactly once, so the prior positional
-    ///    constructors' fan-out dissolves into struct literals.
+    ///    head segment; Verify / Rebase kind-dispatch — `Some(File)` ⇒ `AnchorFile`, else ⇒ `Subtree`
+    ///    with the Profile's `(config, config_hash)`, `baseline_subtree`, and the per-carrier
+    ///    [`specter_core::ProofObligation`], keyed on
+    ///    [`specter_core::Profile::event_chains_prove_quiescence`]: an events-complete Standard burst
+    ///    ⇒ `Chains` over the [`specter_core::NonEmptyPathSet`] from the persisting `dirty`'s
+    ///    captured paths (degrading to `WholeSubtree` when the projection is empty — production never
+    ///    reaches that arm but the type wrapper makes a silently-chainless `Chains` unrepresentable);
+    ///    Seed, events-incomplete Standard, and Rebase ⇒ `WholeSubtree` — no trustworthy prior, or
+    ///    a stream that cannot witness in-place writes — built lazily, never for a File anchor. The
+    ///    kind rule lives here exactly once, so the prior positional constructors' fan-out dissolves
+    ///    into struct literals.
     fn probe_emission_request(&self, owner: ProfileId) -> Option<ProbeRequest> {
         // `Copy` carrier classification: which carrier, and — for the pre-fire carrier — the target +
         // `forced` + `intent` + a `Copy` borrow of the `dirty` provenance, all read off state.
@@ -462,27 +464,27 @@ impl Engine {
             /// Profile `Verifying`. `target` = the variant payload's `target` (the live id
             /// `pre_fire_target` resolved, immutable for the Verifying variant's lifetime),
             /// `forced` = `pre.forced`, `intent` feeds the obligation predicate
-            /// ([`Profile::event_chains_prove_quiescence`] — the same rule that resolved the
-            /// target, so the two cannot diverge), and `dirty` is a `Copy` borrow of the burst's
+            /// ([`Profile::event_chains_prove_quiescence`] — the same rule that resolved the target,
+            /// so the two cannot diverge), and `dirty` is a `Copy` borrow of the burst's
             /// [`DirtyProvenance`] — the obligation source for the chains arm. Events-complete
-            /// Standard ⇒ `Chains` from `dirty`'s captured paths, read in the render pass
-            /// (`chains()` allocates, so the obligation stays lazy — never built for a `File`
-            /// anchor); Seed and events-incomplete Standard ⇒ `WholeSubtree` (no trustworthy prior,
-            /// or a stream that cannot witness in-place writes). The *persisting* `dirty` outlives
-            /// this probe across re-batching, so the borrow is sound for the resolution.
+            /// Standard ⇒ `Chains` from `dirty`'s captured paths, read in the render pass (`chains()`
+            /// allocates, so the obligation stays lazy — never built for a `File` anchor); Seed and
+            /// events-incomplete Standard ⇒ `WholeSubtree` (no trustworthy prior, or a stream that
+            /// cannot witness in-place writes). The *persisting* `dirty` outlives this probe across
+            /// re-batching, so the borrow is sound for the resolution.
             PreFire {
                 target: ResourceId,
                 forced: bool,
                 intent: BurstIntent,
                 dirty: &'a DirtyProvenance,
             },
-            /// Profile `Rebasing` — target is the anchor; the emission ships `forced = false`
-            /// because the obligation is unconditionally `WholeSubtree` (the command just mutated
-            /// the tree, so there is no trustworthy prior to mtime-skip against, exactly as Seed).
-            /// The post-fire [`CeilingState::Reached`] latch is the *response-side* `forced`, read
-            /// by `profile_probe_gate` for the [`ProfileProbeRoute::Rebasing`] payload — disjoint
-            /// from the emission knob. No accumulator drain — the fire-tail residual reset is owned
-            /// by `transition_to_rebasing`.
+            /// Profile `Rebasing` — target is the anchor; the emission ships `forced = false` because
+            /// the obligation is unconditionally `WholeSubtree` (the command just mutated the tree,
+            /// so there is no trustworthy prior to mtime-skip against, exactly as Seed). The
+            /// post-fire [`CeilingState::Reached`] latch is the *response-side* `forced`, read by
+            /// `profile_probe_gate` for the [`ProfileProbeRoute::Rebasing`] payload — disjoint from
+            /// the emission knob. No accumulator drain — the fire-tail residual reset is owned by
+            /// `transition_to_rebasing`.
             Rebase,
         }
 
@@ -490,11 +492,11 @@ impl Engine {
         let anchor = p.resource();
 
         // Read the correlation BACK off the armed slot via the *same* pub projection
-        // `pending_probe_for` reads (`probe_correlation` is `pub(crate)` to `core`; the engine
-        // never reaches past the state surface into a carrier's private slot). `?` on an empty slot
-        // ⇒ `None` ⇒ no probe: armed-iff-emitted, structurally. Then classify the carrier — target
-        // / `forced` / `intent` / the `dirty` borrow — independently of the correlation just read.
-        // A `Some` correlation *implies* a probe-bearing carrier (Batching / Draining / Awaiting /
+        // `pending_probe_for` reads (`probe_correlation` is `pub(crate)` to `core`; the engine never
+        // reaches past the state surface into a carrier's private slot). `?` on an empty slot ⇒
+        // `None` ⇒ no probe: armed-iff-emitted, structurally. Then classify the carrier — target /
+        // `forced` / `intent` / the `dirty` borrow — independently of the correlation just read. A
+        // `Some` correlation *implies* a probe-bearing carrier (Batching / Draining / Awaiting /
         // Settling / Idle hold no slot), so those arms are structurally dead when the read-back
         // succeeded; they fold to `None` exactly as the response gate's twin arms do.
         let correlation = p.state().probe_correlation()?;
@@ -521,18 +523,18 @@ impl Engine {
             ProfileState::Idle | ProfileState::Parked => return None,
         };
 
-        // The Rebase target is the anchor (the post-fire side carries no probe target on its
-        // variant — Rebasing's target is structurally fixed); `forced` is pre-fire -only so
-        // `false`. No mutation here — the Rebase obligation is `WholeSubtree` (built in the render
-        // pass), so this resolution needs no `&mut` to drain anything.
+        // The Rebase target is the anchor (the post-fire side carries no probe target on its variant
+        // — Rebasing's target is structurally fixed); `forced` is pre-fire -only so `false`. No
+        // mutation here — the Rebase obligation is `WholeSubtree` (built in the render pass), so
+        // this resolution needs no `&mut` to drain anything.
         let (target, forced) = match carrier {
             Carrier::Descent { prefix, .. } => (prefix, false),
             Carrier::PreFire { target, forced, .. } => (target, forced),
             Carrier::Rebase => (anchor, false),
         };
 
-        // Render via `&self.tree`. Descent is the prefix path plus the awaited segment; the
-        // pre-fire / rebase carriers kind-dispatch.
+        // Render via `&self.tree`. Descent is the prefix path plus the awaited segment; the pre-fire
+        // / rebase carriers kind-dispatch.
         let target_path = self.tree.path_of(target).unwrap_or_else(empty_path);
         Some(match carrier {
             Carrier::Descent { segment, .. } => ProbeRequest::Descent {
@@ -567,8 +569,8 @@ impl Engine {
                         // arm — events-complete Standard — re-proves the event-dirty root→leaf
                         // chains, the captured paths off the carrier's `Copy` borrow of the
                         // *persisting* `dirty` (the burst outlives this probe across re-batching).
-                        // Every captured path is at-or-under `target` by construction (the target is
-                        // the captured paths' LCA), so no subtree filter is needed.
+                        // Every captured path is at-or-under `target` by construction (the target
+                        // is the captured paths' LCA), so no subtree filter is needed.
                         // `NonEmptyPathSet::new` rejects an empty projection — degrade to
                         // `WholeSubtree` so the walker proves the whole subtree rather than silently
                         // certifying Authoritative against a chain-less obligation. Production never
@@ -593,12 +595,12 @@ impl Engine {
                              Subtree obligation builder"
                         ),
                     };
-                    // Scope basis for the walker: the anchor. When the recursion root *is* the
-                    // anchor (Seed / Rebase / a dirty-LCA that resolved to the anchor) reuse
-                    // `target_path` — a refcount bump, not a second tree walk; otherwise resolve
-                    // the anchor's own path. `target` is at-or-under `anchor` by
-                    // `pre_fire_target`'s covered-LCA resolution, so the walker's
-                    // `strip_prefix(anchor_path)` is total over the subtree it reads.
+                    // Scope basis for the walker: the anchor. When the recursion root *is* the anchor
+                    // (Seed / Rebase / a dirty-LCA that resolved to the anchor) reuse `target_path`
+                    // — a refcount bump, not a second tree walk; otherwise resolve the anchor's own
+                    // path. `target` is at-or-under `anchor` by `pre_fire_target`'s covered-LCA
+                    // resolution, so the walker's `strip_prefix(anchor_path)` is total over the
+                    // subtree it reads.
                     let anchor_path = if target == anchor {
                         Arc::clone(&target_path)
                     } else {

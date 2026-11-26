@@ -1,18 +1,18 @@
 //! Signal-handler installation + signal-pipeline surface.
 //!
-//! [`register_signal_handlers`] runs at `App::run`'s prologue, *before* any other production
-//! action. [`SignalPipe::new`] installs `sa_sigaction` for each of [`HANDLED_SIGNALS`] on
-//! construction — any signal arriving during the rest of init is captured by the signal-pipeline's
-//! internal pipe (owned by the returned [`SignalPipe`]) and surfaces on the first reactor tick's
-//! `TOKEN_SIGNAL` drain. Without this lift, SIGTERM during config load would fall through to the
-//! kernel default (immediate process death) and bypass orderly shutdown.
+//! [`register_signal_handlers`] runs at `App::run`'s prologue, *before* any other production action.
+//! [`SignalPipe::new`] installs `sa_sigaction` for each of [`HANDLED_SIGNALS`] on construction —
+//! any signal arriving during the rest of init is captured by the signal-pipeline's internal pipe
+//! (owned by the returned [`SignalPipe`]) and surfaces on the first reactor tick's `TOKEN_SIGNAL`
+//! drain. Without this lift, SIGTERM during config load would fall through to the kernel default
+//! (immediate process death) and bypass orderly shutdown.
 //!
 //! [`SignalPipe`] exists for one reason: expose the signal pipe's read end via [`AsFd`] so
 //! [`crate::driver::Reactor`] registers it through [`mio::unix::SourceFd`] uniformly with the other
 //! kernel-fd Sources (watcher, config_watcher). Holding one [`SignalPipe`] live for the daemon's
 //! lifetime closes the registration-tear-down gap an intermediate drop-then-recreate dance during
-//! boot would have opened (signal-hook unregisters our handler chain entries on [`SignalPipe`]
-//! drop; a gap window would leak signals to the kernel default).
+//! boot would have opened (signal-hook unregisters our handler chain entries on [`SignalPipe`] drop;
+//! a gap window would leak signals to the kernel default).
 //!
 //! The double-tap shutdown vocabulary ([`HARD_EXIT_WINDOW`], [`HARD_EXIT_CODE`],
 //! [`HARD_SHUTDOWN_CONFIRM_TIMEOUT`]) lives here so the registration site and the dispatch consumer
@@ -26,9 +26,9 @@ use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
-/// The signal set the bin handles end-to-end: SIGHUP for reload, SIGINT / SIGTERM for shutdown
-/// (with double-tap escalation). Pinned in one place so the registration site
-/// ([`crate::app::run`]'s prologue) and the signal thread's iterator can't drift apart.
+/// The signal set the bin handles end-to-end: SIGHUP for reload, SIGINT / SIGTERM for shutdown (with
+/// double-tap escalation). Pinned in one place so the registration site ([`crate::app::run`]'s
+/// prologue) and the signal thread's iterator can't drift apart.
 pub(crate) const HANDLED_SIGNALS: [i32; 3] = [SIGHUP, SIGINT, SIGTERM];
 
 /// Max gap between two terminations before the second escalates to a hard exit. Operator pressing
@@ -44,12 +44,12 @@ pub(crate) const HARD_EXIT_CODE: i32 = 130;
 /// Healthy phase 3 fanout is microseconds per child (a `kill(2)` syscall); the pulse arrives well
 /// inside this window. The timeout is the bound for a *wedged* actuator — a wait thread deadlocked,
 /// a panic during the fanout, etc. — past which the parent must die even without confirmation: the
-/// kernel reaps surviving children on parent exit, and an orphan window > a few hundred
-/// milliseconds is already operator-visible.
+/// kernel reaps surviving children on parent exit, and an orphan window > a few hundred milliseconds
+/// is already operator-visible.
 ///
-/// `200ms` is 4× the historical 50ms sleep heuristic, generous enough for cross-thread hop +
-/// SIGKILL syscalls on a large child set under scheduler contention, tight enough to keep
-/// double-Ctrl-C responsive.
+/// `200ms` is 4× the historical 50ms sleep heuristic, generous enough for cross-thread hop + SIGKILL
+/// syscalls on a large child set under scheduler contention, tight enough to keep double-Ctrl-C
+/// responsive.
 pub(crate) const HARD_SHUTDOWN_CONFIRM_TIMEOUT: Duration = Duration::from_millis(200);
 
 /// Owner of the signal-pipeline's reactor-visible surface.
@@ -61,12 +61,12 @@ pub(crate) const HARD_SHUTDOWN_CONFIRM_TIMEOUT: Duration = Duration::from_millis
 ///
 /// The inner pipe is a [`std::os::unix::net::UnixStream`] pair (not mio's flavor): the only read
 /// site is `SignalDelivery::flush` which uses `MSG_DONTWAIT` on every `recv`, syscall-level
-/// non-blocking regardless of FD-level `O_NONBLOCK`. The looser FD default is preferable — any
-/// future plain-read code path blocks visibly rather than silently `EAGAIN`-ing.
+/// non-blocking regardless of FD-level `O_NONBLOCK`. The looser FD default is preferable — any future
+/// plain-read code path blocks visibly rather than silently `EAGAIN`-ing.
 ///
 /// Exists for one reason: expose the signal pipe's read end via [`AsFd`] so the Reactor registers
-/// it through [`SourceFd`](mio::unix::SourceFd) uniformly with the other kernel-fd Sources
-/// (watcher, config_watcher).
+/// it through [`SourceFd`](mio::unix::SourceFd) uniformly with the other kernel-fd Sources (watcher,
+/// config_watcher).
 #[derive(Debug)]
 pub(crate) struct SignalPipe {
     delivery: SignalDelivery<UnixStream, SignalOnly>,

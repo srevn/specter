@@ -1,9 +1,9 @@
 //! Race-stable kind verification. The watcher's fresh-watch path opens the user-supplied path with
 //! `O_PATH | O_NOFOLLOW`, `fstat`s the resulting fd to discover the inode's actual kind, and verifies
 //! it against the engine's `WatchOp::Watch.kind`. A disagreement maps to [`WatchFailure::Resource`]
-//! (`ENOTDIR`) so the engine routes through the path-fatal recovery channel rather than installing a
-//! kind-incoherent watch. Engine-emitted `Unknown` is a wildcard that defers to the observed kind —
-//! verification cannot fail when `kind == ResourceKind::Unknown`.
+//! (`ENOTDIR`) so the engine routes through the path-fatal recovery channel rather than installing
+//! a kind-incoherent watch. Engine-emitted `Unknown` is a wildcard that defers to the observed kind
+//! — verification cannot fail when `kind == ResourceKind::Unknown`.
 //!
 //! Pins the static disagreement case (engine expected one shape, the path is the other).
 

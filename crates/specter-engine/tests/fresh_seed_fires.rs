@@ -43,10 +43,10 @@ fn burst_deadline_id(e: &Engine, pid: ProfileId) -> specter_core::TimerId {
     }
 }
 
-/// Single-file directory snapshot with an explicit `size` so two snapshots over the same name +
-/// inode hash distinctly when the leaf grows in place — the canonical scp / in-place-write shape
-/// the N=2 hash channel exists to catch. `dir_snap` bakes `size = 0` and offers no override, so
-/// this distinct sized fixture stays file-local; the growing-leaf test is the sole consumer here.
+/// Single-file directory snapshot with an explicit `size` so two snapshots over the same name + inode
+/// hash distinctly when the leaf grows in place — the canonical scp / in-place-write shape the N=2
+/// hash channel exists to catch. `dir_snap` bakes `size = 0` and offers no override, so this distinct
+/// sized fixture stays file-local; the growing-leaf test is the sole consumer here.
 fn dir_snap_sized_file(name: &str, inode: u64, size: u64) -> Arc<DirSnapshot> {
     let mut map: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
     map.insert(
@@ -105,10 +105,10 @@ fn seed_cycle(e: &mut Engine, pid: ProfileId, snap: &Arc<DirSnapshot>, at: Insta
     )
 }
 
-/// Drive a settled, idle Profile through one full Standard fire→rebase cycle (event → settle →
-/// verify → fire → EffectComplete → rebase → Idle). Asserts exactly one Effect fired. Used
-/// post-baseline to prove the Profile now behaves as a Standard burst. `snap_new` differs from the
-/// established baseline so the Standard verdict is a genuine fire (not B1-dedup-suppressed).
+/// Drive a settled, idle Profile through one full Standard fire→rebase cycle (event → settle → verify
+/// → fire → EffectComplete → rebase → Idle). Asserts exactly one Effect fired. Used post-baseline
+/// to prove the Profile now behaves as a Standard burst. `snap_new` differs from the established
+/// baseline so the Standard verdict is a genuine fire (not B1-dedup-suppressed).
 fn drive_standard_fire_once(
     e: &mut Engine,
     pid: ProfileId,
@@ -124,8 +124,8 @@ fn drive_standard_fire_once(
         },
         t0,
     );
-    // The verify response against the seed baseline fires directly on its first Authoritative
-    // sample. The drain loop is defensive in case the first response routes through a
+    // The verify response against the seed baseline fires directly on its first Authoritative sample.
+    // The drain loop is defensive in case the first response routes through a
     // `QuiescenceVerdict::Retry`.
     let mut t = t0;
     let mut stable_out: Option<StepOutput> = None;
@@ -361,9 +361,9 @@ fn fresh_seed_with_activity_growing_leaf_fires_one() {
         "the growing-leaf samples must hash distinctly so the carrier observes disagreement",
     );
 
-    // Two re-batch samples (still-moving — no fire); the third is the stable verdict. Each
-    // iteration advances time by SETTLE: the prior step's `retry_drives_batching` armed a fresh
-    // `Settle` deadline at `prior + SETTLE`, so the next `seed_cycle` expires it cleanly.
+    // Two re-batch samples (still-moving — no fire); the third is the stable verdict. Each iteration
+    // advances time by SETTLE: the prior step's `retry_drives_batching` armed a fresh `Settle`
+    // deadline at `prior + SETTLE`, so the next `seed_cycle` expires it cleanly.
     let mut at = now + Duration::from_millis(1);
     for read in [&s1, &s2] {
         at += SETTLE;
@@ -388,9 +388,9 @@ fn fresh_seed_with_activity_growing_leaf_fires_one() {
 }
 
 /// Drive a fresh Seed to the `QuiescenceVerdict::Abandon` ceiling terminal so the Profile ends Idle
-/// with NO baseline (no FsEvents, expire the BurstDeadline so `forced=true`, answer the verify with a
-/// `ProofAuthority::Undischarged` authority — the fold projects this to `QuiescenceVerdict::Abandon {
-/// first_unread }`, and the dispatch runs `finish_burst_to_idle` WITHOUT `apply_snapshot` /
+/// with NO baseline (no FsEvents, expire the BurstDeadline so `forced=true`, answer the verify with
+/// a `ProofAuthority::Undischarged` authority — the fold projects this to `QuiescenceVerdict::Abandon
+/// { first_unread }`, and the dispatch runs `finish_burst_to_idle` WITHOUT `apply_snapshot` /
 /// `rebase_baseline`). Then inject a *single* `FsEvent` (Idle + `!baseline_is_some()` ⇒
 /// `start_seed_burst`) and drive a clean Seed proof to `Stable`. Asserts exactly one Effect — this
 /// pins the constructor-symmetry contract specifically: a fresh Seed re-opened by a single event
@@ -453,8 +453,8 @@ fn fresh_seed_after_forced_ceiling_single_event_fires_one() {
         "the forced ceiling terminal never establishes a baseline (no rebase_baseline)",
     );
 
-    // A single FsEvent: Idle + !baseline ⇒ `start_seed_burst` (a fresh Seed). The trigger is
-    // recorded in `dirty`, so this fresh-with-activity Seed fires one Effect at its stable verdict.
+    // A single FsEvent: Idle + !baseline ⇒ `start_seed_burst` (a fresh Seed). The trigger is recorded
+    // in `dirty`, so this fresh-with-activity Seed fires one Effect at its stable verdict.
     let trigger_at = now + MAX_SETTLE + Duration::from_millis(3);
     let trig_out = e.step(
         Input::FsEvent {
@@ -583,8 +583,8 @@ fn fresh_seed_with_activity_gated_by_draining_then_fires_one() {
         "child is mid-Standard-burst and gates the parent",
     );
 
-    // The parent witnesses activity (anchor ContentChanged during its Seed Batching), then its
-    // verify is driven to Stable while the child gates.
+    // The parent witnesses activity (anchor ContentChanged during its Seed Batching), then its verify
+    // is driven to Stable while the child gates.
     let t_parent_act = t_child_burst + SETTLE + Duration::from_millis(1);
     e.step(
         Input::FsEvent {
@@ -652,9 +652,9 @@ fn fresh_seed_with_activity_gated_by_draining_then_fires_one() {
 
     // Finish the child's Standard burst, then drive the parent's Draining → Verifying reconfirm to
     // a firing stable verdict. Guarded on `parent_entered_draining` so the block is structurally
-    // tied to the gate state it asserts (a parent already Idle would skip it and the test would
-    // fail cleanly at the unconditional single-Effect assertion below rather than panicking on a
-    // missing parent probe).
+    // tied to the gate state it asserts (a parent already Idle would skip it and the test would fail
+    // cleanly at the unconditional single-Effect assertion below rather than panicking on a missing
+    // parent probe).
     let mut parent_fire_count = 0usize;
     let mut parent_fire_key: Option<DedupKey> = None;
     if parent_entered_draining {
@@ -667,23 +667,23 @@ fn fresh_seed_with_activity_gated_by_draining_then_fires_one() {
 
         // ── Drive the child's Standard burst to a genuine Idle. ──
         //
-        // The child Sub (recursive @ /src/foo, DEFAULT_EVENTS) had its Seed pinned **silently**
-        // over an empty tree (a no-activity Seed never fires ⇒ `has_fired == false`). B1
-        // `SuppressDedup` requires `!forced && nothing_changed && already_fired` (`fire_decision`);
-        // the child's never-fired, so even though its Standard confirm is hash-equal to its
-        // baseline the verdict is `Emit`, NOT `SuppressDedup`. The child therefore FIRES one
-        // Subtree Effect on its `Stable`, enters the post-fire tail, and keeps gating the parent
-        // (`has_active_standard_descendant` counts post-fire phases too) until its rebase loop
-        // closes to Idle. We must run the full fire → EffectComplete → rebase → Idle cycle, not
-        // assume a straight finish-to-Idle.
+        // The child Sub (recursive @ /src/foo, DEFAULT_EVENTS) had its Seed pinned **silently** over
+        // an empty tree (a no-activity Seed never fires ⇒ `has_fired == false`). B1 `SuppressDedup`
+        // requires `!forced && nothing_changed && already_fired` (`fire_decision`); the child's
+        // never-fired, so even though its Standard confirm is hash-equal to its baseline the verdict
+        // is `Emit`, NOT `SuppressDedup`. The child therefore FIRES one Subtree Effect on its
+        // `Stable`, enters the post-fire tail, and keeps gating the parent
+        // (`has_active_standard_descendant` counts post-fire phases too) until its rebase loop closes
+        // to Idle. We must run the full fire → EffectComplete → rebase → Idle cycle, not assume a
+        // straight finish-to-Idle.
         //
         // Timing rule (`on_settle_expired`): a step that expires a re-armed Batching settle timer
         // must use an instant `≥ last_event_time + SETTLE`, else the handler reschedules (stays
         // Batching, no probe). `retry_drives_batching` pins `last_event_time = <response step
         // instant>`. The child first response is stepped at `p2` exactly (no `+1ms`), so the child
         // re-batches with `last_event_time = p2` and a fresh settle deadline at `p2 + SETTLE`; the
-        // child's next-sample settle is then expired at exactly `p2 + SETTLE` (== `last_event_time
-        // + SETTLE`), which satisfies `now − last ≥ settle`.
+        // child's next-sample settle is then expired at exactly `p2 + SETTLE` (== `last_event_time +
+        // SETTLE`), which satisfies `now − last ≥ settle`.
 
         // A single Authoritative verify response fires the child's Effect. The child never fired ⇒
         // Emit (not B1 dedup).
@@ -783,11 +783,11 @@ fn fresh_seed_with_activity_gated_by_draining_then_fires_one() {
                 .expect("parent reconfirm probe after Draining→Verifying via settle")
         };
 
-        // The child reached Idle at `(p2 + SETTLE + 2ms) + SETTLE` (the rebase loop's terminal
-        // step); the parent's reconfirm probe was emitted there. Answer it at `p2 + SETTLE * 3`
-        // (strictly later than that instant, so the timeline stays monotonic). With the gate lifted
-        // and `dirty` still carrying the witnessed `/src` event, the reconfirm's stable verdict
-        // must fire exactly one Effect.
+        // The child reached Idle at `(p2 + SETTLE + 2ms) + SETTLE` (the rebase loop's terminal step);
+        // the parent's reconfirm probe was emitted there. Answer it at `p2 + SETTLE * 3` (strictly
+        // later than that instant, so the timeline stays monotonic). With the gate lifted and `dirty`
+        // still carrying the witnessed `/src` event, the reconfirm's stable verdict must fire exactly
+        // one Effect.
         let reconfirm_out = e.step(
             Input::ProbeResponse(ProbeResponse {
                 owner: pid_parent,

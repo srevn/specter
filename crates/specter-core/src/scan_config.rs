@@ -8,15 +8,15 @@
 //! identity axis — so a new identity-bearing field is a compile error until folded — the
 //! fold-completeness ratchet.
 //!
-//! A [`SubtreeScan`] is a `[[watch]]`'s scan knobs; a [`ScanConfig`] is what a walk reads — a
-//! subtree scan, or a pattern's chain. An identity is built from either: [`ProfileIdentity::new`]
-//! from a subtree scan, the identity of a Profile that fires, and [`ProfileIdentity::discovery`]
-//! from a pattern alone, whose mask and ceiling it fixes.
+//! A [`SubtreeScan`] is a `[[watch]]`'s scan knobs; a [`ScanConfig`] is what a walk reads — a subtree
+//! scan, or a pattern's chain. An identity is built from either: [`ProfileIdentity::new`] from a
+//! subtree scan, the identity of a Profile that fires, and [`ProfileIdentity::discovery`] from a
+//! pattern alone, whose mask and ceiling it fixes.
 //!
-//! `GlobPattern` carries the canonical `source` string alongside the compiled
-//! `globset::GlobMatcher`. Equality and ordering are over `source` only — the matcher is a
-//! transient compiled artifact. There is no `Hash` impl: the single hashing path through these
-//! types is `compute_config_hash`, which reads `source` directly via `core::hash::hasher`.
+//! `GlobPattern` carries the canonical `source` string alongside the compiled `globset::GlobMatcher`.
+//! Equality and ordering are over `source` only — the matcher is a transient compiled artifact. There
+//! is no `Hash` impl: the single hashing path through these types is `compute_config_hash`, which
+//! reads `source` directly via `core::hash::hasher`.
 
 use crate::hash::hasher;
 use crate::pattern::PatternSpec;
@@ -131,8 +131,8 @@ impl SubtreeScan {
 
 /// The one constructor of a [`SubtreeScan`].
 ///
-/// `build` canonicalises `exclude` — sorted by source, adjacent duplicates dropped — so equal
-/// logical knobs are byte-equal under `compute_config_hash`, which folds the list in that order.
+/// `build` canonicalises `exclude` — sorted by source, adjacent duplicates dropped — so equal logical
+/// knobs are byte-equal under `compute_config_hash`, which folds the list in that order.
 ///
 /// Its default is a `[[watch]]` that writes none of these knobs: every depth, no dotfiles, no filter.
 #[derive(Debug, Default)]
@@ -199,21 +199,21 @@ impl From<SubtreeScan> for ScanConfig {
 
 /// What a walk reads and what `covers` tests: a subtree scan, or a pattern's chain.
 ///
-/// Every consumer goes through the named predicates ([`Self::accepts`],
-/// [`Self::accepts_structural`], [`Self::accepts_kinded`], [`Self::descends_into`],
-/// [`Self::exclude_globs`], [`Self::quiescence_witness_classes`], [`Self::denial`],
-/// [`Self::match_chain`]) or the hash; no consumer destructures the variants — shape dispatch lives
-/// entirely in this module, so a new shape is a compile error here and nowhere else.
+/// Every consumer goes through the named predicates ([`Self::accepts`], [`Self::accepts_structural`],
+/// [`Self::accepts_kinded`], [`Self::descends_into`], [`Self::exclude_globs`],
+/// [`Self::quiescence_witness_classes`], [`Self::denial`], [`Self::match_chain`]) or the hash; no
+/// consumer destructures the variants — shape dispatch lives entirely in this module, so a new shape
+/// is a compile error here and nowhere else.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ScanConfig {
     /// One walk of a subtree under a `[[watch]]`'s knobs.
     Subtree(SubtreeScan),
-    /// Positional per-segment chain over a parsed absolute pattern, anchored at the pattern's
-    /// literal prefix. A dirent at anchor-relative depth `d` tests pattern component
-    /// `literal_prefix_len + d − 1` ([`PatternSpec::matches_at`]); coverage ends at the terminus
-    /// depth ([`PatternSpec::terminus_depth`]), where matched directories stay unexplored
-    /// (`DirChild::Uncovered`) and matched files are ordinary leaves — the pruned walk observes
-    /// chain membership, not subtree content.
+    /// Positional per-segment chain over a parsed absolute pattern, anchored at the pattern's literal
+    /// prefix. A dirent at anchor-relative depth `d` tests pattern component `literal_prefix_len +
+    /// d − 1` ([`PatternSpec::matches_at`]); coverage ends at the terminus depth
+    /// ([`PatternSpec::terminus_depth`]), where matched directories stay unexplored
+    /// (`DirChild::Uncovered`) and matched files are ordinary leaves — the pruned walk observes chain
+    /// membership, not subtree content.
     ///
     /// `Arc`: one parsed pattern travels from a dynamic watch's target into its chain's identity,
     /// each hop a refcount bump instead of a copy of the parsed components and their matchers.
@@ -256,8 +256,8 @@ impl ScanConfig {
     /// Exists for the walker, which doesn't know `is_dir` until after the per-dirent `lstat`. Calling
     /// [`Self::accepts`] there with a guessed kind would either skip a covered Dir (guess `File` +
     /// `pattern.matches == false`) or admit a pattern-violating File (guess `Dir`). Splitting lets
-    /// the walker reject out-of-scope dirents pre-`lstat` — saving the syscall on a `target/` tree in
-    /// a Cargo project (thousands of excluded dirents) — and gate the kinded half post-`lstat`
+    /// the walker reject out-of-scope dirents pre-`lstat` — saving the syscall on a `target/` tree
+    /// in a Cargo project (thousands of excluded dirents) — and gate the kinded half post-`lstat`
     /// against the known kind. `covers` has `kind` in hand and calls [`Self::accepts`] directly.
     ///
     /// **Fold-completeness ratchet, predicate tier.** The `Subtree` arm destructures exhaustively:
@@ -297,9 +297,9 @@ impl ScanConfig {
                 true
             }
             // The positional test is the whole arm: `matches_at` already folds the depth bound
-            // (beyond-terminus ⇒ false). Non-UTF-8 names are conservatively out of scope — the
-            // walker drops them before any predicate and Tree names are UTF-8 by construction, so
-            // the `None` arm is totality, not a live path.
+            // (beyond-terminus ⇒ false). Non-UTF-8 names are conservatively out of scope — the walker
+            // drops them before any predicate and Tree names are UTF-8 by construction, so the `None`
+            // arm is totality, not a live path.
             Self::MatchChain(spec) => rel
                 .file_name()
                 .and_then(|n| n.to_str())
@@ -318,8 +318,8 @@ impl ScanConfig {
     /// this directly post-`lstat` with the freshly-observed `is_dir` — the two agree because
     /// `ResourceKind` folds every non-directory (symlinks included) to `File`, so `kind != Dir` ⟺
     /// `!is_dir` for every kind `accepts` can receive. `depth` shares the caller's one derivation
-    /// (the walker's `rel`-derived `entry_depth`; `covers`' chain position) — never recomputed
-    /// here, symmetric with [`Self::accepts_structural`].
+    /// (the walker's `rel`-derived `entry_depth`; `covers`' chain position) — never recomputed here,
+    /// symmetric with [`Self::accepts_structural`].
     #[must_use]
     pub fn accepts_kinded(&self, rel: &Path, is_dir: bool, depth: u32) -> bool {
         // Anchor depth bypasses the kinded gate too — same "in scope by construction" contract as
@@ -339,9 +339,9 @@ impl ScanConfig {
     /// direct child = 1, …) — the recursion-edge decision, distinct from [`Self::accepts`]'s
     /// per-entry inclusion decision.
     ///
-    /// The walker supplies `same_device` — its per-dirent observation that the child's device
-    /// equals the recursion root's. The observation cannot originate here (the engine's `Tree`
-    /// slots don't carry `device`), but whether it *matters* is the shape's policy:
+    /// The walker supplies `same_device` — its per-dirent observation that the child's device equals
+    /// the recursion root's. The observation cannot originate here (the engine's `Tree` slots don't
+    /// carry `device`), but whether it *matters* is the shape's policy:
     ///
     /// - `Subtree` descends under `max_depth` and on the same device — an unbounded walk must not
     ///   wander into mounts.
@@ -392,13 +392,13 @@ impl ScanConfig {
     /// - `Subtree` proves a content hash ⇒ [`ClassSet::IN_PLACE_WRITES`]: in-place writes are the
     ///   one change kind that moves `leaf_hash` without a point event.
     /// - `MatchChain` proves a match set ⇒ [`ClassSet::MEMBERSHIP_CHANGES`]: membership changes are
-    ///   STRUCTURE point events; no in-place-write analog exists for set membership (the
-    ///   leaf-content residual is documented at that constant).
+    ///   STRUCTURE point events; no in-place-write analog exists for set membership (the leaf-content
+    ///   residual is documented at that constant).
     ///
     /// The returned set is always non-empty. [`ClassSet::contains`] reports `false` for an empty
-    /// argument, so a hypothetical "silence always witnesses" shape must not encode itself as
-    /// `EMPTY` here — it would read as *never* witnessing. Such a shape needs an explicit fold at
-    /// the projection instead.
+    /// argument, so a hypothetical "silence always witnesses" shape must not encode itself as `EMPTY`
+    /// here — it would read as *never* witnessing. Such a shape needs an explicit fold at the
+    /// projection instead.
     #[must_use]
     pub const fn quiescence_witness_classes(&self) -> ClassSet {
         match self {
@@ -435,18 +435,18 @@ pub enum ConfigError {
     /// `message` is the rendered `globset::Error` text (the original is not `Clone`).
     InvalidGlob { source: String, message: String },
     /// The glob is syntactically valid per `globset` but cannot match any non-empty relative path
-    /// in the walker's semantics. Surfaced at the [`GlobPattern::compile`] floor so a typo
-    /// (`target/` vs `target/**`) or a misunderstanding (leading `/` in a relative-path glob)
-    /// fails fast rather than silently doing nothing. `reason` is an operator-facing explanation of
-    /// the specific shape that's unreachable.
+    /// in the walker's semantics. Surfaced at the [`GlobPattern::compile`] floor so a typo (`target/`
+    /// vs `target/**`) or a misunderstanding (leading `/` in a relative-path glob) fails fast rather
+    /// than silently doing nothing. `reason` is an operator-facing explanation of the specific shape
+    /// that's unreachable.
     UnreachableGlob { source: String, reason: String },
 }
 
 /// Reject globs that `globset` would happily compile but that cannot match any non-empty relative
 /// path the walker produces. The four shapes are empirically derived against `globset` 0.4 — each
-/// parses as a valid `Glob`, but their matchers return false on every plausible input. Catching
-/// them here is the cheapest way to give the operator a "this glob does nothing" error instead of a
-/// silent no-op.
+/// parses as a valid `Glob`, but their matchers return false on every plausible input. Catching them
+/// here is the cheapest way to give the operator a "this glob does nothing" error instead of a silent
+/// no-op.
 ///
 /// Universal-match globs (`**`, `**/*`) are deliberately not rejected: they're equivalent to no
 /// pattern, which is sometimes the intended shape (e.g. for the exclude list's "match everything
@@ -512,10 +512,11 @@ pub(crate) fn compute_config_hash(
             h.put_u8(u8::from(*hidden));
 
             // Canonical width: u32 for the count. The list arrives sorted *and* deduplicated from
-            // `SubtreeScanBuilder::build`, so this count is over the canonical set — `["a", "a"]` and
-            // `["a"]` fold identically rather than forking two Profiles on a logically equal exclude
-            // set. Saturate on the absurd overflow case — the alternative is an explicit panic, which
-            // buys nothing for a config layer that cannot realistically reach 2^32 globs.
+            // `SubtreeScanBuilder::build`, so this count is over the canonical set — `["a", "a"]`
+            // and `["a"]` fold identically rather than forking two Profiles on a logically equal
+            // exclude set. Saturate on the absurd overflow case — the alternative is an explicit
+            // panic, which buys nothing for a config layer that cannot realistically reach 2^32
+            // globs.
             let exclude_count = u32::try_from(exclude.len()).unwrap_or(u32::MAX);
             h.put_u32(exclude_count);
             for g in exclude {
@@ -573,10 +574,10 @@ const _: () = assert!(DISCOVERY_SETTLE.as_nanos() <= DISCOVERY_MAX_SETTLE.as_nan
 /// the sole identity operation — a structural derive would be a second identity route that could
 /// diverge from the hash the partition actually keys on.
 ///
-/// Sealed: private fields, two constructors, and the hash computed once inside them. "The hash
-/// agrees with its preimage" is thereby a structural property, not a documented convention — no
-/// construction or mutation path can produce an identity whose `hash` disagrees with its axes, so
-/// every carrier reads the same precomputed key instead of re-deriving it.
+/// Sealed: private fields, two constructors, and the hash computed once inside them. "The hash agrees
+/// with its preimage" is thereby a structural property, not a documented convention — no construction
+/// or mutation path can produce an identity whose `hash` disagrees with its axes, so every carrier
+/// reads the same precomputed key instead of re-deriving it.
 ///
 /// `config` sits behind an `Arc`, so an identity, and the scan it ships onto every probe, travels
 /// as a refcount bump, never a deep copy; the other fields are `Copy`, so `ProfileIdentity: Clone`
@@ -876,20 +877,20 @@ mod tests {
     }
 
     /// Discrimination complement to the fold-completeness ratchets: the compile errors at the fold
-    /// sites force a new field into the fold; this test makes the fold *distinguish*, so the
-    /// ratchet cannot be satisfied by folding a new field as a constant.
+    /// sites force a new field into the fold; this test makes the fold *distinguish*, so the ratchet
+    /// cannot be satisfied by folding a new field as a constant.
     ///
     /// The base is fully-populated and non-default: toggling any single field must move the hash.
-    /// (`hash_known_good` pins a *default* config, where a new field left at its default would
-    /// never shift the digest — this is the structural complement that closes that gap.)
+    /// (`hash_known_good` pins a *default* config, where a new field left at its default would never
+    /// shift the digest — this is the structural complement that closes that gap.)
     ///
-    /// Each variation builds a fresh identity from mutated *inputs* — the hash seals at
-    /// construction, so every probe runs the same public route production uses
-    /// (`ProfileIdentity::new` → `config_hash`).
+    /// Each variation builds a fresh identity from mutated *inputs* — the hash seals at construction,
+    /// so every probe runs the same public route production uses (`ProfileIdentity::new` →
+    /// `config_hash`).
     ///
-    /// Not itself ratcheted: a new field still needs a new `assert_ne!` line here. The compile
-    /// error from the fold sites is the forcing function that drives the author to add it; this
-    /// test then guards that the fold actually discriminates.
+    /// Not itself ratcheted: a new field still needs a new `assert_ne!` line here. The compile error
+    /// from the fold sites is the forcing function that drives the author to add it; this test then
+    /// guards that the fold actually discriminates.
     #[test]
     fn hash_discriminates_every_populated_field() {
         const BASE_MAX_SETTLE: Duration = Duration::from_secs(7);
@@ -949,8 +950,8 @@ mod tests {
     }
 
     /// The 1-byte scan-shape discriminant leads the fold: two shapes whose remaining byte streams
-    /// could coincide still digest apart. Pairwise over every variant; a new shape extends this
-    /// with its own pairs.
+    /// could coincide still digest apart. Pairwise over every variant; a new shape extends this with
+    /// its own pairs.
     #[test]
     fn hash_distinguishes_scan_shape() {
         let chain_h = compute_config_hash(&chain("/srv/*/log"), SETTLE, NO_EVENTS);
@@ -1064,9 +1065,9 @@ mod tests {
     const GOLDEN_HASH: u64 = 0x49FE_0EB9_4F17_13E0;
 
     /// Fold-completeness ratchet for [`ScanConfig::accepts`]. Mirrors
-    /// [`hash_discriminates_every_populated_field`]: a fully-populated [`SubtreeScan`] plus a
-    /// neutral target; toggling each filter field must move at least one `accepts` verdict on a
-    /// small test grid.
+    /// [`hash_discriminates_every_populated_field`]: a fully-populated [`SubtreeScan`] plus a neutral
+    /// target; toggling each filter field must move at least one `accepts` verdict on a small test
+    /// grid.
     ///
     /// The exhaustive destructure inside `accepts_structural` makes a new field a *compile error*
     /// until folded; this test makes the fold *discriminate*, so the ratchet cannot be satisfied by
@@ -1094,10 +1095,10 @@ mod tests {
                 .collect()
         }
 
-        // Grid of probes: (rel, kind, depth). Each probe is chosen so a *single* field toggle
-        // shifts its verdict — the other fields are picked to "pass" so the predicate stops on the
-        // field under test. Verdicts overlap by design (the predicate short-circuits), so a probe
-        // that's already rejected by a *different* field cannot discriminate.
+        // Grid of probes: (rel, kind, depth). Each probe is chosen so a *single* field toggle shifts
+        // its verdict — the other fields are picked to "pass" so the predicate stops on the field
+        // under test. Verdicts overlap by design (the predicate short-circuits), so a probe that's
+        // already rejected by a *different* field cannot discriminate.
         let probes: &[(&str, ResourceKind, u32)] = &[
             (".hidden_dir", ResourceKind::Dir, 1),
             ("foo.rs", ResourceKind::File, 7),

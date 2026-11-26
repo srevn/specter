@@ -4,8 +4,8 @@
 //!
 //! - [`WakeHandle`] — newtype around `Arc<mio::Waker>`. The only call to [`mio::Waker::new`] in the
 //!   bin lives in [`WakeHandle::new`], making mio's "one Waker per Poll" a structural property: a
-//!   second construction site requires a fresh `use mio::Waker` import, which `grep "use
-//!   mio::Waker"` makes a code-review red flag.
+//!   second construction site requires a fresh `use mio::Waker` import, which `grep "use mio::Waker"`
+//!   makes a code-review red flag.
 //! - [`WakingSink`] — a `Sender<Input>` paired with a [`WakeHandle`]. The single body of the
 //!   send-THEN-wake protocol — every wake-bearing crossing of the cross-thread boundary into the
 //!   engine routes through one method ([`WakingSink::send`]). The sink's [`Drop`] is the structural
@@ -18,8 +18,8 @@
 //! Adapters in [`crate::app`] wrap a `WakingSink` to implement
 //! [`specter_sensor::ProberResponseSender`] / [`specter_actuator::EffectCompleteSender`]: each
 //! adapter is one content-lift line, the wake-and-send protocol stays single-sourced. A future
-//! wake-bearing sink drops in as a third adapter with the same shape — single-Waker stays
-//! structural by typing, not by convention.
+//! wake-bearing sink drops in as a third adapter with the same shape — single-Waker stays structural
+//! by typing, not by convention.
 
 use crossbeam::channel::Sender;
 use mio::{Registry, Token, Waker};
@@ -32,9 +32,9 @@ use std::sync::Arc;
 ///
 /// The `pub(crate)` constructor [`WakeHandle::new`] is the only call site of [`mio::Waker::new`] in
 /// the bin — `grep "Waker::new"` returns one production hit (here). A future contributor adding a
-/// second wake-bearing sink either threads a clone of an existing [`WakeHandle`] through, or
-/// imports [`mio::Waker`] afresh — the latter is a code-review red flag `grep "use mio::Waker"`
-/// makes visible at one grep.
+/// second wake-bearing sink either threads a clone of an existing [`WakeHandle`] through, or imports
+/// [`mio::Waker`] afresh — the latter is a code-review red flag `grep "use mio::Waker"` makes visible
+/// at one grep.
 #[derive(Clone, Debug)]
 pub(crate) struct WakeHandle(Arc<Waker>);
 
@@ -43,8 +43,8 @@ impl WakeHandle {
     ///
     /// The `token` argument is supplied by the caller so this module stays token-agnostic —
     /// [`crate::driver::Reactor`] passes its `TOKEN_WAKER` constant in. Any other Poll registry is
-    /// a bug: the project's structural invariant is one Poll per process; constructing a
-    /// `WakeHandle` against a foreign registry would silently miss every wake edge.
+    /// a bug: the project's structural invariant is one Poll per process; constructing a `WakeHandle`
+    /// against a foreign registry would silently miss every wake edge.
     ///
     /// # Errors
     ///
@@ -75,13 +75,13 @@ impl WakeHandle {
 /// **Drop runs close-THEN-wake**, the symmetric protocol on the channel-close edge. The bin's
 /// actuator-thread closure owns a `Box<dyn EffectCompleteSender>` whose inner sink is this struct;
 /// when that closure exits (clean or panic), the Box drops, the adapter drops, and this [`Drop`]
-/// fires. The [`Sender<Input>`] closes FIRST (via [`Option::take`] + implicit end-of-statement
-/// drop), so by the time the wake edge fires the driver's next `try_recv` on the paired `Receiver`
-/// is guaranteed to see `TryRecvError::Disconnected` — the actuator-gone signal in
+/// fires. The [`Sender<Input>`] closes FIRST (via [`Option::take`] + implicit end-of-statement drop),
+/// so by the time the wake edge fires the driver's next `try_recv` on the paired `Receiver` is
+/// guaranteed to see `TryRecvError::Disconnected` — the actuator-gone signal in
 /// [`crate::driver::Reactor::poll_and_drain`] (via
 /// [`crate::driver::reactor::DrainedTick::actuator_gone`]) lands on the next tick body. Reversing
-/// the order opens a race window where the driver wakes, observes `Empty`, sleeps again, and
-/// strands on Disconnected until an unrelated wake fires.
+/// the order opens a race window where the driver wakes, observes `Empty`, sleeps again, and strands
+/// on Disconnected until an unrelated wake fires.
 ///
 /// The `Option<Sender<Input>>` wrapper is layout-free for the channel-sender shape ([`Sender<Input>`]
 /// is a thin `Arc<Channel<Input>>` internally, so `Option<Sender<Input>>` gets the null-pointer
@@ -114,16 +114,16 @@ impl WakingSink {
     /// Push an [`Input`] onto the channel then pulse the wake edge.
     ///
     /// `tx.send` on the wrapped unbounded crossbeam channel is non-blocking — it only fails with
-    /// `Disconnected` once the driver-side receiver drops, at which point the calling worker
-    /// surfaces the error and exits its loop.
+    /// `Disconnected` once the driver-side receiver drops, at which point the calling worker surfaces
+    /// the error and exits its loop.
     ///
     /// The post-send `wake` is best-effort: it errors only on a destroyed Poll (the shutdown path),
     /// and the next surviving wake's drain picks up our message — nothing to propagate.
     ///
     /// The [`Option::as_ref`] branch surfaces `SendError::Disconnected` if the sink's [`Drop`] has
-    /// already run (only reachable from a hypothetical post-Drop send — every production caller
-    /// holds the sink by reference for the call's lifetime, so the branch is unreachable in steady
-    /// state and well-predicted regardless).
+    /// already run (only reachable from a hypothetical post-Drop send — every production caller holds
+    /// the sink by reference for the call's lifetime, so the branch is unreachable in steady state
+    /// and well-predicted regardless).
     pub(crate) fn send(&self, input: Input) -> Result<(), SendError> {
         let tx = self.tx.as_ref().ok_or(SendError::Disconnected)?;
         tx.send(input).map_err(|_| SendError::Disconnected)?;
@@ -140,10 +140,10 @@ impl Drop for WakingSink {
     /// the paired [`crossbeam::channel::Receiver`] into the disconnected state — the driver's next
     /// `try_recv` returns [`crossbeam::channel::TryRecvError::Disconnected`] rather than `Empty`.
     ///
-    /// The subsequent [`WakeHandle::wake`] pulse is best-effort: a destroyed Poll (the shutdown
-    /// path) returns Err which we discard. The next surviving wake's drain picks up the disconnect;
-    /// mio's late-wake-on-destroyed-Poll contract is a silent no-op so there's nothing to propagate
-    /// on the way out.
+    /// The subsequent [`WakeHandle::wake`] pulse is best-effort: a destroyed Poll (the shutdown path)
+    /// returns Err which we discard. The next surviving wake's drain picks up the disconnect; mio's
+    /// late-wake-on-destroyed-Poll contract is a silent no-op so there's nothing to propagate on
+    /// the way out.
     ///
     /// Ordering matters: if the wake fired BEFORE the sender drop, the driver could wake, observe
     /// `Empty` on the still-connected channel, sleep again, and strand on the eventual Disconnected
@@ -173,9 +173,9 @@ mod tests {
     //
     // Without the clone the sink's [`Drop`] runs while holding the sole reference; on Linux that
     // closes the Waker's eventfd inside the Drop body and the pending wake-write is lost (Linux
-    // auto-deregisters closed fds from epoll's interest and ready lists). On macOS the
-    // `EVFILT_USER` trigger queues on the kqueue's own state and survives the filter teardown, so
-    // the same setup passes on macOS even without the clone — passing for the wrong reason.
+    // auto-deregisters closed fds from epoll's interest and ready lists). On macOS the `EVFILT_USER`
+    // trigger queues on the kqueue's own state and survives the filter teardown, so the same setup
+    // passes on macOS even without the clone — passing for the wrong reason.
 
     /// Constructing a [`WakingSink`] and dropping it closes the paired
     /// [`crossbeam::channel::Receiver`] *and* pulses the `mio::Waker` exactly once — the production
@@ -223,9 +223,9 @@ mod tests {
             "Drop must pulse TOKEN_WAKER; observed {observed:?}",
         );
 
-        // The queued send arrives normally (Ok), then the receiver observes Disconnected on the
-        // next try_recv — proving the sender drop ran BEFORE the wake (and therefore happens-before
-        // any consumer reaction to the wake edge).
+        // The queued send arrives normally (Ok), then the receiver observes Disconnected on the next
+        // try_recv — proving the sender drop ran BEFORE the wake (and therefore happens-before any
+        // consumer reaction to the wake edge).
         assert!(
             matches!(rx.try_recv(), Ok(Input::TimerExpired { .. })),
             "queued send drains cleanly before Disconnected lands",

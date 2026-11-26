@@ -24,8 +24,8 @@
 //! # Visibility
 //!
 //! `pub(super)` for the submodules: only [`super::EngineDriver`] and [`super::tick`] reach in.
-//! [`hub::Hub`] is re-exported from [`super`] (`crate::driver`) so `app.rs` can name the type
-//! without threading the full path.
+//! [`hub::Hub`] is re-exported from [`super`] (`crate::driver`) so `app.rs` can name the type without
+//! threading the full path.
 
 pub(super) mod conns;
 pub(super) mod dispatch;

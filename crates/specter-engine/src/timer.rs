@@ -9,12 +9,12 @@ use std::time::Instant;
 
 /// One pending timer.
 ///
-/// Ordering is `(deadline, profile, id)` — the documented tie-break. `id` is unique within the
-/// heap's lifetime, so the third tier guarantees a total order. `kind` rides on the entry as a
-/// dispatch hint (pop validates it against the owning Profile's burst slot; the engine routes
-/// Settle vs BurstDeadline directly without re-deriving from state) but is **not** part of the
-/// ordering identity — a manual `Ord` impl makes that explicit and prevents a future field reorder
-/// from silently changing tie-break semantics.
+/// Ordering is `(deadline, profile, id)` — the documented tie-break. `id` is unique within the heap's
+/// lifetime, so the third tier guarantees a total order. `kind` rides on the entry as a dispatch
+/// hint (pop validates it against the owning Profile's burst slot; the engine routes Settle vs
+/// BurstDeadline directly without re-deriving from state) but is **not** part of the ordering
+/// identity — a manual `Ord` impl makes that explicit and prevents a future field reorder from
+/// silently changing tie-break semantics.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TimerEntry {
     pub deadline: Instant,
@@ -41,9 +41,9 @@ impl PartialOrd for TimerEntry {
 /// Min-heap of pending timers.
 ///
 /// Lazy invalidation: a cancelled timer stays in the heap until [`pop_top`](Self::pop_top) returns
-/// it; the engine then validates against the owning Profile's burst and silently drops stale
-/// entries. `O(log n)` removal would force a slot map alongside the heap; the lazy form is cheaper
-/// for the typical "schedule, fire, occasionally cancel" workload.
+/// it; the engine then validates against the owning Profile's burst and silently drops stale entries.
+/// `O(log n)` removal would force a slot map alongside the heap; the lazy form is cheaper for the
+/// typical "schedule, fire, occasionally cancel" workload.
 ///
 /// Sizing: live count is at most two per Active Profile — `Batching` holds `Settle` +
 /// `BurstDeadline`; `Verifying` / `Draining` hold `BurstDeadline` alone; `Awaiting` holds
@@ -55,8 +55,8 @@ impl PartialOrd for TimerEntry {
 /// at `Rebasing` entry); all clear lazily at their original deadlines.
 ///
 /// **Visibility.** `pub(crate)` — the heap itself is engine-internal; the bin layer only ever holds
-/// the [`TimerEntry`] returned by [`crate::Engine::pop_expired`]. Demoting the type keeps the
-/// engine crate's public surface scoped to the dispatcher view of the timer subsystem.
+/// the [`TimerEntry`] returned by [`crate::Engine::pop_expired`]. Demoting the type keeps the engine
+/// crate's public surface scoped to the dispatcher view of the timer subsystem.
 #[derive(Debug, Default)]
 pub(crate) struct TimerHeap {
     inner: BinaryHeap<Reverse<TimerEntry>>,
@@ -99,18 +99,18 @@ impl TimerHeap {
         self.inner.pop().map(|r| r.0)
     }
 
-    /// Iterate every entry currently in the heap, including stale entries that lazy invalidation has
-    /// not yet collected. Order is unspecified (`BinaryHeap` exposes its internal layout, not the
-    /// priority order). Test-only introspection — production code reads the heap through
+    /// Iterate every entry currently in the heap, including stale entries that lazy invalidation
+    /// has not yet collected. Order is unspecified (`BinaryHeap` exposes its internal layout, not
+    /// the priority order). Test-only introspection — production code reads the heap through
     /// [`peek_top`](Self::peek_top) and [`pop_top`](Self::pop_top), which honour the priority order.
     #[cfg(test)]
     pub(crate) fn iter(&self) -> impl Iterator<Item = &TimerEntry> {
         self.inner.iter().map(|r| &r.0)
     }
 
-    /// Length and emptiness accessors are test-only introspection (asserted against in
-    /// `#[cfg(test)]` siblings to pin steady-state heap sizes); production code reads the heap
-    /// through [`peek_top`](Self::peek_top) and [`pop_top`](Self::pop_top) exclusively.
+    /// Length and emptiness accessors are test-only introspection (asserted against in `#[cfg(test)]`
+    /// siblings to pin steady-state heap sizes); production code reads the heap through
+    /// [`peek_top`](Self::peek_top) and [`pop_top`](Self::pop_top) exclusively.
     #[cfg(test)]
     #[must_use]
     pub(crate) fn len(&self) -> usize {
@@ -158,8 +158,8 @@ mod tests {
     }
 
     /// Counter saturation — release-runnable. Pairs with the `MonotonicCounter` unit tests in
-    /// `counter.rs`; this site test proves the heap wires the counter all the way through
-    /// `schedule` rather than re-implementing the bump.
+    /// `counter.rs`; this site test proves the heap wires the counter all the way through `schedule`
+    /// rather than re-implementing the bump.
     #[test]
     #[should_panic(expected = "MonotonicCounter")]
     fn schedule_panics_on_counter_saturation() {
@@ -209,8 +209,8 @@ mod tests {
 
     #[test]
     fn pop_breaks_ties_by_profile_then_id() {
-        // Same deadline, different profile: the smaller profile pops first even when scheduled
-        // later — confirms profile-tier tie-break.
+        // Same deadline, different profile: the smaller profile pops first even when scheduled later
+        // — confirms profile-tier tie-break.
         let mut h = TimerHeap::default();
         let when = Instant::now();
         let p_high = pid(0xdead_beef);

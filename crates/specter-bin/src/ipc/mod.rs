@@ -1,5 +1,5 @@
-//! Operator IPC vocabulary — request/response shapes, diagnostic projection, socket lifecycle,
-//! client verbs, human rendering.
+//! Operator IPC vocabulary — request/response shapes, diagnostic projection, socket lifecycle, client
+//! verbs, human rendering.
 //!
 //! True leaf: nothing here imports [`crate::driver`]. The wire surface lives here so an external
 //! CLI (today's in-bin client, a hypothetical out-of-process tool tomorrow) could reuse the same
@@ -12,8 +12,8 @@
 //! # Submodules
 //!
 //! - [`protocol`] — wire-side request shape (`WireRequest`), response carriers (`ResponsePayload`,
-//!   `StatusResponse`, `ListResponse`, `ShowResponse`), the `WireId` newtype, and the
-//!   `WireErrorCode` closed-vocabulary enum.
+//!   `StatusResponse`, `ListResponse`, `ShowResponse`), the `WireId` newtype, and the `WireErrorCode`
+//!   closed-vocabulary enum.
 //! - [`wire`] — `WireDiagnostic` (the exhaustive projection of every `specter_core::Diagnostic`
 //!   variant), `WireTime`, and the per-core-type `Wire*` projections every variant transitively
 //!   reaches.

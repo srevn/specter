@@ -1,10 +1,10 @@
-//! Multi-Profile composition end-to-end. Two Profiles co-located on one Resource share
-//! `watch_demand` via refcount aggregation. The `Draining → Verifying` reconfirm is exercised
-//! through the burst lifecycle: a parent that stabilises while a covered descendant is
-//! mid-Standard-burst enters `Draining`, and the `finish_burst_to_idle` sweep re-evaluates the
-//! fresh covered-descendant query for every Draining Profile — reconfirming exactly when no covered
-//! descendant remains in an Active Standard burst, robust under mid-burst topology moves (interpose
-//! / reap) and across a fire-tail residual restart.
+//! Multi-Profile composition end-to-end. Two Profiles co-located on one Resource share `watch_demand`
+//! via refcount aggregation. The `Draining → Verifying` reconfirm is exercised through the burst
+//! lifecycle: a parent that stabilises while a covered descendant is mid-Standard-burst enters
+//! `Draining`, and the `finish_burst_to_idle` sweep re-evaluates the fresh covered-descendant query
+//! for every Draining Profile — reconfirming exactly when no covered descendant remains in an Active
+//! Standard burst, robust under mid-burst topology moves (interpose / reap) and across a fire-tail
+//! residual restart.
 
 use specter_core::testkit::{dir_snap, empty_program};
 use specter_core::{
@@ -101,9 +101,9 @@ fn parent_stays_gated_across_child_fire_tail_restart() {
 
     let cfg = SubtreeScan::builder().build();
     let now = Instant::now();
-    // The child's view of /src/foo carries `bar` so the engine covers it as a descendant — an
-    // FsEvent there can then absorb. Reused for every child response so all hashes match (stable
-    // verdicts + B1 dedup on the restarted burst).
+    // The child's view of /src/foo carries `bar` so the engine covers it as a descendant — an FsEvent
+    // there can then absorb. Reused for every child response so all hashes match (stable verdicts +
+    // B1 dedup on the restarted burst).
     let child_snap = dir_snap(&[("bar", EntryKind::File, 9)]);
 
     // Parent: recursive @ /src, NO_EVENTS — must NOT receive descendant events (the test's later
@@ -186,10 +186,10 @@ fn parent_stays_gated_across_child_fire_tail_restart() {
         )
     };
 
-    // Parent verifies and stabilises while the child is still mid-Standard-burst → `Draining`
-    // (gated by the covered child). The parent is on a NO_EVENTS mask, so its Standard verify owes
-    // the N=2 hash channel: first sample → Retry (re-Batching, prior=None); second sample
-    // (settle-spaced, same hash) → Stable; the gate then diverts it to Draining because
+    // Parent verifies and stabilises while the child is still mid-Standard-burst → `Draining` (gated
+    // by the covered child). The parent is on a NO_EVENTS mask, so its Standard verify owes the N=2
+    // hash channel: first sample → Retry (re-Batching, prior=None); second sample (settle-spaced,
+    // same hash) → Stable; the gate then diverts it to Draining because
     // `has_active_standard_descendant` is true.
     assert!(
         e.profiles()
@@ -275,9 +275,9 @@ fn parent_stays_gated_across_child_fire_tail_restart() {
         "child entered Active(PostFire(Rebasing)) directly on EffectComplete (probe-first)",
     );
 
-    // Descendant edit absorbed during the Rebasing round-trip — the final-window residual that
-    // seeds the restart. `last_event_time` is also updated; no PostFireSettle is in flight while
-    // Rebasing, so the absorb writes purely into the residual.
+    // Descendant edit absorbed during the Rebasing round-trip — the final-window residual that seeds
+    // the restart. `last_event_time` is also updated; no PostFireSettle is in flight while Rebasing,
+    // so the absorb writes purely into the residual.
     let t_absorb = child_parked_at + SETTLE;
     let absorb_out = e.step(
         Input::FsEvent {
@@ -334,8 +334,8 @@ fn parent_stays_gated_across_child_fire_tail_restart() {
     );
 
     // Drive the restarted burst to its single finish. The restarted Standard burst's first
-    // Authoritative response folds to a single fire decision: baseline.hash() == current.hash()
-    // (the rebase just synced them) AND Sub.has_fired == true ⇒ every Sub suppresses via B1 dedup,
+    // Authoritative response folds to a single fire decision: baseline.hash() == current.hash() (the
+    // rebase just synced them) AND Sub.has_fired == true ⇒ every Sub suppresses via B1 dedup,
     // emit_effects returns count == 0, and fire_and_settle short-circuits to finish_burst_to_idle.
     // One walk, one response, then finish. The Draining sweep at that finish flips the parent
     // Draining → Verifying.
@@ -394,8 +394,8 @@ fn interposing_covering_profile_mid_burst_does_not_strand_draining_ancestor() {
     // recomputed at every `finish_burst_to_idle`, so the interpose changes the covering chain's
     // *path* but not the *truth* of the query: the ancestor reconfirms iff no covered descendant is
     // in an Active Standard burst at the child's finish — topology-move-invariant by construction,
-    // with no cached counter to desync. So the mid-burst interpose is inert: the ancestor
-    // reconfirms when the child finishes, no panic, no strand.
+    // with no cached counter to desync. So the mid-burst interpose is inert: the ancestor reconfirms
+    // when the child finishes, no panic, no strand.
     let mut e = Engine::new();
     let src = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(src, ResourceKind::Dir);
@@ -475,8 +475,8 @@ fn interposing_covering_profile_mid_burst_does_not_strand_draining_ancestor() {
     drain_due(&mut e, t2);
 
     // Parent stabilises while the child gates it → Draining. The parent's Standard burst folds its
-    // single Authoritative verify response to `Stable` directly, and the child still being
-    // mid-burst routes the parent through `transition_to_draining` instead of firing.
+    // single Authoritative verify response to `Stable` directly, and the child still being mid-burst
+    // routes the parent through `transition_to_draining` instead of firing.
     assert!(
         e.profiles()
             .get(pid_child)
@@ -569,10 +569,10 @@ fn interposing_covering_profile_mid_burst_does_not_strand_draining_ancestor() {
     );
 
     // Child post-fire rebase: EffectComplete already drove Awaiting → Rebasing (probe-first), so
-    // this answers the in-flight rebase probe directly — response → commit → finish. The child
-    // stays Active(PostFire(Rebasing)) until that single response step (the EffectComplete step
-    // above already proved no reconfirm while it is Rebasing), so the parent reconfirms only at the
-    // child's single finish_burst_to_idle, which now runs on this rebase-response step.
+    // this answers the in-flight rebase probe directly — response → commit → finish. The child stays
+    // Active(PostFire(Rebasing)) until that single response step (the EffectComplete step above
+    // already proved no reconfirm while it is Rebasing), so the parent reconfirms only at the child's
+    // single finish_burst_to_idle, which now runs on this rebase-response step.
     let r = rebase_post_fire_to_idle(&mut e, pid_child, &dir_snap(&[]), child_parked_at);
 
     // Response Authoritative ⇒ commit → child finish_burst_to_idle. The sweep re-evaluates the
@@ -633,8 +633,8 @@ fn sweep_reconfirms_draining_ancestor_off_the_finishers_chain() {
     let unbounded = SubtreeScan::builder().build();
 
     // A: events-reliable (DEFAULT_EVENTS) so its single Authoritative verify folds to Stable
-    // directly. max_depth=1 keeps A off P's covering set anyway, so the descendant `foo` event
-    // never reaches A.
+    // directly. max_depth=1 keeps A off P's covering set anyway, so the descendant `foo` event never
+    // reaches A.
     let out_a = e.step(
         Input::AttachSub(SubAttachRequest::for_anchor(
             "a".into(),
@@ -650,8 +650,8 @@ fn sweep_reconfirms_draining_ancestor_off_the_finishers_chain() {
     );
     let sid_a = specter_core::testkit::first_attached_sub(&out_a).expect("attach_sub succeeded");
     let pid_a = e.subs().get(sid_a).unwrap().profile();
-    // Drive A's Seed to a pinned `Idle` baseline (per-Profile, by-id timer steps so the B and P
-    // Seeds below stay untouched).
+    // Drive A's Seed to a pinned `Idle` baseline (per-Profile, by-id timer steps so the B and P Seeds
+    // below stay untouched).
     let a_seed_done = seed_to_idle(&mut e, pid_a, &dir_snap(&[]), now);
 
     // B @ /src/mid (recursive): covers /src/mid/foo, so it sits on P's chain (P → B → A). It never
@@ -672,12 +672,12 @@ fn sweep_reconfirms_draining_ancestor_off_the_finishers_chain() {
     );
     let sid_b = specter_core::testkit::first_attached_sub(&out_b).expect("attach_sub succeeded");
     let pid_b = e.subs().get(sid_b).unwrap().profile();
-    // Drive B's Seed, rebased strictly past A's consumed settle window. B then sits pinned at
-    // `Idle` — exactly the state the later immediate-reap detach requires.
+    // Drive B's Seed, rebased strictly past A's consumed settle window. B then sits pinned at `Idle`
+    // — exactly the state the later immediate-reap detach requires.
     let b_seed_done = seed_to_idle(&mut e, pid_b, &dir_snap(&[]), a_seed_done);
 
-    // P @ /src/mid/foo (recursive). DEFAULT_EVENTS so its single Authoritative verify fires
-    // directly and the post-fire rebase loop closes in one sample (events-reliable witness).
+    // P @ /src/mid/foo (recursive). DEFAULT_EVENTS so its single Authoritative verify fires directly
+    // and the post-fire rebase loop closes in one sample (events-reliable witness).
     let out_pp = e.step(
         Input::AttachSub(SubAttachRequest::for_anchor(
             "p".into(),
@@ -696,8 +696,8 @@ fn sweep_reconfirms_draining_ancestor_off_the_finishers_chain() {
     // Drive P's Seed, rebased strictly past B's consumed settle window.
     let p_seed_done = seed_to_idle(&mut e, pid_p, &dir_snap(&[]), b_seed_done);
 
-    // P's Standard burst from its own anchor `foo` (drives only P), then A's own Standard burst
-    // from its anchor `src`. The three Seed drives pushed the clock past `now`; rebase the Standard
+    // P's Standard burst from its own anchor `foo` (drives only P), then A's own Standard burst from
+    // its anchor `src`. The three Seed drives pushed the clock past `now`; rebase the Standard
     // timeline past them.
     let t1 = p_seed_done + Duration::from_millis(10);
     e.step(
@@ -831,10 +831,10 @@ fn sweep_reconfirms_draining_ancestor_off_the_finishers_chain() {
 fn co_located_profiles_independently_record_shared_resource_obligation() {
     // Two config_hash-distinct Profiles share one Resource /src. A single FsEvent on the shared
     // resource fans to *every* covering Profile (on_fs_event iterates the covering set), and each
-    // Profile records the resource's path in its *own* dirty provenance (the obligation basis).
-    // There is no per-resource global filter that one Profile's in-flight burst could use to blind
-    // another — the property that keeps a co-resident Profile's probe from mtime-skipping a
-    // genuinely changed directory.
+    // Profile records the resource's path in its *own* dirty provenance (the obligation basis). There
+    // is no per-resource global filter that one Profile's in-flight burst could use to blind another
+    // — the property that keeps a co-resident Profile's probe from mtime-skipping a genuinely changed
+    // directory.
     let mut e = Engine::new();
     let r = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(r, ResourceKind::Dir);
@@ -1057,10 +1057,10 @@ fn draining_parent_gated_by_child() -> DrainingFixture {
     let t2 = t1 + SETTLE * 2;
     drain_due(&mut e, t2);
 
-    // Parent stabilises while the child still gates it → Draining. The parent is on a NO_EVENTS
-    // mask, so its Standard verify owes the N=2 hash channel: first sample → Retry (prior=None,
-    // re-batches); second sample (settle-spaced, same hash) → Stable; the child still being
-    // mid-burst routes the parent through `transition_to_draining` instead of firing.
+    // Parent stabilises while the child still gates it → Draining. The parent is on a NO_EVENTS mask,
+    // so its Standard verify owes the N=2 hash channel: first sample → Retry (prior=None,
+    // re-batches); second sample (settle-spaced, same hash) → Stable; the child still being mid-burst
+    // routes the parent through `transition_to_draining` instead of firing.
     assert!(
         e.profiles()
             .get(pid_child)
@@ -1105,8 +1105,8 @@ fn draining_parent_gated_by_child() -> DrainingFixture {
 #[test]
 fn global_overflow_excludes_draining_ancestor_keeps_reconfirm() {
     // Overflow-with-Draining-ancestor regression. A Global sensor overflow lands while `A` is
-    // `Draining` and its covered child `D` is mid-burst, with `D` iterating before `A`. The
-    // overflow loop processes `D` first: `finish_burst_to_idle(D)`'s Draining sweep flips `A`
+    // `Draining` and its covered child `D` is mid-burst, with `D` iterating before `A`. The overflow
+    // loop processes `D` first: `finish_burst_to_idle(D)`'s Draining sweep flips `A`
     // `Draining→Verifying` and arms exactly one reconfirm Probe. Without the snapshot-time Draining
     // exclusion the loop then reaches `A` (now `Verifying`, so an iteration-time phase guard never
     // sees `Draining`), tears it down, and reseeds it — discarding `A`'s verified-stable `current`
@@ -1150,9 +1150,9 @@ fn global_overflow_excludes_draining_ancestor_keeps_reconfirm() {
         "the single ancestor op is the sweep's reconfirm Probe, not a Cancel",
     );
 
-    // DISCRIMINATOR. Post-fix `A` stays on the descendant-driven Standard reconfirm the sweep
-    // armed. Pre-fix the reseed loop tears it down and it returns as `Seed`. `intent == Standard`
-    // is the assertion that fails without the snapshot-time exclusion.
+    // DISCRIMINATOR. Post-fix `A` stays on the descendant-driven Standard reconfirm the sweep armed.
+    // Pre-fix the reseed loop tears it down and it returns as `Seed`. `intent == Standard` is the
+    // assertion that fails without the snapshot-time exclusion.
     assert!(
         matches!(
             e.profiles().get(pid_parent).unwrap().state(),
@@ -1196,14 +1196,14 @@ fn global_overflow_excludes_draining_ancestor_keeps_reconfirm() {
 
 #[test]
 fn resource_overflow_excludes_draining_ancestor_keeps_reconfirm() {
-    // The Resource-scoped arm of the same exclusion. A covered descendant's anchor is always a
-    // strict tree-descendant of its ancestor's anchor, and `OverflowScope::Resource(r)` selects the
-    // whole subtree rooted at `r` — so a Draining ancestor and its gating descendant are
-    // *necessarily* both in scope when `r` is the ancestor's anchor; the descendant cannot be
-    // scoped out while the ancestor is scoped in. This pins the `profiles_in_subtree` snapshot path
-    // (distinct from the Global `profiles().iter()` path) so the exclusion cannot silently regress
-    // to a Global-only filter. The scope-independent properties (≤1-per-owner, `current` preserved,
-    // descendant still reseeded) are proven by the Global test and deliberately not repeated here.
+    // The Resource-scoped arm of the same exclusion. A covered descendant's anchor is always a strict
+    // tree-descendant of its ancestor's anchor, and `OverflowScope::Resource(r)` selects the whole
+    // subtree rooted at `r` — so a Draining ancestor and its gating descendant are *necessarily*
+    // both in scope when `r` is the ancestor's anchor; the descendant cannot be scoped out while
+    // the ancestor is scoped in. This pins the `profiles_in_subtree` snapshot path (distinct from
+    // the Global `profiles().iter()` path) so the exclusion cannot silently regress to a Global-only
+    // filter. The scope-independent properties (≤1-per-owner, `current` preserved, descendant still
+    // reseeded) are proven by the Global test and deliberately not repeated here.
     let DrainingFixture {
         mut e,
         src,
@@ -1249,8 +1249,8 @@ fn overflow_on_draining_reap_ancestor_defers_reap_to_reconfirm() {
     // directive — the Profile is reaped *inside the overflow step*, before its descendant-driven
     // reconfirm could run. With the exclusion the ancestor stays out of the loop: the sweep arms
     // its lone reconfirm Probe, the `Reap` directive rides through unchanged, and the reap is
-    // correctly deferred to that reconfirm's resolution (the standard Draining-exit contract,
-    // covered elsewhere).
+    // correctly deferred to that reconfirm's resolution (the standard Draining-exit contract, covered
+    // elsewhere).
     let DrainingFixture {
         mut e,
         pid_parent,
@@ -1321,8 +1321,8 @@ fn overflow_on_draining_reap_ancestor_defers_reap_to_reconfirm() {
         "the single ancestor op is the sweep's reconfirm Probe (not a reap Cancel)",
     );
 
-    // The deferred reap completes on the reconfirm's resolution: the child reseed left it
-    // non-gating (Seed), so the reconfirm settles and `finish_burst_to_idle` honours `Reap`.
+    // The deferred reap completes on the reconfirm's resolution: the child reseed left it non-gating
+    // (Seed), so the reconfirm settles and `finish_burst_to_idle` honours `Reap`.
     let reconfirm = e
         .pending_probe_for(pid_parent)
         .expect("ancestor reconfirm probe in flight");

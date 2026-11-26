@@ -2,14 +2,14 @@
 //!
 //! [`crate::Input::AttachSub`] surfaces its minted [`SubId`] through the
 //! [`crate::Diagnostic::SubAttached`] stream in `StepOutput.diagnostics`. The bin's
-//! `reconcile_loader_from_diagnostics` walks the full stream because hot reload can attach many
-//! subs in one [`crate::Input::ConfigDiff`] step; tests typically attach exactly one at a time, so
-//! the "give me the first id" pattern is the natural test-only ergonomic.
+//! `reconcile_loader_from_diagnostics` walks the full stream because hot reload can attach many subs
+//! in one [`crate::Input::ConfigDiff`] step; tests typically attach exactly one at a time, so the
+//! "give me the first id" pattern is the natural test-only ergonomic.
 //!
 //! Returning `None` keeps the path-rejection contract observable in tests: an
 //! [`crate::Diagnostic::AttachPathInvalid`] outcome doesn't produce a `SubAttached`, so this helper
-//! returns `None` and the test body can route to the negative-case assertion (or `.expect(...)`
-//! when the test pins the positive case).
+//! returns `None` and the test body can route to the negative-case assertion (or `.expect(...)` when
+//! the test pins the positive case).
 
 use crate::diag::Diagnostic;
 use crate::ids::SubId;

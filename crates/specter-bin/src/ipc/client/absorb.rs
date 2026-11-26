@@ -1,11 +1,11 @@
-//! `specter absorb <name> [--for <dur>]` client handler — arm a fold-without-fire window on the
-//! named watch's Profile. The next fireable burst (or an in-flight one) advances the baseline
-//! silently instead of firing, folding an expected replication rather than echoing it.
+//! `specter absorb <name> [--for <dur>]` client handler — arm a fold-without-fire window on the named
+//! watch's Profile. The next fireable burst (or an in-flight one) advances the baseline silently
+//! instead of firing, folding an expected replication rather than echoing it.
 //!
 //! Exit-code discipline matches the other unit-ack verbs (`disable` / `enable` / `reload`): `0` on
-//! `Ok`, `1` on any structured failure (connect / send / receive / daemon-side `Err`). The
-//! structured `code:` prefix on stderr (e.g. `unknown_sub`, `minted_sub_no_op`, `shutting_down`)
-//! lets operator scripts distinguish failure modes without a per-mode exit code.
+//! `Ok`, `1` on any structured failure (connect / send / receive / daemon-side `Err`). The structured
+//! `code:` prefix on stderr (e.g. `unknown_sub`, `minted_sub_no_op`, `shutting_down`) lets operator
+//! scripts distinguish failure modes without a per-mode exit code.
 
 use compact_str::CompactString;
 use specter_config::AbsorbArgs;

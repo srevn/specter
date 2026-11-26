@@ -7,8 +7,8 @@
 //! the config lexer remains the authoritative parse boundary.
 //!
 //! The reverse-direction placeholder table mirrors the forward table consumed by the TOML lexer;
-//! both are exhaustive matches against the shared [`Placeholder`] enum, so a new variant is a
-//! compile error in this module AND in the lexer.
+//! both are exhaustive matches against the shared [`Placeholder`] enum, so a new variant is a compile
+//! error in this module AND in the lexer.
 
 use std::fmt::Write as _;
 
@@ -27,8 +27,7 @@ pub(crate) fn render(program: &ActionProgram) -> Vec<String> {
         .collect()
 }
 
-/// `"[i] <body>  ok→<edge> fail→<edge>"` — the canonical per-op
-/// shape every renderer reuses.
+/// `"[i] <body>  ok→<edge> fail→<edge>"` — the canonical per-op shape every renderer reuses.
 fn render_op(index: usize, op: &ProgramOp) -> String {
     let mut out = String::with_capacity(64);
     let _ = write!(out, "[{index}] ");
@@ -116,9 +115,9 @@ fn write_target(out: &mut String, t: BranchTarget) {
     }
 }
 
-/// Reverse direction of the TOML template lexer's placeholder catalog. A new [`Placeholder`]
-/// variant added to `specter-core` without a matching arm here is a compile error — the exhaustive
-/// match is the structural seam that keeps the round-trip vocabulary in sync.
+/// Reverse direction of the TOML template lexer's placeholder catalog. A new [`Placeholder`] variant
+/// added to `specter-core` without a matching arm here is a compile error — the exhaustive match is
+/// the structural seam that keeps the round-trip vocabulary in sync.
 const fn placeholder_token(p: Placeholder) -> &'static str {
     match p {
         Placeholder::Path => "path",
@@ -226,8 +225,8 @@ mod tests {
         );
     }
 
-    /// Both env forms render with the right delimiter. `default = None` is `${env.NAME}`; `default
-    /// = Some(d)` is `${env.NAME:-d}`.
+    /// Both env forms render with the right delimiter. `default = None` is `${env.NAME}`; `default =
+    /// Some(d)` is `${env.NAME:-d}`.
     #[test]
     fn render_env_var_with_and_without_default() {
         let body = SpawnBody::Exec(exec_with_args([
@@ -248,9 +247,9 @@ mod tests {
         );
     }
 
-    /// Branch targets render to `#N` / `terminate` / `escape`. `Continue` is built via the
-    /// builder's `continue_to_next` helper (the only public path — `BranchIndex` is sealed);
-    /// `Terminate` and `Escape` are the two no-op terminals.
+    /// Branch targets render to `#N` / `terminate` / `escape`. `Continue` is built via the builder's
+    /// `continue_to_next` helper (the only public path — `BranchIndex` is sealed); `Terminate` and
+    /// `Escape` are the two no-op terminals.
     #[test]
     fn render_branch_targets_continue_terminate_escape() {
         // Two-op program so `Continue` points at the next emit.

@@ -187,8 +187,8 @@ fn config_diff_mid_burst_remove_defers_reap() {
     let t2 = t1 + SETTLE * 2;
     drain_due(&mut e, t2);
 
-    // The single Authoritative verify response folds to `Stable`; reap-pending suppresses the
-    // Effect and finishes by reaping.
+    // The single Authoritative verify response folds to `Stable`; reap-pending suppresses the Effect
+    // and finishes by reaping.
     let v = verify(&mut e, pid, &dir_snap(&[]), t2);
     let out = v.out;
     assert!(out.effects().is_empty(), "reap_pending suppresses Effect");
@@ -198,12 +198,12 @@ fn config_diff_mid_burst_remove_defers_reap() {
     );
 }
 
-/// Same identity (anchor + scan + max_settle + events), different per-Sub fields ⇒
-/// `modified_params`. Mid-Standard-burst, the engine rebinds the live Sub in place: the burst stays
-/// on the same `ProfileId`, the anchor's `watch_demand` is unchanged (no Unwatch/re-Watch), no
-/// fresh probe is emitted (the existing settle timer still owns the burst lifecycle), and
-/// `SubRebound` narrates the edge. Under `modified_params` the path does not go through
-/// detach+attach via the zombie-revival branch, so `ReapPendingCancelled` must **not** appear.
+/// Same identity (anchor + scan + max_settle + events), different per-Sub fields ⇒ `modified_params`.
+/// Mid-Standard-burst, the engine rebinds the live Sub in place: the burst stays on the same
+/// `ProfileId`, the anchor's `watch_demand` is unchanged (no Unwatch/re-Watch), no fresh probe is
+/// emitted (the existing settle timer still owns the burst lifecycle), and `SubRebound` narrates
+/// the edge. Under `modified_params` the path does not go through detach+attach via the
+/// zombie-revival branch, so `ReapPendingCancelled` must **not** appear.
 #[test]
 fn config_diff_modified_params_mid_burst_rebinds_in_place() {
     let mut e = Engine::new();
@@ -516,9 +516,9 @@ fn effect_complete_after_detach_drops_silently() {
 
 /// T4 — same-path identity change exercises `modified_identity` against the prepare/commit bug an
 /// earlier plan would have introduced. Sub "A" at `/src` with `recursive=true`; reload edits to
-/// `recursive=false` — same path, different `config_hash` ⇒ the Sub must move to a different
-/// Profile. The composition is validate → detach → attach: the old Profile is reaped (last Sub
-/// left) and the new Sub mints on a fresh Profile.
+/// `recursive=false` — same path, different `config_hash` ⇒ the Sub must move to a different Profile.
+/// The composition is validate → detach → attach: the old Profile is reaped (last Sub left) and the
+/// new Sub mints on a fresh Profile.
 ///
 /// The historical bug was that a prepare/commit split would observe the old Profile's anchor claim
 /// getting released by the detach, reaping the slot mid-operation; the commit then panicked
@@ -576,9 +576,9 @@ fn config_diff_modified_identity_same_path_rebinds_profile_safely() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// A `ConfigDiff` added bucket carrying a discovery template attaches it like any Sub: the cold
-/// Seed probe rides the diff step and the first reconcile mints per terminus — the reload route and
-/// the direct-attach route converge on one lifecycle.
+/// A `ConfigDiff` added bucket carrying a discovery template attaches it like any Sub: the cold Seed
+/// probe rides the diff step and the first reconcile mints per terminus — the reload route and the
+/// direct-attach route converge on one lifecycle.
 #[test]
 fn config_diff_add_dynamic_attaches_and_first_reconcile_mints() {
     let mut e = Engine::new();
@@ -611,8 +611,8 @@ fn config_diff_add_dynamic_attaches_and_first_reconcile_mints() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// The added bucket with an absent literal prefix lands `Pending` with the descent probe in the
-/// same diff step — a reload-added pattern waits for its prefix exactly like a direct attach.
+/// The added bucket with an absent literal prefix lands `Pending` with the descent probe in the same
+/// diff step — a reload-added pattern waits for its prefix exactly like a direct attach.
 #[test]
 fn config_diff_add_dynamic_with_missing_prefix_goes_pending() {
     let mut e = Engine::new();
@@ -733,8 +733,8 @@ fn config_diff_remove_dynamic_cascades() {
     );
     let minted = minted_subs_of(&e, sid);
     assert_eq!(minted.len(), 2, "fixture minted per terminus");
-    // Drive the minted cold Seeds to Idle so the cascade reaps synchronously — the mid-burst
-    // cascade (reap deferred to burst end) is pinned by the modify gate above.
+    // Drive the minted cold Seeds to Idle so the cascade reaps synchronously — the mid-burst cascade
+    // (reap deferred to burst end) is pinned by the modify gate above.
     for &mid in minted.values() {
         let mp = pid_of(&e, mid);
         let _ = respond(&mut e, mp, &dir_snap(&[]), now);
@@ -785,9 +785,9 @@ fn params_edit(req: SubAttachRequest) -> Input {
 }
 
 /// `modified_params` naming a template rebinds it and the set it minted in place: one `SubRebound`
-/// and no other line — nothing detached, reaped or attached — no watch op, and every minted Sub
-/// keeps its id. A match's next fire runs the new program, and a match that appears after the edit
-/// is an appearance: the template's enumeration stands closed.
+/// and no other line — nothing detached, reaped or attached — no watch op, and every minted Sub keeps
+/// its id. A match's next fire runs the new program, and a match that appears after the edit is an
+/// appearance: the template's enumeration stands closed.
 #[test]
 fn config_diff_modified_params_rebinds_a_template_and_the_set_it_minted() {
     let mut e = Engine::new();
@@ -868,8 +868,8 @@ fn config_diff_modified_params_rebinds_a_template_and_the_set_it_minted() {
 
 /// A template's rebind refolds the floor of each Profile it reached over every Sub there — an
 /// operator's beside the minted one included — whatever the template's own settle did: a Sub it
-/// minted, rebound apart by its own name, comes back to the template's params on the template's
-/// next rebind, and its Profile's floor with it.
+/// minted, rebound apart by its own name, comes back to the template's params on the template's next
+/// rebind, and its Profile's floor with it.
 #[test]
 fn config_diff_modified_params_of_a_template_refolds_each_minted_floor() {
     let mut e = Engine::new();

@@ -1,11 +1,11 @@
 //! The reload pipeline — SIGHUP and auto-reload, both on the engine thread (no Mutex).
 //!
-//! [`EngineDriver::dispatch_reload`] is the shared apply path: `obs_handle.reopen_file()` fires
-//! first (so logrotate cadence is independent of the config-parse outcome), then the file is read
-//! with an atomic [`FileMeta`] capture, the name-keyed diff is applied via `Input::ConfigDiff` (the
-//! engine resolves names to ids against its own registries), and `loader`'s config / log / meta
-//! commit in a single post-apply step. The `[log]` block is re-resolved (CLI overrides re-applied)
-//! and `obs_handle` updated in the same pass.
+//! [`EngineDriver::dispatch_reload`] is the shared apply path: `obs_handle.reopen_file()` fires first
+//! (so logrotate cadence is independent of the config-parse outcome), then the file is read with an
+//! atomic [`FileMeta`] capture, the name-keyed diff is applied via `Input::ConfigDiff` (the engine
+//! resolves names to ids against its own registries), and `loader`'s config / log / meta commit in
+//! a single post-apply step. The `[log]` block is re-resolved (CLI overrides re-applied) and
+//! `obs_handle` updated in the same pass.
 //!
 //! Two entry points converge here. SIGHUP calls `dispatch_reload` directly. Auto-reload is
 //! settle-debounced: [`super::tick`] arms `config_settle_until` per config-event pulse;
@@ -63,9 +63,9 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// Treating an lstat error as "changed" is a defensive choice with two desirable properties:
     ///
     /// 1. **Recovery semantics.** An ENOENT / EACCES that recovers (operator un-deletes / chmods 644)
-    ///    flips the lstat from `Err` to `Ok`, which is structurally a transition —
-    ///    dispatch_reload runs on the next pulse and either succeeds (rotation) or fails again
-    ///    (parse-fail; meta NOT rotated; retry on next pulse).
+    ///    flips the lstat from `Err` to `Ok`, which is structurally a transition — dispatch_reload
+    ///    runs on the next pulse and either succeeds (rotation) or fails again (parse-fail; meta
+    ///    NOT rotated; retry on next pulse).
     /// 2. **Fail-stable.** If the file is permanently unreachable, the next pulse fires a parse
     ///    attempt that logs and returns early. `loader.config_meta` is preserved across parse-fails,
     ///    so the next pulse repeats — but we do not loop on our own (`config_settle_until` is
@@ -88,11 +88,11 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// reopen upstream of every branch means a `logrotate -f` + a broken-TOML edit + SIGHUP still
     /// rotates the log file. The structural position is the contract; no branch below can bypass it.
     ///
-    /// **Log-side dispatch.** The `[log]` block is re-resolved (CLI overrides re-applied) and
-    /// applied per-field via [`Self::apply_log_reload`]: a level change calls
-    /// `obs_handle.set_level`; a destination / path change logs an `error!` instructing the
-    /// operator to restart — destinations are not hot-reloadable. The actually-applied state
-    /// rotates into [`crate::loader::Loader::current_log`] — so a destination flip-back compares
+    /// **Log-side dispatch.** The `[log]` block is re-resolved (CLI overrides re-applied) and applied
+    /// per-field via [`Self::apply_log_reload`]: a level change calls `obs_handle.set_level`; a
+    /// destination / path change logs an `error!` instructing the operator to restart — destinations
+    /// are not hot-reloadable. The actually-applied state rotates into
+    /// [`crate::loader::Loader::current_log`] — so a destination flip-back compares
     /// runtime-vs-runtime on the next reload and avoids a phantom "restart to apply" warning.
     ///
     /// **Meta rotation discipline.** `loader.config_meta` rotates on every observed file state:
@@ -112,13 +112,13 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// Returns the [`ControlFlow`] from the apply-branch `forward` so a shutdown observed mid-apply
     /// (`forward`'s outbound `effects_tx` disconnect) propagates back to the caller. On `Break` the
     /// cancel-first probe drain via [`super::EngineDriver::begin_shutdown`] runs internally,
-    /// symmetric with [`super::EngineDriver::run_initial_attach`] — every engine-mutating entry
-    /// point that may arm probes (the diff's `added` Subs enter Seed-Verifying with an armed
-    /// `ProbeSlot`) is responsible for the cleanup of those probes on its own `Break`. A caller
-    /// that drops the driver after observing `Break` cannot trip `ProbeSlot::drop`'s linear-edge
-    /// tripwire. The tick-layer outer drain that also calls `begin_shutdown` on `Break` propagation
-    /// is redundant for this path but idempotent (the cancel-first drain iterates over an
-    /// already-empty in-flight-probe set).
+    /// symmetric with [`super::EngineDriver::run_initial_attach`] — every engine-mutating entry point
+    /// that may arm probes (the diff's `added` Subs enter Seed-Verifying with an armed `ProbeSlot`)
+    /// is responsible for the cleanup of those probes on its own `Break`. A caller that drops the
+    /// driver after observing `Break` cannot trip `ProbeSlot::drop`'s linear-edge tripwire. The
+    /// tick-layer outer drain that also calls `begin_shutdown` on `Break` propagation is redundant
+    /// for this path but idempotent (the cancel-first drain iterates over an already-empty
+    /// in-flight-probe set).
     ///
     /// The loader rotation runs even on the `Break` path: the engine has the diff applied, so the
     /// loader matches the engine on the way out, and the driver is about to shut down anyway —
@@ -131,10 +131,10 @@ impl<W: FsWatcher> EngineDriver<W> {
         // A manual reload (SIGHUP / IPC) supersedes any pending auto-reload settle deadline: the
         // operator's explicit pulse pre-empts the debounced pulse, and a deadline left armed would
         // either fire on a freshly-applied config (no-op via `config_meta_changed`'s lstat filter)
-        // or, worse, race a mid-window config edit and trigger a second apply. Clearing the
-        // deadline here is idempotent for the `apply_config_settle_expiry` caller (it cleared the
-        // slot before delegating here) and load-bearing for the other two entry points
-        // (`handle_ipc::P::Reload`, signal-thread SIGHUP).
+        // or, worse, race a mid-window config edit and trigger a second apply. Clearing the deadline
+        // here is idempotent for the `apply_config_settle_expiry` caller (it cleared the slot before
+        // delegating here) and load-bearing for the other two entry points (`handle_ipc::P::Reload`,
+        // signal-thread SIGHUP).
         self.config_settle_until = None;
 
         self.reopen_log_file();
@@ -195,20 +195,20 @@ impl<W: FsWatcher> EngineDriver<W> {
 
         self.loader.rotate_apply(new_config, applied_log, new_meta);
 
-        // Prune `disabled_runtime` AFTER the loader rotation so the helper reads the
-        // freshly-applied TOML. The prune runs on every successful parse (both empty-diff and
-        // apply-diff branches converge here) — an edit that removes a runtime-disabled entry must
-        // clear the override on the same pulse, even when no other diff bits moved.
+        // Prune `disabled_runtime` AFTER the loader rotation so the helper reads the freshly-applied
+        // TOML. The prune runs on every successful parse (both empty-diff and apply-diff branches
+        // converge here) — an edit that removes a runtime-disabled entry must clear the override on
+        // the same pulse, even when no other diff bits moved.
         self.prune_disabled_runtime_against_current_config();
 
-        // Cancel-first probe drain on `Break`, symmetric with `run_initial_attach`'s internal
-        // drain. The apply-branch `engine.step` may have transitioned freshly-added Subs to
-        // Seed-Verifying with armed `ProbeSlot`s; on a `Break` from `forward` the engine retains
-        // those probes. Without this drain a caller that does not loop back through `tick` (the
-        // boot-time call from `App::run`) would drop the driver with armed probes and trip
-        // `ProbeSlot::drop`'s linear-edge tripwire. The drain is idempotent — tick-layer callers
-        // also call `begin_shutdown` on the propagated `Break`, and the second pass iterates over
-        // an empty in-flight set.
+        // Cancel-first probe drain on `Break`, symmetric with `run_initial_attach`'s internal drain.
+        // The apply-branch `engine.step` may have transitioned freshly-added Subs to Seed-Verifying
+        // with armed `ProbeSlot`s; on a `Break` from `forward` the engine retains those probes.
+        // Without this drain a caller that does not loop back through `tick` (the boot-time call
+        // from `App::run`) would drop the driver with armed probes and trip `ProbeSlot::drop`'s
+        // linear-edge tripwire. The drain is idempotent — tick-layer callers also call
+        // `begin_shutdown` on the propagated `Break`, and the second pass iterates over an empty
+        // in-flight set.
         if outcome.is_break() {
             let _ = self.begin_shutdown();
         }
@@ -220,9 +220,9 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// cycles pick up a freshly-opened path without a daemon restart. Errors land at `warn!` — the
     /// rotator may have raced us to the path, in which case the existing fd is still usable.
     ///
-    /// Sole call site is the top of [`Self::dispatch_reload`]; every branch below it is
-    /// structurally downstream, so a broken-TOML edit landing during a `logrotate` cycle still
-    /// rotates the log file — the reopen does not depend on the parse outcome.
+    /// Sole call site is the top of [`Self::dispatch_reload`]; every branch below it is structurally
+    /// downstream, so a broken-TOML edit landing during a `logrotate` cycle still rotates the log
+    /// file — the reopen does not depend on the parse outcome.
     fn reopen_log_file(&self) {
         if let Err(e) = self.obs_handle.reopen_file() {
             tracing::warn!(
@@ -233,17 +233,17 @@ impl<W: FsWatcher> EngineDriver<W> {
         }
     }
 
-    /// Read + parse the on-disk config, capturing `FileMeta` atomically alongside the bytes.
-    /// Returns `None` on I/O / parse failure (with an `error!` log); the caller keeps the running
-    /// config rather than aborting.
+    /// Read + parse the on-disk config, capturing `FileMeta` atomically alongside the bytes. Returns
+    /// `None` on I/O / parse failure (with an `error!` log); the caller keeps the running config
+    /// rather than aborting.
     ///
     /// Sole I/O surface for the reload pipeline — both the SIGHUP path and the auto-reload
     /// settle-expiry path call here so the failure-handling discipline lives in one place. The
     /// returned [`FileMeta`] is captured from the same `File` handle that produced the bytes
     /// ([`Config::from_path_with_meta`]), so a concurrent atomic-save cannot rotate the meta out
-    /// from under the parsed [`Config`]. Callers rotate `loader.config_meta` from this value on
-    /// every successful read — including the empty-diff branch, so the auto-reload settle filter
-    /// doesn't loop on an already-applied edit.
+    /// from under the parsed [`Config`]. Callers rotate `loader.config_meta` from this value on every
+    /// successful read — including the empty-diff branch, so the auto-reload settle filter doesn't
+    /// loop on an already-applied edit.
     pub(super) fn read_and_parse_config(&self) -> Option<(Config, FileMeta)> {
         match Config::from_path_with_meta(&self.config_path) {
             Ok(pair) => Some(pair),
@@ -282,9 +282,9 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// carries the running shape, a destination flip-back compares runtime-vs-runtime on the next
     /// reload and reports no change — instead of comparing requested-vs-running and re-firing
     /// "restart to apply" on every flip. The trade-off is that a *sustained* mismatch (operator
-    /// requests a new destination and leaves it that way) re-fires the warning on every reload
-    /// until restart — accepted because the warning is correct on every firing and reload frequency
-    /// is operator-bounded.
+    /// requests a new destination and leaves it that way) re-fires the warning on every reload until
+    /// restart — accepted because the warning is correct on every firing and reload frequency is
+    /// operator-bounded.
     fn apply_log_reload(&self, new_config: &Config) -> LogConfig {
         let requested = match new_config.log.clone().merge_cli(
             self.cli_log_overrides.level,
@@ -344,11 +344,12 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// bucket of any Sub whose name lives in [`Self::disabled_runtime`].
     ///
     /// The unfiltered diff is the raw `specter_config::diff` output; the filter is the negative side
-    /// of the `disabled_runtime ↔ engine` invariant — an attach / re-attach / re-bind / detach for a
-    /// runtime-disabled Sub would re-introduce or churn the engine on a Sub the operator has
-    /// suppressed. The four buckets (`added`, `removed`, `modified_identity`, `modified_params`) are
-    /// name-disjoint by construction, so retaining by name on each is exhaustive. Discovery templates
-    /// are ordinary operator-named Subs here, so the runtime-disable override covers them uniformly.
+    /// of the `disabled_runtime ↔ engine` invariant — an attach / re-attach / re-bind / detach for
+    /// a runtime-disabled Sub would re-introduce or churn the engine on a Sub the operator has
+    /// suppressed. The four buckets (`added`, `removed`, `modified_identity`, `modified_params`)
+    /// are name-disjoint by construction, so retaining by name on each is exhaustive. Discovery
+    /// templates are ordinary operator-named Subs here, so the runtime-disable override covers them
+    /// uniformly.
     pub(super) fn compute_watch_diff(&self, new_config: &Config) -> specter_core::SubRegistryDiff {
         let mut diff = specter_config::diff(self.loader.current_config(), new_config);
         let disabled = &self.disabled_runtime;

@@ -117,8 +117,8 @@ fn render_active(out: &mut String, d: &SubDetails, sty: Styler) {
         }
         None => missing_line(out, sty, "anchor"),
     }
-    // The reaction token shares `WireReactionKind`'s wire vocabulary, so the human view and
-    // `list`'s REACTION column read identically.
+    // The reaction token shares `WireReactionKind`'s wire vocabulary, so the human view and `list`'s
+    // REACTION column read identically.
     let _ = writeln!(
         out,
         "{}{}",
@@ -225,8 +225,8 @@ fn render_active(out: &mut String, d: &SubDetails, sty: Styler) {
         d.profile.0,
     );
     out.push('\n');
-    // The program header is a section label, painted `LABEL` like the others; the lines below it stay
-    // plain — the daemon pre-renders each as an opaque string the renderer does not re-tokenize.
+    // The program header is a section label, painted `LABEL` like the others; the lines below it
+    // stay plain — the daemon pre-renders each as an opaque string the renderer does not re-tokenize.
     let _ = writeln!(
         out,
         "{}",
@@ -255,9 +255,9 @@ fn absorbing_line(out: &mut String, sty: Styler, lead: impl Display, window: &Wi
     );
 }
 
-/// Write a `label   -` line for a value the projection surfaced as
-/// `None` — the `-` painted [`style::MISSING`]. Shared by the three optional `Active` fields
-/// (`state` / `anchor` / `last fired`).
+/// Write a `label   -` line for a value the projection surfaced as `None` — the `-` painted
+/// [`style::MISSING`]. Shared by the three optional `Active` fields (`state` / `anchor` / `last
+/// fired`).
 fn missing_line(out: &mut String, sty: Styler, label: &str) {
     let _ = writeln!(
         out,
@@ -487,8 +487,8 @@ mod tests {
     }
 
     /// `state: None` renders as `-` — the operator-visible signal for the engine-invariant breach
-    /// the projection surfaces gracefully instead of panicking. Mirrors `list -o human`'s
-    /// `col_state` `None → "-"` arm; pinning it on `show` keeps the two verbs' vocabulary aligned.
+    /// the projection surfaces gracefully instead of panicking. Mirrors `list -o human`'s `col_state`
+    /// `None → "-"` arm; pinning it on `show` keeps the two verbs' vocabulary aligned.
     #[test]
     fn show_human_active_state_none_renders_dash() {
         let mut d = details("foo", None, vec![]);
@@ -505,10 +505,10 @@ mod tests {
         );
     }
 
-    /// An armed `absorb` window renders an `absorbing   until <T> (mode)`
-    /// line with the hyphenated mode label, and the `fires` line always carries the `absorbed: <n>`
-    /// fold counter. A `None` window omits the `absorbing` line entirely (the projection already
-    /// dropped an inert window, so a present `Some` is always operator-meaningful).
+    /// An armed `absorb` window renders an `absorbing   until <T> (mode)` line with the hyphenated
+    /// mode label, and the `fires` line always carries the `absorbed: <n>` fold counter. A `None`
+    /// window omits the `absorbing` line entirely (the projection already dropped an inert window,
+    /// so a present `Some` is always operator-meaningful).
     #[test]
     fn show_human_active_renders_absorb_window_and_count() {
         let d = details_full(

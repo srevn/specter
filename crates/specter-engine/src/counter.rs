@@ -8,8 +8,8 @@
 //! saturates after ~580 years, so the assertion exists to catch programming errors (a counter wired
 //! into an unbounded retry loop, a fuzzer running for weeks) rather than realistic workload
 //! exhaustion. Pausing the engine on saturation would be fictional recovery — at the saturation
-//! boundary the counter's identity space is already corrupted, so the only honest outcome is to
-//! panic and surface the bug.
+//! boundary the counter's identity space is already corrupted, so the only honest outcome is to panic
+//! and surface the bug.
 
 use std::any::type_name;
 use std::marker::PhantomData;
@@ -22,10 +22,10 @@ use std::marker::PhantomData;
 /// `MonotonicCounter<CorrelationId>` is expected is a type error, closing the cross-space-confusion
 /// hazard the typed wrappers were introduced to forbid.
 ///
-/// `PhantomData<fn() -> T>` is the variance-correct marker for "produces
-/// `T`, never owns `T`" — covariant in `T` and `Send + Sync` regardless of `T`'s thread-safety. The
-/// choice keeps [`Engine`](crate::Engine) auto-derivable as `Send + Sync` without bubbling a `T:
-/// Send + Sync` bound up to the counter's owner.
+/// `PhantomData<fn() -> T>` is the variance-correct marker for "produces `T`, never owns `T`" —
+/// covariant in `T` and `Send + Sync` regardless of `T`'s thread-safety. The choice keeps
+/// [`Engine`](crate::Engine) auto-derivable as `Send + Sync` without bubbling a `T: Send + Sync`
+/// bound up to the counter's owner.
 pub(crate) struct MonotonicCounter<T> {
     value: u64,
     _marker: PhantomData<fn() -> T>,
@@ -77,8 +77,8 @@ impl<T> MonotonicCounter<T> {
     }
 
     /// Set the counter to `value`. The next [`Self::next`] call returns `T::from(value + 1)`.
-    /// Test-only — saturation tests use this to jump near [`u64::MAX`] without `u64::MAX - 1`
-    /// wasted mints.
+    /// Test-only — saturation tests use this to jump near [`u64::MAX`] without `u64::MAX - 1` wasted
+    /// mints.
     pub(crate) fn prime(&mut self, value: u64) {
         self.value = value;
     }

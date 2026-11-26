@@ -9,11 +9,11 @@
 //!
 //! - `0` — matched the requested kind. The matching event renders to stdout for the operator's
 //!   confirmation (one human line).
-//! - `1` — connect / subscribe failure (including the daemon's structured
-//!   `WireErrorCode::UnknownSub` error response).
+//! - `1` — connect / subscribe failure (including the daemon's structured `WireErrorCode::UnknownSub`
+//!   error response).
 //! - `2` — precondition violated mid-wait: `--kind fire` observed the watch's own
-//!   [`WireDiagnostic::SubDetached`] before the requested fire. The watch is gone; no fire is
-//!   coming, an indefinite wait would hang for an event that will never arrive.
+//!   [`WireDiagnostic::SubDetached`] before the requested fire. The watch is gone; no fire is coming,
+//!   an indefinite wait would hang for an event that will never arrive.
 //! - `124` — deadline elapsed (POSIX `timeout(1)` convention).
 //! - other non-zero ([`ExitCode::FAILURE`]) — stream ended without a match (daemon shutdown closed
 //!   the conn, peer terminated mid-stream, etc.).
@@ -65,8 +65,8 @@ pub(crate) fn run(args: &WaitArgs) -> ExitCode {
         Err(code) => return code,
     };
 
-    // Indefinite wait: clear the connect-time 5s deadline once. Re-clearing on every iteration
-    // would waste a syscall per event with no observable effect.
+    // Indefinite wait: clear the connect-time 5s deadline once. Re-clearing on every iteration would
+    // waste a syscall per event with no observable effect.
     if deadline.is_none()
         && let Err(e) = sub.set_read_timeout(None)
     {
@@ -184,8 +184,8 @@ fn emit_matched(client: &ClientArgs, wire: &WireDiagnostic) -> ExitCode {
         .and_then(|()| stdout.flush())
     {
         // A BrokenPipe on the confirmation line still represents a matched wait — operators piping
-        // `wait` into something that closes early want the same `0` they'd get from a non-piped
-        // run. Everything else is a write failure.
+        // `wait` into something that closes early want the same `0` they'd get from a non-piped run.
+        // Everything else is a write failure.
         if e.kind() == io::ErrorKind::BrokenPipe {
             return ExitCode::SUCCESS;
         }
@@ -292,8 +292,8 @@ mod tests {
         }
     }
 
-    /// `--kind detach` observing a fire is normal — fires happen during a detach-wait. Skip and
-    /// keep reading until the detach (or the deadline) arrives.
+    /// `--kind detach` observing a fire is normal — fires happen during a detach-wait. Skip and keep
+    /// reading until the detach (or the deadline) arrives.
     #[test]
     fn classify_detach_observes_fire_skips() {
         assert!(matches!(

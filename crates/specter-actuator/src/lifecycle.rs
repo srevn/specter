@@ -4,8 +4,8 @@
 //! The flag transitions `false → true` exactly once, when the child has been reaped. Producer is
 //! either:
 //!
-//! - the wait thread — [`crate::spawner::ChildWaiter::wait`] after `child.wait()` returns (the
-//!   normal path), or
+//! - the wait thread — [`crate::spawner::ChildWaiter::wait`] after `child.wait()` returns (the normal
+//!   path), or
 //! - the recovery path — [`crate::spawner::ChildSignaler::reap_blocking`] on
 //!   wait-thread-spawn-failure recovery.
 //!
@@ -14,8 +14,8 @@
 //!
 //! `Release`-on-store / `Acquire`-on-load matches the publish-subscribe shape exactly: the writer
 //! publishes "child reaped; do not syscall against this pid"; every reader synchronises-with that
-//! publish. The prior code used `SeqCst` across every site — overkill for a flag whose only
-//! contract is "reader sees `true` ⇒ producer has finished the reap-side work".
+//! publish. The prior code used `SeqCst` across every site — overkill for a flag whose only contract
+//! is "reader sees `true` ⇒ producer has finished the reap-side work".
 //!
 //! Production pairs are minted by [`crate::os::OsSpawner`]; the test mock by `MockSpawner`; the
 //! in-crate test fixtures that exercise [`crate::pipe`] and `pool::state` aggregation mirror the
@@ -28,8 +28,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 ///
 /// Cloning shares the underlying cell — that is the *only* way to hand a flag to the paired half of
 /// a [`crate::spawner::ChildWaiter`] / [`crate::spawner::ChildSignaler`] pair. The newtype hides
-/// the `Arc<AtomicBool>` and the memory ordering from callers so no site can pick a weaker /
-/// stronger ordering by accident.
+/// the `Arc<AtomicBool>` and the memory ordering from callers so no site can pick a weaker / stronger
+/// ordering by accident.
 #[derive(Debug, Clone)]
 pub(crate) struct DeadFlag(Arc<AtomicBool>);
 
@@ -83,9 +83,9 @@ mod tests {
         assert!(f.is_dead());
     }
 
-    /// `clone` shares the underlying cell — marking through one handle is visible through the
-    /// other. This is the load-bearing pairing invariant: a `(waiter, signaler)` pair built from a
-    /// fresh flag and its clone observes the *same* dead state.
+    /// `clone` shares the underlying cell — marking through one handle is visible through the other.
+    /// This is the load-bearing pairing invariant: a `(waiter, signaler)` pair built from a fresh
+    /// flag and its clone observes the *same* dead state.
     #[test]
     fn clone_shares_state() {
         let producer = DeadFlag::new();

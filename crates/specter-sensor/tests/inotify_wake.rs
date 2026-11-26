@@ -37,9 +37,9 @@ fn drain_ready_returns_promptly_on_empty_queue() {
     drop(w);
 }
 
-/// A `mio::Poll` registered on the watcher's `AsFd::as_fd()` observes the canonical "register →
-/// poll → drain → idle" sequence the production driver exercises against a real inotify fd. Linux
-/// twin of `kqueue_wake::poll_then_drain_returns_kernel_events`.
+/// A `mio::Poll` registered on the watcher's `AsFd::as_fd()` observes the canonical "register → poll
+/// → drain → idle" sequence the production driver exercises against a real inotify fd. Linux twin
+/// of `kqueue_wake::poll_then_drain_returns_kernel_events`.
 #[test]
 fn poll_then_drain_returns_kernel_events() {
     let tmp = TempDir::new().unwrap();

@@ -13,11 +13,11 @@
 //! # Cancellation
 //!
 //! Best-effort. The pool tracks the *latest* per-Profile correlation in an
-//! `Arc<Mutex<BTreeMap<ProfileId, ProbeCorrelation>>>`. `submit` writes; `cancel` removes; the
-//! worker checks before running a popped request. A stale correlation (a `cancel` raced ahead of
-//! the worker's `recv`, or a fresh `submit` overwrote with a new correlation) causes the worker to
-//! skip the syscall and discard the request silently. In-flight probes are *not* interrupted — the
-//! engine drops late responses via stale-correlation discipline.
+//! `Arc<Mutex<BTreeMap<ProfileId, ProbeCorrelation>>>`. `submit` writes; `cancel` removes; the worker
+//! checks before running a popped request. A stale correlation (a `cancel` raced ahead of the
+//! worker's `recv`, or a fresh `submit` overwrote with a new correlation) causes the worker to skip
+//! the syscall and discard the request silently. In-flight probes are *not* interrupted — the engine
+//! drops late responses via stale-correlation discipline.
 //!
 //! # Panic recovery
 //!

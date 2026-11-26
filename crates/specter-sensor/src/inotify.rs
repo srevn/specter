@@ -8,11 +8,11 @@
 //! - [`watcher`]: state-bearing `FsWatcher` impl (engine-side).
 //! - [`config_watch`]: state-bearing `ConfigWatcher` impl (auto-reload).
 //!
-//! The two watchers share the FFI surface but own *separate* inotify fds — independent kernel
-//! queues, no cross-talk. They are deliberately decoupled so the engine watcher's per-resource
-//! bookkeeping (slotmap, wd-routing table) stays out of the config watcher's drain path and vice
-//! versa. Each inotify fd is exposed through the watcher's [`std::os::fd::AsFd`] supertrait so the
-//! reactor can multiplex both with a single `mio::Poll` (or equivalent).
+//! The two watchers share the FFI surface but own *separate* inotify fds — independent kernel queues,
+//! no cross-talk. They are deliberately decoupled so the engine watcher's per-resource bookkeeping
+//! (slotmap, wd-routing table) stays out of the config watcher's drain path and vice versa. Each
+//! inotify fd is exposed through the watcher's [`std::os::fd::AsFd`] supertrait so the reactor can
+//! multiplex both with a single `mio::Poll` (or equivalent).
 //!
 //! 32-bit Linux is gated out at compile time. The inotify watcher itself does not require
 //! pointer-width parity — `wd → ResourceId` routing pays a `BTreeMap` cell rather than stuffing the

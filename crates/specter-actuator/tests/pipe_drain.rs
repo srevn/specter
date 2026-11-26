@@ -1,8 +1,8 @@
 //! End-to-end pin: pipe drain must not deadlock when stage 0's child blocks indefinitely.
 //!
-//! The parallel `PipeWaiter` (one OS thread per stage) lets stage 1's prompt failure fire the
-//! cascade SIGTERM that unblocks stage 0. A sequential waiter would head-of-line block on stage 0
-//! and hang indefinitely waiting for its `sleep 60` to return.
+//! The parallel `PipeWaiter` (one OS thread per stage) lets stage 1's prompt failure fire the cascade
+//! SIGTERM that unblocks stage 0. A sequential waiter would head-of-line block on stage 0 and hang
+//! indefinitely waiting for its `sleep 60` to return.
 //!
 //! Pairs with the in-crate unit test
 //! `pipe::tests::blocked_first_stage_unblocked_by_cascade_does_not_deadlock`, which pins the same
@@ -50,8 +50,8 @@ fn pipe_program(stages: Vec<Vec<String>>) -> Arc<ActionProgram> {
 ///
 /// **Outcome aggregation pins.** Stage 0 (sleep, no stdout) ignores SIGPIPE — it exits only because
 /// the cascade SIGTERM lands on it, so its outcome is `Failed { signal: Some(15) }`. Stage 1 exits
-/// cleanly with `Failed { exit_code: Some(7) }`. Spawn-order aggregation (last non-zero exit /
-/// first observed signal) yields `exit_code = 7` and `signal = 15`.
+/// cleanly with `Failed { exit_code: Some(7) }`. Spawn-order aggregation (last non-zero exit / first
+/// observed signal) yields `exit_code = 7` and `signal = 15`.
 #[test]
 fn pipe_drain_does_not_block_on_hung_stage_0() {
     let mut harness = Harness::new(nz(2));

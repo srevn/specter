@@ -1,7 +1,7 @@
 //! Profile-claim helpers: the edges that install and release a Profile's Resource-side claims.
 //!
-//! A Profile holds at most four Resource-side claims, each keyed by a distinct [`ContribKey`]
-//! variant in the per-Resource contributions map (`specter-core/resource.rs`):
+//! A Profile holds at most four Resource-side claims, each keyed by a distinct [`ContribKey`] variant
+//! in the per-Resource contributions map (`specter-core/resource.rs`):
 //!
 //! 1. **Anchor.** `Profile.anchor_claim == AnchorClaim::Held` ⇒ the Profile contributes
 //!    [`ContribKey::ProfileAnchor`] at `Profile.resource` with mask `Profile.events`.
@@ -41,9 +41,9 @@ use specter_core::{
 impl Engine {
     /// Install the Profile's anchor claim: [`AnchorClaim::Held`] and its
     /// [`ContribKey::ProfileAnchor`] contribution at `Profile.resource`, at the Profile's `events`
-    /// mask — one edge, the mirror of [`Self::release_anchor_claim`]. Idempotent (flag already
-    /// `Held` ⇒ no-op): this edge is the only writer of `Held`, so a held flag means its
-    /// contribution stands.
+    /// mask — one edge, the mirror of [`Self::release_anchor_claim`]. Idempotent (flag already `Held`
+    /// ⇒ no-op): this edge is the only writer of `Held`, so a held flag means its contribution
+    /// stands.
     pub(crate) fn install_anchor_claim(&mut self, pid: ProfileId, out: &mut StepOutput) {
         let Some(p) = self.profiles.get_mut(pid) else {
             return;
@@ -87,10 +87,10 @@ impl Engine {
 
     /// Install the Profile's watch-root parent claim: a [`ContribKey::ProfileParent`] contribution
     /// at the anchor's parent slot, cached on `Profile.watch_root_parent` so the release needs no
-    /// re-derivation. The claim is engine infrastructure — the parent's watch is what sees the
-    /// anchor itself deleted or renamed — so it subscribes `STRUCTURE` whatever the Sub's mask.
-    /// Installed wherever the anchor goes live, beside the anchor claim. A root anchor has no
-    /// parent in the Tree and gets no claim; root rename detection is then unavailable.
+    /// re-derivation. The claim is engine infrastructure — the parent's watch is what sees the anchor
+    /// itself deleted or renamed — so it subscribes `STRUCTURE` whatever the Sub's mask. Installed
+    /// wherever the anchor goes live, beside the anchor claim. A root anchor has no parent in the
+    /// Tree and gets no claim; root rename detection is then unavailable.
     ///
     /// **Idempotent across recovery.** Anchor loss keeps this claim (it is the recovery channel),
     /// so a recovery descent's terminus finds the cache already naming the parent and adds nothing:
@@ -99,12 +99,12 @@ impl Engine {
     ///
     /// **Anchor sourced from owner state.** The anchor is read back via
     /// [`specter_core::Profile::resource`] rather than taken as a parameter: the slot is the
-    /// Profile's own identity axis, write-once for its lifetime, so a caller passing the wrong
-    /// anchor is unrepresentable.
+    /// Profile's own identity axis, write-once for its lifetime, so a caller passing the wrong anchor
+    /// is unrepresentable.
     ///
-    /// The parent's role tag flips from `DescentScaffold` to `WatchRootParent`; a `User` parent
-    /// stays `User` (a real role is never demoted). The tag is metadata — retention runs through
-    /// the contribution.
+    /// The parent's role tag flips from `DescentScaffold` to `WatchRootParent`; a `User` parent stays
+    /// `User` (a real role is never demoted). The tag is metadata — retention runs through the
+    /// contribution.
     ///
     /// **Per-file recovery limitation.** This parent-edge channel is what makes `rm -rf anchor`
     /// survivable: the anchor re-materialises via descent and a post-recovery Seed-Ok rebases
@@ -113,8 +113,8 @@ impl Engine {
     /// v1 keeps no per-leaf survival witness on the per-file path. This (witness-bearing) drop is
     /// surfaced to operators via [`specter_core::Diagnostic::PerFileDriftDroppedOnRecovery`], which
     /// is witness-gated: a plain `Input::SensorOverflow` reseed of a healthy `Snapshot`-baseline
-    /// Profile drops per-file overflow-window reactions the same way but carries no witness, so
-    /// that subclass is a further v1 limitation the diagnostic does not cover (deferred with the
+    /// Profile drops per-file overflow-window reactions the same way but carries no witness, so that
+    /// subclass is a further v1 limitation the diagnostic does not cover (deferred with the
     /// per-leaf-witness work).
     pub(crate) fn install_watch_root_parent_claim(&mut self, pid: ProfileId, out: &mut StepOutput) {
         let Some(p) = self.profiles.get_mut(pid) else {
@@ -140,10 +140,10 @@ impl Engine {
 
     /// Release the Profile's watch-root parent contribution if held. Idempotent; safe in any
     /// post-vacate state. Calls `try_reap` on the parent slot — with this Profile's
-    /// [`ContribKey::ProfileParent`] just removed, the slot reaps unless some other claim still
-    /// holds it (a sibling child, another Profile parented here). The reap is a no-op at the call
-    /// moment when [`Engine::reap_profile`] runs this helper before the anchor's own `try_reap` —
-    /// the anchor is still a child of the parent — but the cascading `try_reap` performed by
+    /// [`ContribKey::ProfileParent`] just removed, the slot reaps unless some other claim still holds
+    /// it (a sibling child, another Profile parented here). The reap is a no-op at the call moment
+    /// when [`Engine::reap_profile`] runs this helper before the anchor's own `try_reap` — the anchor
+    /// is still a child of the parent — but the cascading `try_reap` performed by
     /// [`specter_core::Tree::try_reap`] on the eventual anchor reap walks back up and frees the
     /// parent in that same step.
     pub(crate) fn release_watch_root_parent_claim(&mut self, pid: ProfileId, out: &mut StepOutput) {
@@ -164,14 +164,14 @@ impl Engine {
     /// and the park's typed state keeps every `Idle` consumer (overflow re-Seed, attach join, burst
     /// routing) from mistaking it for a healthy rest; `narration` distinguishes the operational
     /// teardowns (watch rejection, root-vanish abandon, walker-contract abandon — each narrating
-    /// one [`specter_core::Diagnostic::ProfileParked`] inside the helper, so the three callers
-    /// cannot drift apart) from `reap_profile`'s same-step teardown (silent — the reap narrates
-    /// instead). Idempotent (non-Pending ⇒ no-op); safe in any counter state. Calls `try_reap` on
-    /// the prefix slot — with this Profile's [`ContribKey::ProfileDescent`] just removed, the slot
-    /// reaps unless something else still claims it (most often a child slot in the descent chain
-    /// toward the anchor, or another descent's contribution at the shared prefix). The prefix's
-    /// role tag (`DescentScaffold` from initial `ensure_path`, or `User` / `WatchRootParent` if a
-    /// peer Profile previously promoted it) is metadata; it does not affect this reap.
+    /// one [`specter_core::Diagnostic::ProfileParked`] inside the helper, so the three callers cannot
+    /// drift apart) from `reap_profile`'s same-step teardown (silent — the reap narrates instead).
+    /// Idempotent (non-Pending ⇒ no-op); safe in any counter state. Calls `try_reap` on the prefix
+    /// slot — with this Profile's [`ContribKey::ProfileDescent`] just removed, the slot reaps unless
+    /// something else still claims it (most often a child slot in the descent chain toward the
+    /// anchor, or another descent's contribution at the shared prefix). The prefix's role tag
+    /// (`DescentScaffold` from initial `ensure_path`, or `User` / `WatchRootParent` if a peer Profile
+    /// previously promoted it) is metadata; it does not affect this reap.
     ///
     /// **Cancel-first contract.** Callers that may have an in-flight probe (e.g., `reap_profile`,
     /// `on_watch_op_rejected` descent purge) MUST invoke [`Engine::cancel_owner_probe`] before this
@@ -196,8 +196,8 @@ impl Engine {
         sub_watch_then_try_reap(&mut self.tree, prefix, ContribKey::ProfileDescent(pid), out);
     }
 
-    /// Release every per-descendant contribution this Profile holds — the fourth member of the
-    /// claim quartet, completing the symmetry with the three single-resource helpers above.
+    /// Release every per-descendant contribution this Profile holds — the fourth member of the claim
+    /// quartet, completing the symmetry with the three single-resource helpers above.
     ///
     /// **Take-and-apply.** Atomically takes `Profile.current` (sets to `None`), synthesises a
     /// wholesale-deletion [`Diff`] over the taken snapshot via [`Diff::all_deleted`], and feeds it
@@ -205,9 +205,9 @@ impl Engine {
     /// [`ContribKey::ProfileDescendant`] contribution by explicit key, then vacates and reaps any
     /// slot left with no remaining anchors).
     ///
-    /// **Idempotent.** `current.is_none()` ⇒ no-op. A second invocation in the same step finds
-    /// `None` after the first call's `take`. Pending Profiles (no `current` by invariant) and
-    /// File-anchored Profiles (`TreeSnapshot::File`, no descendants) short-circuit on the dispatch.
+    /// **Idempotent.** `current.is_none()` ⇒ no-op. A second invocation in the same step finds `None`
+    /// after the first call's `take`. Pending Profiles (no `current` by invariant) and File-anchored
+    /// Profiles (`TreeSnapshot::File`, no descendants) short-circuit on the dispatch.
     ///
     /// **Safe in any post-vacate state.** [`crate::reconcile::apply_diff_to_tree`] calls
     /// [`crate::refcounts::sub_watch`] unconditionally; the helper silently skips absent keys
@@ -215,9 +215,9 @@ impl Engine {
     /// see the [`crate::refcounts`] module rustdoc).
     ///
     /// **Sole call sites.** [`Engine::reap_profile`] and [`Engine::discard_anchor_state`] (reached
-    /// through the `finalize_anchor_lost` coordinator in `transitions.rs`). Completes the
-    /// four-claim release symmetry: the three 1-to-1 claims (anchor / watch-root parent / descent
-    /// prefix) plus the 1-to-N descendant claims encoded in `Profile.current`.
+    /// through the `finalize_anchor_lost` coordinator in `transitions.rs`). Completes the four-claim
+    /// release symmetry: the three 1-to-1 claims (anchor / watch-root parent / descent prefix) plus
+    /// the 1-to-N descendant claims encoded in `Profile.current`.
     pub(crate) fn release_descendant_claim(&mut self, pid: ProfileId, out: &mut StepOutput) {
         // Take the snapshot atomically. Idempotent: subsequent calls find `None` and short-circuit
         // without further work.
@@ -264,9 +264,9 @@ impl Engine {
 
     /// Discard every anchor-derived state when the anchor is lost or kernel-rejected: no claim, no
     /// snapshot, no cached kind. Recovery is a descent at
-    /// [`specter_core::Profile::watch_root_parent`] ending in `Engine::dispatch_descent_ok`'s
-    /// anchor branch (which re-classifies `kind` from the parent's directory listing) — entered
-    /// immediately by the observed-loss coordinator's descend wrapper
+    /// [`specter_core::Profile::watch_root_parent`] ending in `Engine::dispatch_descent_ok`'s anchor
+    /// branch (which re-classifies `kind` from the parent's directory listing) — entered immediately
+    /// by the observed-loss coordinator's descend wrapper
     /// (`Engine::finalize_anchor_lost_and_descend`), or, for the probe-`Failed` / watch-rejection
     /// terminals that park (`Engine::finalize_anchor_lost_and_park`), by a later recovery trigger →
     /// `Engine::start_pending_recovery`.
@@ -278,11 +278,11 @@ impl Engine {
     ///   has already `take()`d the live `current` before this helper runs, so the collapse only has
     ///   the kind discriminant and settled reference left to reset. The kind must reset because the
     ///   anchor's on-disk shape may have changed across the lost→recovered cycle and a stale
-    ///   discriminant would misroute the next Seed burst's probe-shape dispatch: `Unclassified`
-    ///   makes `start_seed_burst` fall through to its `Subtree` arm, and a kind-mismatched
-    ///   `Vanished` then routes through the normal descent-recovery path in either direction
-    ///   (`Some(File)` against a now-Dir slot is the case that would otherwise misroute as
-    ///   `AnchorFile` and waste a round-trip).
+    ///   discriminant would misroute the next Seed burst's probe-shape dispatch: `Unclassified` makes
+    ///   `start_seed_burst` fall through to its `Subtree` arm, and a kind-mismatched `Vanished` then
+    ///   routes through the normal descent-recovery path in either direction (`Some(File)` against
+    ///   a now-Dir slot is the case that would otherwise misroute as `AnchorFile` and waste a
+    ///   round-trip).
     /// - `Profile.anchor_claim = AnchorClaim::None` — via [`Engine::release_anchor_claim`].
     ///
     /// **Preserved — by design.**
@@ -290,11 +290,11 @@ impl Engine {
     ///   auto-recovery on anchor reappearance; only `reap_profile` and `on_watch_op_rejected`'s
     ///   parent purge clear it.
     /// - The per-Sub fire history ([`specter_core::Sub::has_fired`]) — not a Profile field at all,
-    ///   so it is outside this helper's reach by construction: it lives on the Subs in the
-    ///   registry, which anchor loss does not touch, so it survives the loss→recovery window for
-    ///   free. The post-recovery Seed-Ok consults [`Engine::seed_drift_observed`] (which reads that
-    ///   per-Sub state) to decide whether to re-fire; were it cleared, emitted-once Effects would
-    ///   silently fail to re-fire on every recovery.
+    ///   so it is outside this helper's reach by construction: it lives on the Subs in the registry,
+    ///   which anchor loss does not touch, so it survives the loss→recovery window for free. The
+    ///   post-recovery Seed-Ok consults [`Engine::seed_drift_observed`] (which reads that per-Sub
+    ///   state) to decide whether to re-fire; were it cleared, emitted-once Effects would silently
+    ///   fail to re-fire on every recovery.
     /// - All other fields (`events`, `has_per_file_fds`, `config*`, `resource`, `settle*`). The
     ///   deferred-reap directive rides on `ProfileState::Active`'s payload via
     ///   [`specter_core::BurstFinish`], so its preservation across recovery is part of `state`'s
@@ -304,15 +304,16 @@ impl Engine {
     /// - The survival witness — `clear_anchor_classification` derives it from the settled reference's
     ///   hash and stores it in the collapsed `Unclassified` arm, substituting for the dropped
     ///   baseline in the next Seed-Ok's drift verdict ([`Engine::seed_drift_observed`] reads it via
-    ///   [`specter_core::Profile::settled_hash`]). `dispatch_rebase_ok` and the Seed-Ok recovery pin
-    ///   only (the `EmitMode::SeedDrift` seal in `fire_and_settle`, or the silent `SilentPin` arm of
-    ///   `fire_or_seal`, reached from the [`specter_core::QuiescenceVerdict::Stable`] Seed verdicts —
-    ///   both `Natural` and `Forced`) call [`specter_core::Profile::rebase_baseline`], which consumes
-    ///   it (the `Witness → Snapshot` move); the Seed [`specter_core::QuiescenceVerdict::Retry`] arm
-    ///   grafts (or skips) without rebasing, so the witness outlives an unbounded re-batch loop and
-    ///   is consumed only at the eventual pin. A live baseline and a survival witness are mutually
-    ///   exclusive *by construction* in the anchor sum — the old `baseline.is_some() ⇒ …is_none()`
-    ///   rule is a type property now, not a step-boundary invariant.
+    ///   [`specter_core::Profile::settled_hash`]). `dispatch_rebase_ok` and the Seed-Ok recovery
+    ///   pin only (the `EmitMode::SeedDrift` seal in `fire_and_settle`, or the silent `SilentPin`
+    ///   arm of `fire_or_seal`, reached from the [`specter_core::QuiescenceVerdict::Stable`] Seed
+    ///   verdicts — both `Natural` and `Forced`) call [`specter_core::Profile::rebase_baseline`],
+    ///   which consumes it (the `Witness → Snapshot` move); the Seed
+    ///   [`specter_core::QuiescenceVerdict::Retry`] arm grafts (or skips) without rebasing, so the
+    ///   witness outlives an unbounded re-batch loop and is consumed only at the eventual pin. A
+    ///   live baseline and a survival witness are mutually exclusive *by construction* in the anchor
+    ///   sum — the old `baseline.is_some() ⇒ …is_none()` rule is a type property now, not a
+    ///   step-boundary invariant.
     ///
     /// **Pre-condition.** The owner's probe slot must already be disarmed. The sole caller,
     /// `finalize_anchor_lost`, invokes [`Engine::cancel_owner_probe`] first (a no-op on the
@@ -338,14 +339,14 @@ impl Engine {
     /// **Sole call site.** `finalize_anchor_lost` in `transitions.rs` — the anchor-loss coordinator
     /// every observed-loss route (anchor-terminal event, the six probe vanished/failed dispatches,
     /// the kind-mismatch certifier arm, the watch-rejection purge) funnels through. **Not** called
-    /// by [`Engine::reap_profile`] — the reap path performs the same two release calls inline
-    /// rather than via this helper. "Profile dies" has no next Seed burst, so resetting the
-    /// classification would be wasted on a struct about to drop; see `reap_profile`'s rustdoc for
-    /// the asymmetry rationale.
+    /// by [`Engine::reap_profile`] — the reap path performs the same two release calls inline rather
+    /// than via this helper. "Profile dies" has no next Seed burst, so resetting the classification
+    /// would be wasted on a struct about to drop; see `reap_profile`'s rustdoc for the asymmetry
+    /// rationale.
     ///
-    /// **No carrier-count bookkeeping.** `Profile::is_nonsteady` is a pure state predicate
-    /// (`Pending ∨ Parked`); this coordinator writes no `state`, so the anchor clears below cannot
-    /// move the count — the caller's eventual park / descent entry records its own edge through the
+    /// **No carrier-count bookkeeping.** `Profile::is_nonsteady` is a pure state predicate (`Pending
+    /// ∨ Parked`); this coordinator writes no `state`, so the anchor clears below cannot move the
+    /// count — the caller's eventual park / descent entry records its own edge through the
     /// `ProfileMap` chokepoints.
     pub(crate) fn discard_anchor_state(&mut self, pid: ProfileId, out: &mut StepOutput) {
         // Order:
@@ -353,8 +354,8 @@ impl Engine {
         //      every descendant contribution to release — step 2's collapse drops `current`, so the
         //      reverse order would leak them.
         //   2. clear_anchor_classification collapses File/Dir → Unclassified, atomically capturing
-        //      the survival witness from the settled reference. Step 1's take_current left
-        //      `current` None but `settled` intact, so the witness is still available.
+        //      the survival witness from the settled reference. Step 1's take_current left `current`
+        //      None but `settled` intact, so the witness is still available.
         //   3. release_anchor_claim's place is free — its contribution is released by key — and it
         //      runs last.
         self.release_descendant_claim(pid, out);
@@ -367,8 +368,8 @@ impl Engine {
 
         // Coordinator-exit coherence tripwire, symmetric with `Profile::materialize_anchor`'s. The
         // classification collapse above is structural, but a future regression that reordered these
-        // steps or left the Profile classified / still holding the anchor claim while `Pending`
-        // would trip here at the write site rather than latently at the next dispatch or reap.
+        // steps or left the Profile classified / still holding the anchor claim while `Pending` would
+        // trip here at the write site rather than latently at the next dispatch or reap.
         if let Some(p) = self.profiles.get(pid) {
             p.debug_assert_anchor_coherent();
         }
@@ -435,8 +436,8 @@ mod tests {
         ))
     }
 
-    /// Drive a fresh-attach cold Seed burst from `Active(PreFire(Verifying))` through its
-    /// quiescence verdict to pinned `Idle`, committing `snap` as `current` + `baseline`.
+    /// Drive a fresh-attach cold Seed burst from `Active(PreFire(Verifying))` through its quiescence
+    /// verdict to pinned `Idle`, committing `snap` as `current` + `baseline`.
     ///
     /// The cold-arm Seed burst pins on the first `Authoritative` sample: a cold-Seed `SilentPin`
     /// consequence does not owe quiescence proof, so the witness is
@@ -473,9 +474,9 @@ mod tests {
         );
     }
 
-    /// Build an Engine + a Profile materialised at `root`. Returns the `(SubId, ProfileId,
-    /// anchor_id, parent_id)` tuple. The anchor sits under a parent slot so `watch_root_parent` is
-    /// set; both are Dir; `events = ClassSet::EMPTY` keeps `has_per_file_fds = false`.
+    /// Build an Engine + a Profile materialised at `root`. Returns the `(SubId, ProfileId, anchor_id,
+    /// parent_id)` tuple. The anchor sits under a parent slot so `watch_root_parent` is set; both
+    /// are Dir; `events = ClassSet::EMPTY` keeps `has_per_file_fds = false`.
     fn engine_with_materialised_profile(
         events: ClassSet,
     ) -> (Engine, SubId, ProfileId, ResourceId, ResourceId) {
@@ -772,8 +773,8 @@ mod tests {
 
     #[test]
     fn discard_anchor_state_walks_descendants_and_releases_their_demand() {
-        // Materialise a Profile with a Dir child; verify the per-descendant contribution is
-        // released by the helper.
+        // Materialise a Profile with a Dir child; verify the per-descendant contribution is released
+        // by the helper.
         let mut e = Engine::new();
         let anchor = e.tree_mut().ensure_root("src", ResourceRole::User);
         e.tree_mut().set_kind(anchor, ResourceKind::Dir);
@@ -835,17 +836,17 @@ mod tests {
     /// 1. Profile P at `/a` (Dir), STRUCTURE-only, with materialised descendant `/a/b` (Dir) —
     ///    `b.watch_demand == 1`.
     /// 2. `FsEvent` at `/a` ⇒ `start_standard_burst` ⇒ `Active(PreFire(Batching))`.
-    /// 3. `FsEvent` at `/a/b` mid-Batching ⇒ `event_drives_batching` tracks `b`'s path in the
-    ///    burst's `dirty` provenance.
+    /// 3. `FsEvent` at `/a/b` mid-Batching ⇒ `event_drives_batching` tracks `b`'s path in the burst's
+    ///    `dirty` provenance.
     /// 4. `WatchOpRejected` on the anchor ⇒ `on_watch_op_rejected` ⇒ `finalize_anchor_lost(P)` ⇒
     ///    `discard_anchor_state(P)` ⇒ `release_descendant_claim(P)` walks the snapshot ⇒
     ///    `delete_child(b)` ⇒ `sub_watch_then_try_reap(b)`: the last contribution drains (emits
-    ///    `WatchOp::Unwatch { resource: b }`) then `try_reap` removes the slot — `vacate`'s
-    ///    `Unwatch` branch is dormant there (the map is already empty by `has_anchors`' contract).
+    ///    `WatchOp::Unwatch { resource: b }`) then `try_reap` removes the slot — `vacate`'s `Unwatch`
+    ///    branch is dormant there (the map is already empty by `has_anchors`' contract).
     #[test]
     fn release_descendant_claim_clean_reaps_dirty_descendant_via_vacate() {
-        // Materialise P at /a with Dir descendant /a/b. STRUCTURE-only ⇒ `has_per_file_fds =
-        // false`, so the descendant clause's Dir branch is the contribution this exercises.
+        // Materialise P at /a with Dir descendant /a/b. STRUCTURE-only ⇒ `has_per_file_fds = false`,
+        // so the descendant clause's Dir branch is the contribution this exercises.
         let mut e = Engine::new();
         let anchor = e.tree_mut().ensure_root("a", ResourceRole::User);
         e.tree_mut().set_kind(anchor, ResourceKind::Dir);
@@ -1013,9 +1014,9 @@ mod tests {
         );
     }
 
-    /// A recovery descent's terminus re-installs the watch-root parent claim on a Profile whose
-    /// claim outlived the anchor's loss: the cache already names the parent, so the install adds no
-    /// second contribution and emits nothing.
+    /// A recovery descent's terminus re-installs the watch-root parent claim on a Profile whose claim
+    /// outlived the anchor's loss: the cache already names the parent, so the install adds no second
+    /// contribution and emits nothing.
     #[test]
     fn watch_root_parent_claim_install_is_idempotent_across_recovery() {
         let (mut e, _sid, pid, _anchor, parent) = engine_with_materialised_profile(ClassSet::EMPTY);

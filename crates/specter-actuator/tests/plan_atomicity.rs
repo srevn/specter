@@ -1,17 +1,17 @@
 //! Integration regression: plan-atomicity across hot-reload-shaped coalesce.
 //!
-//! The reshape introduced `Effect.program: Arc<ActionProgram>` and a per-instruction actuator
-//! advance loop. Operators can change a watch's `actions` list via SIGHUP while a plan is in
-//! flight; the engine emits a new Effect with the new program, which lands in the actuator's
-//! per-slot `pending`. The invariant under test: **once started, a plan runs all its ops before
-//! `pending` fires**, regardless of new submits. Equivalently: `Effect.program` is a frozen
-//! snapshot — the in-flight step's `effect.program.ops()[N+1]` is sourced from the same `Arc`
-//! installed at plan start, never from a later submit's program.
+//! The reshape introduced `Effect.program: Arc<ActionProgram>` and a per-instruction actuator advance
+//! loop. Operators can change a watch's `actions` list via SIGHUP while a plan is in flight; the
+//! engine emits a new Effect with the new program, which lands in the actuator's per-slot `pending`.
+//! The invariant under test: **once started, a plan runs all its ops before `pending` fires**,
+//! regardless of new submits. Equivalently: `Effect.program` is a frozen snapshot — the in-flight
+//! step's `effect.program.ops()[N+1]` is sourced from the same `Arc` installed at plan start, never
+//! from a later submit's program.
 //!
 //! At the actuator's boundary, "hot reload" manifests as a fresh submit for the same `DedupKey`
-//! carrying the new plan. The slot's `running` (and `plan_continue` between steps) is never
-//! replaced by coalesce — only `pending` is. This test drives that distinction end-to-end through
-//! real subprocesses.
+//! carrying the new plan. The slot's `running` (and `plan_continue` between steps) is never replaced
+//! by coalesce — only `pending` is. This test drives that distinction end-to-end through real
+//! subprocesses.
 
 #![cfg(unix)]
 #![allow(
@@ -27,8 +27,8 @@ use specter_core::{EffectOutcome, Input};
 use std::time::Duration;
 
 /// A 2-step plan_a is in flight; a fresh submit on the same key arrives with plan_b carrying a
-/// different argv. The actuator must finish plan_a (both steps) before plan_b spawns; the
-/// marker-file order on disk witnesses the structural Arc-snapshot freeze.
+/// different argv. The actuator must finish plan_a (both steps) before plan_b spawns; the marker-file
+/// order on disk witnesses the structural Arc-snapshot freeze.
 ///
 /// Concretely:
 ///
@@ -47,8 +47,8 @@ fn pending_submit_during_running_plan_does_not_replace_in_flight_steps() {
     let mut h = Harness::new(nz(4));
     let dir = tempfile::tempdir().expect("tempdir");
     let cwd = dir.path().to_path_buf();
-    // `/bin/sleep` accepts decimal-seconds on BSD, GNU coreutils, and macOS — we hand it the
-    // literal seconds string so we don't need a `u64 → f64` cast.
+    // `/bin/sleep` accepts decimal-seconds on BSD, GNU coreutils, and macOS — we hand it the literal
+    // seconds string so we don't need a `u64 → f64` cast.
     let touch = |marker: &str, sleep_secs: &str| {
         vec![
             "/bin/sh".into(),

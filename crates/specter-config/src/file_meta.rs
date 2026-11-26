@@ -28,10 +28,10 @@ use std::path::Path;
 /// (operator `chmod 600` → daemon lacks read → operator `chmod 644`) would never recover via
 /// auto-reload — the post-recovery lstat would compare equal to the pre-EACCES stored meta.
 ///
-/// Why not `ctime`? `ctime` catches the same recovery case but also moves on `setxattr` / `chflags` /
-/// `utimes` — including macOS LaunchServices' `com.apple.lastuseddate#PS` xattr write on every Finder
-/// open / Quick Look — which would reload-storm the driver on a quiet config file. Mode + ownership
-/// is the precise filter for "could this affect bytes or readability"; ctime is too coarse.
+/// Why not `ctime`? `ctime` catches the same recovery case but also moves on `setxattr` / `chflags`
+/// / `utimes` — including macOS LaunchServices' `com.apple.lastuseddate#PS` xattr write on every
+/// Finder open / Quick Look — which would reload-storm the driver on a quiet config file. Mode +
+/// ownership is the precise filter for "could this affect bytes or readability"; ctime is too coarse.
 ///
 /// The cycle recovery further requires `loader.config_meta` to rotate on **every** read attempt
 /// (success or failure), not just on success — see `EngineDriver::handle_reload`'s parse-fail branch.
@@ -115,8 +115,8 @@ mod tests {
         let meta_target = FileMeta::from_path(&target).unwrap();
         let meta_link = FileMeta::from_path(&link).unwrap();
 
-        // Symlink-follow: both paths resolve to the same inode, so the captured metas are
-        // bit-equal. Lstat-only would diverge here.
+        // Symlink-follow: both paths resolve to the same inode, so the captured metas are bit-equal.
+        // Lstat-only would diverge here.
         assert_eq!(
             meta_target, meta_link,
             "from_path must follow symlinks (matches File::open semantics)"
@@ -134,9 +134,9 @@ mod tests {
 
     #[test]
     fn mode_changes_on_chmod_while_mtime_holds() {
-        // Closes the chmod-after-EACCES recovery hole: a permissions flip that doesn't touch
-        // content must still register as a FileMeta delta, otherwise the lstat-filter would never
-        // re-trigger a load attempt after the daemon was locked out.
+        // Closes the chmod-after-EACCES recovery hole: a permissions flip that doesn't touch content
+        // must still register as a FileMeta delta, otherwise the lstat-filter would never re-trigger
+        // a load attempt after the daemon was locked out.
         let dir = TempDir::new().unwrap();
         let p = dir.path().join("a.toml");
         write(&p, b"hello");
@@ -166,9 +166,9 @@ mod tests {
 
     #[test]
     fn fstat_on_open_handle_is_inode_pinned_across_rename() {
-        // The atomicity claim of `Config::from_path_with_meta`: once `File::open` binds f to
-        // inode-X, `f.metadata()` keeps returning inode-X's meta regardless of subsequent
-        // path-level renames. Verifies the building block independently of the Config wrapper.
+        // The atomicity claim of `Config::from_path_with_meta`: once `File::open` binds f to inode-X,
+        // `f.metadata()` keeps returning inode-X's meta regardless of subsequent path-level renames.
+        // Verifies the building block independently of the Config wrapper.
         //
         // Every fingerprinted field is rename-stable: rename moves the path, not the inode's bytes
         // / mtime / mode / ownership. The full struct equality below pins the property end-to-end.

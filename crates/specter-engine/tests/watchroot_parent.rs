@@ -1,6 +1,6 @@
-//! Watch-root-parent infrastructure. Each User Profile contributes a `+1` watch_demand to its
-//! parent Resource so the engine can detect rename/delete of the anchor itself; the contribution is
-//! released on `detach_sub` reap.
+//! Watch-root-parent infrastructure. Each User Profile contributes a `+1` watch_demand to its parent
+//! Resource so the engine can detect rename/delete of the anchor itself; the contribution is released
+//! on `detach_sub` reap.
 
 use specter_core::testkit::dir_snap;
 use specter_core::{
@@ -111,9 +111,9 @@ fn detach_sub_releases_watch_root_parent_contribution() {
     let _ = seed_to_idle(&mut e, pid, &dir_snap(&[]), now);
     assert_eq!(e.tree().get(root).unwrap().watch_demand(), 1);
 
-    // Detach. The detach releases the anchor's contribution and the watch-root parent's
-    // contribution; `Tree::try_reap` cascades up from the now-orphaned anchor and reaps `/root` in
-    // the same step (no other claims). Both slots emit `Unwatch` on the way out.
+    // Detach. The detach releases the anchor's contribution and the watch-root parent's contribution;
+    // `Tree::try_reap` cascades up from the now-orphaned anchor and reaps `/root` in the same step
+    // (no other claims). Both slots emit `Unwatch` on the way out.
     let out = e.step(Input::DetachSub(sid), Instant::now());
     assert!(
         e.tree().get(root).is_none_or(|r| r.watch_demand() == 0),

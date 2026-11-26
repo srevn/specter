@@ -17,10 +17,10 @@
 //!
 //! ## Non-blocking discipline
 //!
-//! [`kevent_drain`] passes a zero `timespec` so `kevent(2)` returns immediately whether or not
-//! events are queued. The trait surface ([`crate::FsWatcher::drain_ready`]) wraps this in a
-//! drain-to-empty loop; callers block at the reactor level on [`std::os::fd::AsFd::as_fd`] of the
-//! watcher, never inside the FFI.
+//! [`kevent_drain`] passes a zero `timespec` so `kevent(2)` returns immediately whether or not events
+//! are queued. The trait surface ([`crate::FsWatcher::drain_ready`]) wraps this in a drain-to-empty
+//! loop; callers block at the reactor level on [`std::os::fd::AsFd::as_fd`] of the watcher, never
+//! inside the FFI.
 
 #![allow(unsafe_code)]
 
@@ -77,9 +77,9 @@ pub(super) fn kqueue_new() -> io::Result<OwnedFd> {
 }
 
 /// Register (or re-register) a vnode watch with the caller-supplied fflags mask, edge-triggered.
-/// `udata` is an opaque correlation token; events round-trip it via [`Kevent::udata`] so the
-/// watcher needs no fd↔id map. Callers should pick non-zero values — `udata == 0` is the "no
-/// payload" sentinel reserved for kernel records that lose their payload (cancelled / dropped).
+/// `udata` is an opaque correlation token; events round-trip it via [`Kevent::udata`] so the watcher
+/// needs no fd↔id map. Callers should pick non-zero values — `udata == 0` is the "no payload"
+/// sentinel reserved for kernel records that lose their payload (cancelled / dropped).
 ///
 /// `fflags` is the caller's responsibility — the kqueue translator
 /// (`super::translate::class_set_to_fflags`) is the single producer of the mask in the watcher's
@@ -121,21 +121,21 @@ fn vnode_change(
 /// Non-blocking: passes a zero `timespec` (NOT a NULL pointer — that would block indefinitely, the
 /// opposite of what the trait contract needs) so `kevent(2)` returns immediately whether or not
 /// events are queued. The trait surface ([`crate::FsWatcher::drain_ready`]) wraps this in a
-/// drain-to-empty loop that terminates when this returns `0`; callers block at the reactor level
-/// on the kqueue's [`std::os::fd::AsFd`] surface, never inside this helper.
+/// drain-to-empty loop that terminates when this returns `0`; callers block at the reactor level on
+/// the kqueue's [`std::os::fd::AsFd`] surface, never inside this helper.
 ///
 /// Returns the number of slots in `out` populated by the kernel.
 pub(super) fn kevent_drain(kq: &OwnedFd, out: &mut [Kevent]) -> io::Result<usize> {
     let len_c: c_int = c_int::try_from(out.len()).unwrap_or(c_int::MAX);
-    // SAFETY: `timespec` is plain POD — `tv_sec`/`tv_nsec` are integers. A zero bit pattern is `{
-    // tv_sec: 0, tv_nsec: 0 }`, the non-blocking signal documented for `kevent(2)`.
+    // SAFETY: `timespec` is plain POD — `tv_sec`/`tv_nsec` are integers. A zero bit pattern is
+    // `{ tv_sec: 0, tv_nsec: 0 }`, the non-blocking signal documented for `kevent(2)`.
     let ts: timespec = unsafe { MaybeUninit::zeroed().assume_init() };
     loop {
         // SAFETY: `out` is a `&mut [Kevent]` of length `out.len()`; `Kevent` is
         // `#[repr(transparent)]` over `libc::kevent`, so the slice's start pointer is a valid `*mut
         // libc::kevent` for `len_c` elements. The kernel writes only the first `n` (returned) slots
-        // and treats the rest as undefined; callers consume only `out[..n]`. `ts` is a stack
-        // binding that outlives the syscall; `&ts` is a non-NULL pointer to a zero `timespec`.
+        // and treats the rest as undefined; callers consume only `out[..n]`. `ts` is a stack binding
+        // that outlives the syscall; `&ts` is a non-NULL pointer to a zero `timespec`.
         let n = unsafe {
             kevent(
                 kq.as_raw_fd(),
@@ -181,14 +181,14 @@ fn kevent_change(kq: &OwnedFd, ev: &libc::kevent) -> io::Result<()> {
 }
 
 /// Open `path` with the kqueue-friendly flag set for the current target. macOS uses `O_EVTONLY`
-/// (Darwin-private flag for "open for event monitoring only" — won't pin the file against
-/// `unlink`); FreeBSD falls back to `O_RDONLY`. Both unconditionally apply `O_NOFOLLOW` — symlinks
-/// at the anchor path fail with `ELOOP` rather than silently traversing. v1 has no follow-symlinks
-/// opt-in. Both close on exec: every command the daemon spawns would otherwise inherit one
-/// descriptor per watched entry.
+/// (Darwin-private flag for "open for event monitoring only" — won't pin the file against `unlink`);
+/// FreeBSD falls back to `O_RDONLY`. Both unconditionally apply `O_NOFOLLOW` — symlinks at the anchor
+/// path fail with `ELOOP` rather than silently traversing. v1 has no follow-symlinks opt-in. Both
+/// close on exec: every command the daemon spawns would otherwise inherit one descriptor per watched
+/// entry.
 ///
-/// Errors propagate verbatim (`EMFILE` / `ENFILE` / `ENOENT` / `EACCES` / `ELOOP` are the
-/// FD-pressure / pending-path / symlink cases the engine surfaces via `WatchOpRejected`).
+/// Errors propagate verbatim (`EMFILE` / `ENFILE` / `ENOENT` / `EACCES` / `ELOOP` are the FD-pressure
+/// / pending-path / symlink cases the engine surfaces via `WatchOpRejected`).
 pub(super) fn open_for_watch(path: &Path) -> io::Result<OwnedFd> {
     let cstr = CString::new(path.as_os_str().as_bytes())
         .map_err(|_| io::Error::other("path contains NUL byte"))?;
@@ -257,11 +257,11 @@ mod tests {
         assert_eq!(ev.udata(), 0, "zero-init udata round-trips to zero");
     }
 
-    /// `kevent_drain` on an empty queue must return promptly: the zero `timespec` armed inside
-    /// makes `kevent(2)` return immediately with `0` events. Pins the non-blocking contract — a
-    /// regression that swapped the zero `timespec` for a NULL pointer (the historical "block
-    /// forever" sentinel) would deadlock here on a fresh kqueue, and any non-zero `timespec` would
-    /// force a deliberate sleep.
+    /// `kevent_drain` on an empty queue must return promptly: the zero `timespec` armed inside makes
+    /// `kevent(2)` return immediately with `0` events. Pins the non-blocking contract — a regression
+    /// that swapped the zero `timespec` for a NULL pointer (the historical "block forever" sentinel)
+    /// would deadlock here on a fresh kqueue, and any non-zero `timespec` would force a deliberate
+    /// sleep.
     #[test]
     fn kevent_drain_empty_queue_returns_promptly() {
         let kq = kqueue_new().expect("kqueue");

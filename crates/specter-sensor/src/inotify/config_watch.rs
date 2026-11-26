@@ -1,10 +1,10 @@
-//! `InotifyConfigWatcher` — inotify-backed [`ConfigWatcher`] for the daemon's own config file.
-//! Linux only.
+//! `InotifyConfigWatcher` — inotify-backed [`ConfigWatcher`] for the daemon's own config file. Linux
+//! only.
 //!
 //! Single-threaded: one thread owns the watcher value and drives
 //! [`drain_ready`](ConfigWatcher::drain_ready). The inotify fd is exposed via [`AsFd`] so a reactor
-//! can register it for edge-triggered readiness; `drain_ready` is non-blocking and drains the
-//! inotify queue to empty on every call.
+//! can register it for edge-triggered readiness; `drain_ready` is non-blocking and drains the inotify
+//! queue to empty on every call.
 //!
 //! # Watch shape
 //!
@@ -16,13 +16,13 @@
 //!   IN_CLOSE_WRITE`. Catches in-place edits, terminal flags (delete / move), `chmod` / `chown`
 //!   (`IN_ATTRIB`; the driver's lstat filter then sees the mode / ownership delta), and editor
 //!   close-after-write (`IN_CLOSE_WRITE`). `IN_ATTRIB` also fires on `setxattr` and `utimes`, but
-//!   the driver's `FileMeta` fingerprints only mode / uid / gid (not ctime), so those wakes
-//!   collapse to a no-op at the convergence point. Dropped to `None` on `IN_IGNORED` only —
-//!   intermediate flags like `IN_DELETE_SELF` / `IN_MOVE_SELF` just signal a real-event pulse and
-//!   let the kernel's subsequent `IN_IGNORED` finalise the drop. This avoids an ordering hazard: if
-//!   `file_wd` were nullified at `IN_DELETE_SELF`, the trailing `IN_IGNORED` for that wd would be
-//!   misclassified by the parent-loss check (`rec.wd != self.file_wd` ⇒ falls through to the
-//!   parent-wd arm) and force a spurious `Err`.
+//!   the driver's `FileMeta` fingerprints only mode / uid / gid (not ctime), so those wakes collapse
+//!   to a no-op at the convergence point. Dropped to `None` on `IN_IGNORED` only — intermediate flags
+//!   like `IN_DELETE_SELF` / `IN_MOVE_SELF` just signal a real-event pulse and let the kernel's
+//!   subsequent `IN_IGNORED` finalise the drop. This avoids an ordering hazard: if `file_wd` were
+//!   nullified at `IN_DELETE_SELF`, the trailing `IN_IGNORED` for that wd would be misclassified by
+//!   the parent-loss check (`rec.wd != self.file_wd` ⇒ falls through to the parent-wd arm) and force
+//!   a spurious `Err`.
 //!
 //! - **Parent-dir watch (`parent_wd`)** — installed on the canonicalised parent directory with
 //!   [`PARENT_MASK`]: `IN_CREATE | IN_MOVED_TO | IN_DELETE | IN_MOVED_FROM`. Held for the watcher's
@@ -33,9 +33,9 @@
 //!
 //! Unlike kqueue, inotify's parent records carry the basename of the affected child. The watcher
 //! compares each parent record's `name` field to the cached [`Self::config_basename`]; sibling
-//! activity drops at the watcher edge with no extra syscall — strictly more efficient than the
-//! kqueue branch, where the driver's lstat filter is the only suppression point for unrelated
-//! parent traffic.
+//! activity drops at the watcher edge with no extra syscall — strictly more efficient than the kqueue
+//! branch, where the driver's lstat filter is the only suppression point for unrelated parent
+//! traffic.
 //!
 //! # Opportunistic re-open
 //!
@@ -43,18 +43,18 @@
 //! basename-matched parent record was observed *and* the final `file_wd` state is `None`. The
 //! decision is post-loop-of-loops, so the intra-batch ordering of the parent's `IN_MOVED_TO` /
 //! `IN_CREATE` and the file's `IN_IGNORED` (the kernel reap of the old wd) is irrelevant, and so is
-//! the kernel splitting one logical atomic-save burst across two `read_inotify` calls within a
-//! single `drain_ready` invocation — every ordering converges on the same post-loop state.
+//! the kernel splitting one logical atomic-save burst across two `read_inotify` calls within a single
+//! `drain_ready` invocation — every ordering converges on the same post-loop state.
 //!
 //! Post-loop is also a borrow-checker concession: [`record::parse`] borrows [`Self::read_buf`] for
-//! the iterator's lifetime; a `&mut self` method invocation inside the loop would conflict with
-//! that borrow. Disjoint-field NLL handles the field-level mutation on `file_wd` (Copy
-//! `Option<i32>`) inline; the post-loop `try_reopen` call runs after the borrow ends.
+//! the iterator's lifetime; a `&mut self` method invocation inside the loop would conflict with that
+//! borrow. Disjoint-field NLL handles the field-level mutation on `file_wd` (Copy `Option<i32>`)
+//! inline; the post-loop `try_reopen` call runs after the borrow ends.
 //!
-//! `saw_basename_parent` (not bare `real_seen`) gates the recovery because file-side records
-//! nulling `file_wd` mid-drain are not a recovery signal *unless* a parent event also confirms "the
-//! basename is back." A lone `IN_DELETE_SELF`/`IN_IGNORED` without a parent record means the file
-//! is gone and the recreate has not yet happened; reopening on that signal alone is premature.
+//! `saw_basename_parent` (not bare `real_seen`) gates the recovery because file-side records nulling
+//! `file_wd` mid-drain are not a recovery signal *unless* a parent event also confirms "the basename
+//! is back." A lone `IN_DELETE_SELF`/`IN_IGNORED` without a parent record means the file is gone
+//! and the recreate has not yet happened; reopening on that signal alone is premature.
 //!
 //! Failure (`ENOENT` because recreate has not happened yet, any other errno) logs at `warn!` and
 //! the next basename-matched parent event retries.
@@ -88,9 +88,9 @@
 //! - `inotify_fd` ([`OwnedFd`]) drops first → the kernel reaps both per-watch descriptors on this
 //!   instance (per `inotify(7)`) and queues the resulting `IN_IGNORED` records on a stream no
 //!   consumer reads (benign).
-//! - `file_wd`, `parent_wd`, `parent_path`, `config_basename`, `read_buf` — `Option<c_int>` /
-//!   `c_int` integers and heap strings / buffer; no kernel obligations of their own. Closing the
-//!   inotify fd above is the sole deregister signal.
+//! - `file_wd`, `parent_wd`, `parent_path`, `config_basename`, `read_buf` — `Option<c_int>` / `c_int`
+//!   integers and heap strings / buffer; no kernel obligations of their own. Closing the inotify fd
+//!   above is the sole deregister signal.
 
 use crate::ConfigWatcher;
 use crate::inotify::{ffi, record};
@@ -141,11 +141,11 @@ const PARENT_MASK: u32 =
 ///
 /// Not included: `IN_EXCL_UNLINK`. The watcher pairs `O_PATH` + `/proc/self/fd/N` for race-free
 /// install; the inode it pins is not held open by this watcher beyond the install transaction (the
-/// OwnedFd from `open_o_path` drops at end of scope, per `inotify(7)`'s "the watch follows the
-/// inode, not the fd" semantics). `IN_EXCL_UNLINK`'s purpose — suppress post-unlink events on an
-/// open inode — is moot when nothing in this watcher holds the inode open. The engine watcher uses
-/// it because *other* processes (the actuator pool) may hold descendant fds; the config watcher has
-/// no analogous concern.
+/// OwnedFd from `open_o_path` drops at end of scope, per `inotify(7)`'s "the watch follows the inode,
+/// not the fd" semantics). `IN_EXCL_UNLINK`'s purpose — suppress post-unlink events on an open inode
+/// — is moot when nothing in this watcher holds the inode open. The engine watcher uses it because
+/// *other* processes (the actuator pool) may hold descendant fds; the config watcher has no analogous
+/// concern.
 const FILE_MASK: u32 = libc::IN_MODIFY
     | libc::IN_DELETE_SELF
     | libc::IN_MOVE_SELF
@@ -171,17 +171,17 @@ pub struct InotifyConfigWatcher {
     /// any queued events.
     inotify_fd: OwnedFd,
 
-    /// File-side watch descriptor. Set on successful initial install (or `None` if the file
-    /// vanished between `canonicalize` and `inotify_add_watch`). Dropped to `None` on `IN_IGNORED`
-    /// for this wd; restored by [`Self::try_reopen`] on the next parent event with basename match.
+    /// File-side watch descriptor. Set on successful initial install (or `None` if the file vanished
+    /// between `canonicalize` and `inotify_add_watch`). Dropped to `None` on `IN_IGNORED` for this
+    /// wd; restored by [`Self::try_reopen`] on the next parent event with basename match.
     file_wd: Option<c_int>,
 
     /// Parent-dir watch descriptor. Held for the watcher's lifetime; kernel-side reap (`IN_IGNORED`
     /// on this wd) propagates `Err` to the bin and exits the watcher thread.
     parent_wd: c_int,
 
-    /// Canonicalised parent path. Used by [`Self::try_reopen`] to rebuild the full file path; held as
-    /// `PathBuf` (not just an `Arc<Path>`) because tests + diagnostics want owned values readily.
+    /// Canonicalised parent path. Used by [`Self::try_reopen`] to rebuild the full file path; held
+    /// as `PathBuf` (not just an `Arc<Path>`) because tests + diagnostics want owned values readily.
     parent_path: PathBuf,
 
     /// Final path component of the canonical config path, captured once at construction. Used by
@@ -313,15 +313,15 @@ impl InotifyConfigWatcher {
 }
 
 impl ConfigWatcher for InotifyConfigWatcher {
-    /// Non-blocking drain-to-empty of the inotify queue. Loops on [`ffi::read_inotify`] (which
-    /// under `IN_NONBLOCK` returns `Ok(0)` on an empty queue) until the kernel signals `EAGAIN`,
+    /// Non-blocking drain-to-empty of the inotify queue. Loops on [`ffi::read_inotify`] (which under
+    /// `IN_NONBLOCK` returns `Ok(0)` on an empty queue) until the kernel signals `EAGAIN`,
     /// dispatching each record:
     ///
     /// - **`IN_IGNORED` on `file_wd`** — kernel reaped the file watch. Nullify `self.file_wd`; the
     ///   post-loop recovery (below) restores it iff a basename-matched parent record also fired in
     ///   this drain.
-    /// - **`IN_IGNORED` on `parent_wd`** — kernel reaped the parent watch. Return `Err`
-    ///   immediately; the bin exits the watcher thread.
+    /// - **`IN_IGNORED` on `parent_wd`** — kernel reaped the parent watch. Return `Err` immediately;
+    ///   the bin exits the watcher thread.
     /// - **`IN_IGNORED` on a stale wd** — silently dropped. This watcher never explicitly reuses a
     ///   wd, so a stale value means kernel-side reap of a wd we already nullified.
     /// - **Parent record** (`rec.wd == parent_wd`) — basename filter: `rec.name == config_basename`
@@ -366,11 +366,11 @@ impl ConfigWatcher for InotifyConfigWatcher {
                 break;
             }
             for rec in record::parse(&self.read_buf[..n_bytes]) {
-                // 1. IN_Q_OVERFLOW: kernel-emitted overflow signal. The config watcher's
-                //    per-instance queue is normally not at risk (a handful of events per editor
-                //    save), but paranoia is cheap. Surface as a generic pulse so the driver's lstat
-                //    filter takes the hit on uncertain state. wd is `-1` per `inotify(7)`, falling
-                //    outside `file_wd` / `parent_wd` — ordering relative to `IN_IGNORED` is
+                // 1. IN_Q_OVERFLOW: kernel-emitted overflow signal. The config watcher's per-instance
+                //    queue is normally not at risk (a handful of events per editor save), but
+                //    paranoia is cheap. Surface as a generic pulse so the driver's lstat filter takes
+                //    the hit on uncertain state. wd is `-1` per `inotify(7)`, falling outside
+                //    `file_wd` / `parent_wd` — ordering relative to `IN_IGNORED` is
                 //    intent-preserving, not load-bearing.
                 if rec.mask & libc::IN_Q_OVERFLOW != 0 {
                     tracing::warn!(
@@ -412,11 +412,11 @@ impl ConfigWatcher for InotifyConfigWatcher {
         }
 
         // Order-independent recovery: decide against the *final* state of `file_wd` after the entire
-        // drain-to-empty loop. A basename-matched parent record is the proof "the watched basename is
-        // back"; a bare file-side `IN_IGNORED` without a parent event is not a recovery signal (the
-        // file is gone, recreate hasn't happened yet), so we gate on `saw_basename_parent` rather
-        // than the weaker `real_seen`. `try_reopen` is idempotent and `ENOENT`-fast; a call on a
-        // not-yet-recreated file is cheap and the next basename-matched parent event retries.
+        // drain-to-empty loop. A basename-matched parent record is the proof "the watched basename
+        // is back"; a bare file-side `IN_IGNORED` without a parent event is not a recovery signal
+        // (the file is gone, recreate hasn't happened yet), so we gate on `saw_basename_parent`
+        // rather than the weaker `real_seen`. `try_reopen` is idempotent and `ENOENT`-fast; a call
+        // on a not-yet-recreated file is cheap and the next basename-matched parent event retries.
         if saw_basename_parent && self.file_wd.is_none() {
             self.try_reopen();
         }
@@ -492,8 +492,8 @@ mod tests {
     /// or the cap is hit. Used to flush a startup TOCTOU pulse (or coalesced setup events) so the
     /// test's subsequent edit lands on a clean drain.
     ///
-    /// Returns on the first non-`Ok(true)` outcome — `Ok(false)` (deadline expired with nothing
-    /// real, expected exit) or `Err` (caller-fatal; we just stop draining).
+    /// Returns on the first non-`Ok(true)` outcome — `Ok(false)` (deadline expired with nothing real,
+    /// expected exit) or `Err` (caller-fatal; we just stop draining).
     fn drain_quiet<W: ConfigWatcher>(w: &mut W) {
         for _ in 0..16 {
             let deadline = Instant::now() + Duration::from_millis(20);
@@ -536,17 +536,17 @@ mod tests {
         assert!(r, "atomic save must wake the watcher (Ok(true))");
 
         // Post-loop recovery against the invocation's final state: a coalesced drain containing the
-        // parent's basename-matched `IN_MOVED_TO` plus the file wd's `IN_IGNORED` restores
-        // `file_wd` in this same drain regardless of intra-batch ordering. A kernel-split fragment
-        // can leave `file_wd` holding a stale (but `Some`) wd; the end-to-end
-        // `atomic_save_then_in_place_edit` test catches that mode.
+        // parent's basename-matched `IN_MOVED_TO` plus the file wd's `IN_IGNORED` restores `file_wd`
+        // in this same drain regardless of intra-batch ordering. A kernel-split fragment can leave
+        // `file_wd` holding a stale (but `Some`) wd; the end-to-end `atomic_save_then_in_place_edit`
+        // test catches that mode.
         assert!(w.file_wd.is_some(), "atomic save must leave a live file wd");
     }
 
     /// End-to-end check that an atomic save followed by an in-place edit on the recreated file
     /// surfaces a second pulse. Requires the post-loop recovery to install a live file wd on the
-    /// new inode against any intra-batch ordering of the basename-matched parent record and the
-    /// file wd's `IN_IGNORED`; a stranded `file_wd = None` (or a stale wd on the dead inode) would
+    /// new inode against any intra-batch ordering of the basename-matched parent record and the file
+    /// wd's `IN_IGNORED`; a stranded `file_wd = None` (or a stale wd on the dead inode) would
     /// silently swallow the in-place edit and block the second drain past the watchdog.
     #[test]
     fn atomic_save_then_in_place_edit() {
@@ -576,8 +576,8 @@ mod tests {
             "post-loop reopen must restore the file wd on the new inode"
         );
 
-        // In-place edit on the recreated file pulses iff the file wd points at the new inode
-        // (rather than the unlinked old one or being null).
+        // In-place edit on the recreated file pulses iff the file wd points at the new inode (rather
+        // than the unlinked old one or being null).
         fs::write(&cfg, b"c").expect("in-place edit on recreated file");
         let r = fire_drain(&mut w, watchdog()).expect("drain ok");
         assert!(
@@ -596,8 +596,8 @@ mod tests {
         drain_quiet(&mut w);
 
         // Phase 1: delete. file_wd's IN_DELETE_SELF + IN_IGNORED; parent's IN_DELETE(specter.toml).
-        // Either or both events satisfy Ok(true). Multiple drain calls may be needed if events
-        // split across kernel batches.
+        // Either or both events satisfy Ok(true). Multiple drain calls may be needed if events split
+        // across kernel batches.
         fs::remove_file(&cfg).expect("unlink");
         assert!(
             fire_drain(&mut w, watchdog()).expect("drain ok"),
@@ -611,8 +611,8 @@ mod tests {
             "file_wd dropped after kernel IN_IGNORED"
         );
 
-        // Phase 2: recreate. Parent IN_CREATE(specter.toml) pulses; basename match → try_reopen
-        // runs after the drain loop.
+        // Phase 2: recreate. Parent IN_CREATE(specter.toml) pulses; basename match → try_reopen runs
+        // after the drain loop.
         fs::write(&cfg, b"c").expect("recreate");
         assert!(
             fire_drain(&mut w, watchdog()).expect("drain ok"),

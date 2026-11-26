@@ -3,8 +3,8 @@
 //! Single-threaded: one thread owns the [`InotifyWatcher`] value and drives every
 //! [`FsWatcher::watch`] / [`FsWatcher::unwatch`] / [`FsWatcher::drain_ready`] call. The inotify fd
 //! is exposed via [`AsFd`] so a reactor can register it for edge-triggered readiness; `drain_ready`
-//! is non-blocking and drains the inotify queue to empty on every call (satisfying the
-//! edge-triggered contract without caller discipline).
+//! is non-blocking and drains the inotify queue to empty on every call (satisfying the edge-triggered
+//! contract without caller discipline).
 //!
 //! # Drop semantics
 //!
@@ -19,19 +19,20 @@
 //! # Per-resource entry cache
 //!
 //! Each entry caches `(wd, mask, kind)`: the watch descriptor returned by `inotify_add_watch`, the
-//! kernel-side mask we last installed, and the fstat-verified inode shape (established at
-//! fresh-watch time; refreshed only on the slow path of [`InotifyWatcher::rewatch_inner`] — see its
-//! docstring). The triple is stored as a single struct (not three parallel maps keyed by
-//! `ResourceId`) so every install path writes it atomically and every teardown clears it atomically
-//! — the "forgot to update one of three maps" failure mode is unrepresentable. Mirror of kqueue's
-//! `KqueueEntry { fd, fflags, kind }`.
+//! kernel-side mask we last installed, and the fstat-verified inode shape (established at fresh-watch
+//! time; refreshed only on the slow path of [`InotifyWatcher::rewatch_inner`] — see its docstring).
+//! The triple is stored as a single struct (not three parallel maps keyed by `ResourceId`) so every
+//! install path writes it atomically and every teardown clears it atomically — the "forgot to update
+//! one of three maps" failure mode is unrepresentable. Mirror of kqueue's `KqueueEntry { fd, fflags,
+//! kind }`.
 //!
 //! A re-`watch()` with an unchanged mask short-circuits without a kernel install. The fast path
 //! (cached kind is `File` / `Dir`) short-circuits with **zero syscalls** — the cache predicts the
 //! install mask from `events × cached_kind` and the kernel's "replace mask" semantics on an existing
-//! path would produce identical bits. The slow path (cached kind is `Unknown`, the rare socket / fifo
-//! / device case) reopens and `fstat`s before the short-circuit check because the Unknown-collapse
-//! mask cannot be trusted to match the live inode shape. See [`InotifyWatcher::rewatch_inner`].
+//! path would produce identical bits. The slow path (cached kind is `Unknown`, the rare socket /
+//! fifo / device case) reopens and `fstat`s before the short-circuit check because the
+//! Unknown-collapse mask cannot be trusted to match the live inode shape. See
+//! [`InotifyWatcher::rewatch_inner`].
 
 use crate::inotify::{ffi, normalize, record, translate};
 use crate::{FsWatcher, WatchFailure, WatchFailureExt, WatcherEvent};
@@ -81,11 +82,12 @@ pub struct InotifyWatcher {
     /// Drain buffer for inotify event records. Sized at construction and reused across drains —
     /// `drain_ready` performs no allocation on the hot path.
     read_buf: Vec<u8>,
-    /// Per-drain dedup horizon. Cleared at the start of every [`FsWatcher::drain_ready`] call so the
-    /// kernel's `IN_MODIFY` + `IN_CLOSE_WRITE` pair (both normalising to [`FsEvent::ContentChanged`]
-    /// for the same resource) collapses to one emitted event — including when the kernel splits the
-    /// pair across separate `read_inotify` calls within the same drain-to-empty loop (the dedup
-    /// horizon spans every batch in one `drain_ready` invocation, not per batch).
+    /// Per-drain dedup horizon. Cleared at the start of every [`FsWatcher::drain_ready`] call so
+    /// the kernel's `IN_MODIFY` + `IN_CLOSE_WRITE` pair (both normalising to
+    /// [`FsEvent::ContentChanged`] for the same resource) collapses to one emitted event — including
+    /// when the kernel splits the pair across separate `read_inotify` calls within the same
+    /// drain-to-empty loop (the dedup horizon spans every batch in one `drain_ready` invocation,
+    /// not per batch).
     ///
     /// `Vec` rather than `BTreeSet`: a typical burst yields ~20–50 distinct `(ResourceId, FsEvent)`
     /// pairs, well inside the "linear scan beats logarithmic node-walk" regime — the comparisons
@@ -101,11 +103,11 @@ pub struct InotifyWatcher {
 /// - `wd` is the watch descriptor returned by `inotify_add_watch`. Stable across same-inode
 ///   re-installs (the kernel's "replace mask" semantics return the same wd); changes on inode-swap
 ///   — see the `wd != prior.wd` branch in the re-watch path.
-/// - `mask` is the exact bits last passed to `inotify_add_watch`, including install-time
-///   directional flags like `IN_ONLYDIR` for Dir watches. A re-`watch()` recomputes the mask from
-///   the user's `events` set and the cached / observed kind; an unchanged mask short-circuits
-///   without a kernel install (zero syscalls on the fast path, one open + fstat pair on the slow
-///   path — see [`InotifyWatcher::rewatch_inner`]).
+/// - `mask` is the exact bits last passed to `inotify_add_watch`, including install-time directional
+///   flags like `IN_ONLYDIR` for Dir watches. A re-`watch()` recomputes the mask from the user's
+///   `events` set and the cached / observed kind; an unchanged mask short-circuits without a kernel
+///   install (zero syscalls on the fast path, one open + fstat pair on the slow path — see
+///   [`InotifyWatcher::rewatch_inner`]).
 /// - `kind` is the fstat-verified inode shape, closing the TOCTOU window between the engine's
 ///   `WatchOp::Watch.kind` and the kernel's path-resolution at install time. Established at
 ///   fresh-watch time and refreshed only on the slow path of [`InotifyWatcher::rewatch_inner`] —
@@ -117,10 +119,10 @@ pub struct InotifyWatcher {
 ///   disambiguate `IN_MODIFY` on Dir vs File defensive paths.
 ///
 /// Stored as a single struct so the triple is atomic: every install path writes all three fields
-/// together, every teardown clears them together. Mirror of kqueue's `KqueueEntry { fd, fflags,
-/// kind }` — inotify's `kind` is *almost* invariant the way kqueue's strictly is; the asymmetry
-/// tracks the underlying substrate (inotify reopens per rewatch via `/proc/self/fd/N`; kqueue binds
-/// an fd per resource).
+/// together, every teardown clears them together. Mirror of kqueue's `KqueueEntry { fd, fflags, kind
+/// }` — inotify's `kind` is *almost* invariant the way kqueue's strictly is; the asymmetry tracks
+/// the underlying substrate (inotify reopens per rewatch via `/proc/self/fd/N`; kqueue binds an fd
+/// per resource).
 #[derive(Debug, Clone, Copy)]
 struct InotifyEntry {
     wd: libc::c_int,
@@ -148,8 +150,8 @@ impl InotifyWatcher {
     /// `io::Error` set into a typed [`WatchFailure`] at the boundary so `?` propagation across the
     /// open / fstat / add_watch chain stays uniform.
     ///
-    /// - `by_resource[r]` populated → [`Self::rewatch_inner`] (re-register on the same
-    ///   `ResourceId`, with inode-swap detection).
+    /// - `by_resource[r]` populated → [`Self::rewatch_inner`] (re-register on the same `ResourceId`,
+    ///   with inode-swap detection).
     /// - `by_resource[r]` empty → [`Self::fresh_watch_inner`] (open + fstat verify + install).
     ///
     /// The engine-supplied `kind` is structurally irrelevant on rewatch (both backends ignore it;
@@ -174,8 +176,8 @@ impl InotifyWatcher {
     ///
     /// Splits on the cached kind:
     ///
-    /// - **Fast path** (`cached_kind ∈ { File, Dir }`). The cache is structurally reliable: an
-    ///   inode swap under the path queues `IN_DELETE_SELF` / `IN_UNMOUNT` on the prior wd, the next
+    /// - **Fast path** (`cached_kind ∈ { File, Dir }`). The cache is structurally reliable: an inode
+    ///   swap under the path queues `IN_DELETE_SELF` / `IN_UNMOUNT` on the prior wd, the next
     ///   `drain_ready` reaps `by_resource[r]` via the `IN_IGNORED` cleanup arm, and a subsequent
     ///   `Watch` re-enters through `fresh_watch_inner` — so re-entry to *this* function means the
     ///   cached kind still matches the live inode. The install mask is predictable from `events ×
@@ -188,10 +190,10 @@ impl InotifyWatcher {
     ///   non-Dir / non-regular (socket / fifo / device). The Unknown-collapse install mask is
     ///   File-shape (via [`ResourceKind::effective`]); if an inode swap mutates the path to a Dir /
     ///   File without an intervening drain, predicting the mask from `cached_kind == Unknown` would
-    ///   silently install File-shape bits on a Dir (missing `IN_CREATE` / `IN_DELETE` /
-    ///   `IN_MOVED_*` / `IN_ONLYDIR`). This branch always reopens + fstats first, derives the
-    ///   install mask from the observed kind, and refreshes the cached kind on commit. No
-    ///   `matches_or_unknown` gate — `Unknown` is the wildcard.
+    ///   silently install File-shape bits on a Dir (missing `IN_CREATE` / `IN_DELETE` / `IN_MOVED_*`
+    ///   / `IN_ONLYDIR`). This branch always reopens + fstats first, derives the install mask from
+    ///   the observed kind, and refreshes the cached kind on commit. No `matches_or_unknown` gate —
+    ///   `Unknown` is the wildcard.
     ///
     /// Doesn't take the engine-supplied `kind` — the cached / observed value is the source of truth
     /// on rewatch (kqueue's rewatch is the same shape by construction; inotify mirrors it).
@@ -214,9 +216,9 @@ impl InotifyWatcher {
         self.rewatch_fast_known(r, path, events, prior)
     }
 
-    /// Fast-path rewatch for `cached_kind ∈ { File, Dir }`. Predicts the install mask from the
-    /// cache; short-circuits with zero syscalls on no diff. See [`Self::rewatch_inner`] for the
-    /// branch's structural invariants.
+    /// Fast-path rewatch for `cached_kind ∈ { File, Dir }`. Predicts the install mask from the cache;
+    /// short-circuits with zero syscalls on no diff. See [`Self::rewatch_inner`] for the branch's
+    /// structural invariants.
     fn rewatch_fast_known(
         &mut self,
         r: ResourceId,
@@ -277,8 +279,8 @@ impl InotifyWatcher {
 
         // Genuine noop: mask unchanged AND the inode is still non-classifiable. Skip the kernel
         // install; the cache stays at Unknown so the next rewatch re-checks. The mask-equal check
-        // alone is not sufficient — a flip from Unknown to File can produce the same File-shape
-        // mask but must still refresh the cached kind so future rewatches take the fast path.
+        // alone is not sufficient — a flip from Unknown to File can produce the same File-shape mask
+        // but must still refresh the cached kind so future rewatches take the fast path.
         if install_mask == prior.mask && matches!(observed_kind, ResourceKind::Unknown) {
             tracing::trace!(
                 ?r,
@@ -299,10 +301,10 @@ impl InotifyWatcher {
     /// `kind` is the value to store in the refreshed entry — the fast path passes the (invariant)
     /// `prior.kind`; the slow path passes the freshly observed kind.
     ///
-    /// Failure shape: `inotify_add_watch_fd` errors propagate before any state mutation. A
-    /// successful add followed by hardlink-aliasing rejection routes through
-    /// [`Self::reject_aliased_install`], which restores the aliased resource's mask and clears
-    /// `r`'s entry — the engine sees a clean unwatched state for `r`.
+    /// Failure shape: `inotify_add_watch_fd` errors propagate before any state mutation. A successful
+    /// add followed by hardlink-aliasing rejection routes through [`Self::reject_aliased_install`],
+    /// which restores the aliased resource's mask and clears `r`'s entry — the engine sees a clean
+    /// unwatched state for `r`.
     fn commit_rewatch(
         &mut self,
         r: ResourceId,
@@ -328,8 +330,8 @@ impl InotifyWatcher {
             self.by_wd.remove(&prior.wd);
             if let Err(e) = ffi::inotify_rm_watch(&self.inotify_fd, prior.wd) {
                 // EINVAL ⇒ kernel already reaped the wd (the old inode was deleted out from under
-                // us). The `IN_IGNORED` was queued synchronously and will arrive on the drain
-                // stream; `draining_wds` covers the gap.
+                // us). The `IN_IGNORED` was queued synchronously and will arrive on the drain stream;
+                // `draining_wds` covers the gap.
                 if e.raw_os_error() != Some(libc::EINVAL) {
                     tracing::warn!(
                         ?r,
@@ -379,8 +381,8 @@ impl InotifyWatcher {
     /// `kind`; a kind disagreement maps to `ENOTDIR`, which the trait wrapper classifies as
     /// [`WatchFailure::Resource`] so the engine routes through the path-fatal recovery channel.
     ///
-    /// On hardlink aliasing (a second `ResourceId` resolving to the same inode as an existing
-    /// entry), the kernel returns the already-allocated wd; the install is rejected and
+    /// On hardlink aliasing (a second `ResourceId` resolving to the same inode as an existing entry),
+    /// the kernel returns the already-allocated wd; the install is rejected and
     /// [`Self::reject_aliased_install`] restores the existing resource's mask.
     ///
     /// # Precondition
@@ -417,9 +419,9 @@ impl InotifyWatcher {
         }
 
         // 4) Compute the install mask using the verified kind. `compute_install_mask` ORs
-        //    `IN_ONLYDIR` for Dir watches as defense-in-depth — the fstat already confirmed
-        //    Dir-ness and the `/proc/self/fd/N` install is race-free, but the kernel-side guard is
-        //    a free belt-and-braces safety net.
+        //    `IN_ONLYDIR` for Dir watches as defense-in-depth — the fstat already confirmed Dir-ness
+        //    and the `/proc/self/fd/N` install is race-free, but the kernel-side guard is a free
+        //    belt-and-braces safety net.
         let install_mask = compute_install_mask(events, observed_kind);
 
         // 5) Install via the fused FFI helper. The kernel's procfs resolver returns the exact inode
@@ -428,8 +430,8 @@ impl InotifyWatcher {
         let wd = ffi::inotify_add_watch_fd(&self.inotify_fd, &fd, install_mask)?;
 
         // 6) Hardlink aliasing guard — see [`Self::reject_aliased_install`]. `fd` is intentionally
-        //    still alive here so the helper can re-use the same `O_PATH` fd for the kernel-side
-        //    mask restoration on the existing resource's behalf.
+        //    still alive here so the helper can re-use the same `O_PATH` fd for the kernel-side mask
+        //    restoration on the existing resource's behalf.
         if let Some(&existing) = self.by_wd.get(&wd)
             && existing != r
         {
@@ -468,8 +470,8 @@ impl InotifyWatcher {
     /// is one kernel-side watch entry per `(inotify_fd, inode)` pair (per `inotify(7)`'s "the
     /// existing watch is updated" semantics). v1 rejects the second attachment, but the just-issued
     /// `inotify_add_watch` has already clobbered the existing watch's mask with the new resource's
-    /// requested mask (the kernel's "replace mask" semantics). A naive `inotify_rm_watch` would
-    /// tear down the existing resource's kernel-side registration entirely; the safe recovery is to
+    /// requested mask (the kernel's "replace mask" semantics). A naive `inotify_rm_watch` would tear
+    /// down the existing resource's kernel-side registration entirely; the safe recovery is to
     /// restore the existing resource's mask via a follow-up [`ffi::inotify_add_watch_fd`] on the
     /// same `O_PATH` fd. The restoration is best-effort; on failure the existing resource's mask
     /// remains the rejected resource's requested mask until its next reconcile triggers a re-add —
@@ -526,8 +528,8 @@ impl InotifyWatcher {
 
 impl FsWatcher for InotifyWatcher {
     /// Trait wrapper around [`Self::watch_inner`]: classifies the inner `io::Error` into a typed
-    /// [`WatchFailure`] at the boundary so the engine demuxes on the variant rather than on raw
-    /// errno values. The errno-name match lives in [`crate::WatchFailureExt::from_io`]; the
+    /// [`WatchFailure`] at the boundary so the engine demuxes on the variant rather than on raw errno
+    /// values. The errno-name match lives in [`crate::WatchFailureExt::from_io`]; the
     /// inotify-specific vocabulary stops at this seam.
     fn watch(
         &mut self,
@@ -565,8 +567,8 @@ impl FsWatcher for InotifyWatcher {
         // at rm_watch time; pre-existing events on `wd` that haven't reached our drain buffer yet
         // are stale (the inode is no longer the ResourceId's intent), and a subsequent
         // `inotify_add_watch` from a fresh `watch()` call may return the same `wd` for an unrelated
-        // inode before our drain consumes the `IN_IGNORED`. The flag drops every event on `wd`
-        // until the `IN_IGNORED` arrives and reaps it.
+        // inode before our drain consumes the `IN_IGNORED`. The flag drops every event on `wd` until
+        // the `IN_IGNORED` arrives and reaps it.
         self.draining_wds.insert(wd);
 
         // Drop the `by_wd` entry NOW. A subsequent `watch()` on the same kernel-reused wd installs
@@ -576,9 +578,9 @@ impl FsWatcher for InotifyWatcher {
 
         if let Err(e) = ffi::inotify_rm_watch(&self.inotify_fd, wd) {
             // EINVAL ⇒ kernel had already reaped the wd (the inode was deleted before our explicit
-            // `rm_watch`). The `IN_IGNORED` was queued at deletion time and will arrive on the
-            // drain stream; `draining_wds` covers the gap. Anything else is unexpected and worth a
-            // warn — EBADF on inotify_fd, for instance, would be a structural break.
+            // `rm_watch`). The `IN_IGNORED` was queued at deletion time and will arrive on the drain
+            // stream; `draining_wds` covers the gap. Anything else is unexpected and worth a warn —
+            // EBADF on inotify_fd, for instance, would be a structural break.
             if e.raw_os_error() != Some(libc::EINVAL) {
                 tracing::warn!(
                     ?r,
@@ -592,21 +594,21 @@ impl FsWatcher for InotifyWatcher {
         tracing::debug!(?r, wd, "inotify unwatch");
     }
 
-    /// Non-blocking drain-to-empty of the inotify queue. Loops on [`ffi::read_inotify`] (which
-    /// under `IN_NONBLOCK` returns `Ok(0)` on an empty queue) until the kernel signals `EAGAIN`,
-    /// demuxing each record onto `out`.
+    /// Non-blocking drain-to-empty of the inotify queue. Loops on [`ffi::read_inotify`] (which under
+    /// `IN_NONBLOCK` returns `Ok(0)` on an empty queue) until the kernel signals `EAGAIN`, demuxing
+    /// each record onto `out`.
     ///
     /// The drain-to-empty loop is the structural enforcement of the edge-triggered contract: with
-    /// the inotify fd registered in the reactor's edge-triggered mode, residual records would
-    /// strand future events until the next edge transition. The loop terminates only when
+    /// the inotify fd registered in the reactor's edge-triggered mode, residual records would strand
+    /// future events until the next edge transition. The loop terminates only when
     /// [`ffi::read_inotify`] returns `0`, guaranteeing the kernel-side queue is empty.
     ///
     /// **Dedup horizon ([`Self::seen`]).** Cleared at entry, then scanned per emitted record so the
-    /// kernel's `IN_MODIFY` + `IN_CLOSE_WRITE` pair (both normalising to
-    /// [`FsEvent::ContentChanged`] for the same resource) collapses to one emitted event. The
-    /// horizon spans every `read_inotify` call within this `drain_ready` invocation — kernel-split
-    /// fragments of one logical burst dedup correctly. First-write wins; the natural FIFO order
-    /// from the kernel matches the emission order.
+    /// kernel's `IN_MODIFY` + `IN_CLOSE_WRITE` pair (both normalising to [`FsEvent::ContentChanged`]
+    /// for the same resource) collapses to one emitted event. The horizon spans every `read_inotify`
+    /// call within this `drain_ready` invocation — kernel-split fragments of one logical burst dedup
+    /// correctly. First-write wins; the natural FIFO order from the kernel matches the emission
+    /// order.
     ///
     /// **Per-record demux.** Each record routes by mask:
     ///
@@ -618,14 +620,14 @@ impl FsWatcher for InotifyWatcher {
     ///    `inotify_rm_watch` (the flag is cleared here), or a kernel-side spontaneous reap (the
     ///    watched inode was deleted/unmounted — clear per-resource state so the engine's eventual
     ///    `Unwatch` finds a clean slate).
-    /// 3. **Stale event on a draining wd** — pre-rm events on a wd whose `IN_IGNORED` hasn't
-    ///    arrived yet. Dropped to close the wd-reuse race with a subsequent `inotify_add_watch`.
+    /// 3. **Stale event on a draining wd** — pre-rm events on a wd whose `IN_IGNORED` hasn't arrived
+    ///    yet. Dropped to close the wd-reuse race with a subsequent `inotify_add_watch`.
     /// 4. **Normal event** — resolve `wd → ResourceId`, normalize via
     ///    [`normalize::mask_to_fs_event`], dedupe via `self.seen`, push as [`WatcherEvent::Fs`].
     ///
     /// **Errors.** `EINTR` retry lives inside [`ffi::read_inotify`]. Any other syscall error
-    /// classifies through [`WatchFailureExt::from_io`] and terminates the drain mid-stream; `out` may
-    /// be partially populated on `Err`. The caller treats any `Err` as terminal for the watcher.
+    /// classifies through [`WatchFailureExt::from_io`] and terminates the drain mid-stream; `out`
+    /// may be partially populated on `Err`. The caller treats any `Err` as terminal for the watcher.
     fn drain_ready(&mut self, out: &mut Vec<WatcherEvent>) -> Result<usize, WatchFailure> {
         // Reset the dedup horizon. `Vec::clear` preserves capacity, so only the first few drains
         // pay any allocation cost; subsequent calls reuse the stabilised buffer. See [`Self::seen`]
@@ -655,20 +657,20 @@ impl FsWatcher for InotifyWatcher {
                 if rec.mask & libc::IN_IGNORED != 0 {
                     let was_draining = self.draining_wds.remove(&rec.wd);
                     if !was_draining && let Some(r) = self.by_wd.remove(&rec.wd) {
-                        // Spontaneous reap: the kernel destroyed the watch because the watched
-                        // inode was deleted/unmounted (the preceding IN_DELETE_SELF / IN_UNMOUNT
-                        // already emitted Removed / Revoked to the engine). Clear the entry so a
-                        // subsequent `unwatch(r)` from the engine's tear-down sees the stale-id
-                        // branch and short-circuits, and so a future kernel-side wd reuse cannot
-                        // mis-attribute events through a stale `by_wd[wd]` mapping.
+                        // Spontaneous reap: the kernel destroyed the watch because the watched inode
+                        // was deleted/unmounted (the preceding IN_DELETE_SELF / IN_UNMOUNT already
+                        // emitted Removed / Revoked to the engine). Clear the entry so a subsequent
+                        // `unwatch(r)` from the engine's tear-down sees the stale-id branch and
+                        // short-circuits, and so a future kernel-side wd reuse cannot mis-attribute
+                        // events through a stale `by_wd[wd]` mapping.
                         self.by_resource.remove(r);
                     }
                     continue;
                 }
 
                 // 3. Stale event on a draining wd: the rm_watch was issued but IN_IGNORED hasn't
-                //    arrived yet. Pre-rm events on this wd belong to the prior inode; drop.
-                //    Engine's reconcile-on-next-probe corrects any state drift.
+                //    arrived yet. Pre-rm events on this wd belong to the prior inode; drop. Engine's
+                //    reconcile-on-next-probe corrects any state drift.
                 if self.draining_wds.contains(&rec.wd) {
                     continue;
                 }
@@ -710,8 +712,8 @@ impl FsWatcher for InotifyWatcher {
 
                 // Per-drain dedup over `(ResourceId, FsEvent)`. First-write wins, so the kernel's
                 // `IN_MODIFY` precedes its `IN_CLOSE_WRITE` in the emitted stream — matching the
-                // natural FIFO drain order. Linear scan rather than a sorted set; see
-                // [`Self::seen`] for the sizing rationale.
+                // natural FIFO drain order. Linear scan rather than a sorted set; see [`Self::seen`]
+                // for the sizing rationale.
                 let key = (r, fs_event);
                 if self.seen.contains(&key) {
                     continue;
@@ -740,13 +742,13 @@ impl AsFd for InotifyWatcher {
 /// Compute the kernel-side `inotify_add_watch` mask, including the install-time directional flags.
 ///
 /// Wraps [`translate::class_set_to_mask`] (the pure event-mask translation: identity floor +
-/// defensive flags + per-class bits) and ORs `IN_ONLYDIR` for Dir watches. `IN_ONLYDIR` is
-/// documented as a directional flag rather than an event bit (per `inotify(7)`); it belongs in the
-/// watcher because it lives outside the [`crate::ClassSet`] vocabulary.
+/// defensive flags + per-class bits) and ORs `IN_ONLYDIR` for Dir watches. `IN_ONLYDIR` is documented
+/// as a directional flag rather than an event bit (per `inotify(7)`); it belongs in the watcher
+/// because it lives outside the [`crate::ClassSet`] vocabulary.
 ///
 /// `IN_ONLYDIR` is defense-in-depth under the watcher's `O_PATH | /proc/self/fd/N` install — the fd
-/// already binds to a specific inode and the fstat verification has already confirmed Dir-ness — but
-/// the kernel-side guard catches any race the userspace chain missed and is free at install time.
+/// already binds to a specific inode and the fstat verification has already confirmed Dir-ness —
+/// but the kernel-side guard catches any race the userspace chain missed and is free at install time.
 #[must_use]
 const fn compute_install_mask(events: ClassSet, kind: ResourceKind) -> u32 {
     let mut mask = translate::class_set_to_mask(events, kind);

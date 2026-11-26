@@ -20,8 +20,8 @@ use std::num::NonZeroUsize;
 pub struct Permits {
     /// Receiver side: acquiring a token consumes one.
     rx: Receiver<()>,
-    /// Sender side: releasing a token (via [`Permit::drop`]) returns one. Cloned into each
-    /// [`Permit`] to keep RAII Drop simple.
+    /// Sender side: releasing a token (via [`Permit::drop`]) returns one. Cloned into each [`Permit`]
+    /// to keep RAII Drop simple.
     tx: Sender<()>,
 }
 
@@ -38,8 +38,8 @@ impl Permits {
         Self { rx, tx }
     }
 
-    /// Non-blocking acquire. Returns `Some(Permit)` if a token was available; `None` if the
-    /// semaphore is at capacity.
+    /// Non-blocking acquire. Returns `Some(Permit)` if a token was available; `None` if the semaphore
+    /// is at capacity.
     #[must_use]
     pub fn try_acquire(&self) -> Option<Permit> {
         match self.rx.try_recv() {
@@ -60,10 +60,10 @@ pub struct Permit {
 
 impl Drop for Permit {
     fn drop(&mut self) {
-        // Under our invariant we hold one of N tokens, so the channel can never be at capacity
-        // here. `Full` ⇒ double-drop or accounting bug — `debug_assert` in dev, silent in release
-        // (discard the token rather than deadlock). `Disconnected` ⇒ [`Permits`] dropped first
-        // (actuator teardown); the token vanishes with the already-gone semaphore.
+        // Under our invariant we hold one of N tokens, so the channel can never be at capacity here.
+        // `Full` ⇒ double-drop or accounting bug — `debug_assert` in dev, silent in release (discard
+        // the token rather than deadlock). `Disconnected` ⇒ [`Permits`] dropped first (actuator
+        // teardown); the token vanishes with the already-gone semaphore.
         if self.tx.try_send(()) == Err(TrySendError::Full(())) {
             debug_assert!(
                 false,

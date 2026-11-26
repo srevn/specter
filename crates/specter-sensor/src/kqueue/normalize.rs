@@ -17,12 +17,12 @@
 //! `..` backref count change); on a File it's a metadata signal (hardlink count change via
 //! `ln`/`unlink`). Placed before WRITE/EXTEND in the priority order so a coalesced `(LINK | WRITE)`
 //! kevent on a File maps to `MetadataChanged` rather than `ContentChanged`. On a Dir both branches
-//! collapse to `StructureChanged` so ordering is observationally irrelevant — but placing LINK
-//! first makes the structural intent explicit.
+//! collapse to `StructureChanged` so ordering is observationally irrelevant — but placing LINK first
+//! makes the structural intent explicit.
 //!
 //! `flags` carries `EV_*` bits (e.g., `EV_EOF` from the kernel's auto-detach signal); v1 ignores
-//! them. The terminal `FsEvent` is the only signal the engine acts on, and `EV_EOF` always
-//! coincides with a terminal `fflag`.
+//! them. The terminal `FsEvent` is the only signal the engine acts on, and `EV_EOF` always coincides
+//! with a terminal `fflag`.
 
 use libc::{
     NOTE_ATTRIB, NOTE_DELETE, NOTE_EXTEND, NOTE_LINK, NOTE_RENAME, NOTE_REVOKE, NOTE_WRITE,

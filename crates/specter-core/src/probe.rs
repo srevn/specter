@@ -9,8 +9,8 @@
 //!
 //! [`ProbeSlot::disarm`] is the one consume primitive: it takes the slot idle and yields the prior
 //! correlation. Routing a correlation to a dispatch handler is "disarm, then act on the returned
-//! correlation" — once disarmed, the same correlation cannot be routed again, because it is no
-//! longer in the slot.
+//! correlation" — once disarmed, the same correlation cannot be routed again, because it is no longer
+//! in the slot.
 //!
 //! "At most one probe per owner" is a representability property: one owner-state carrier holds
 //! exactly one slot, so two simultaneous probes for one carrier are unconstructable. The slot is
@@ -18,8 +18,8 @@
 //! *re-acquire* with an unconditional assert — re-arming a still-armed slot would orphan the prior
 //! correlation (its response would then be rejected as stale even though the engine asked for it).
 //! The [`Drop`] tripwire backstops *destroy* with the same discipline — a slot dropped while still
-//! armed orphans its correlation identically, so it crashes just as loudly. Convention is not
-//! relied on at either edge.
+//! armed orphans its correlation identically, so it crashes just as loudly. Convention is not relied
+//! on at either edge.
 
 use crate::ids::ProbeCorrelation;
 
@@ -44,29 +44,29 @@ pub struct ProbeSlot {
     inner: Option<ProbeCorrelation>,
 }
 
-/// The *destroy*-edge linearity guard — the structural dual of [`ProbeSlot::arm`]'s
-/// *re-acquire*-edge assert. An armed slot reaching drop means its correlation was never consumed:
-/// the engine emitted a probe whose response will now stale-detect, silently drifting the fire it
-/// gates. That is the same failure class and severity as a double-`arm`, so it crashes loudly in
-/// every build (operator-visible, fail-stop) rather than letting a daemon whose whole purpose is a
-/// trustworthy absence-of-change proof carry on with a broken one. `core` forbids I/O, so there is
-/// no fallback log; the panic carries the orphaned correlation for triage.
+/// The *destroy*-edge linearity guard — the structural dual of [`ProbeSlot::arm`]'s *re-acquire*-edge
+/// assert. An armed slot reaching drop means its correlation was never consumed: the engine emitted
+/// a probe whose response will now stale-detect, silently drifting the fire it gates. That is the
+/// same failure class and severity as a double-`arm`, so it crashes loudly in every build
+/// (operator-visible, fail-stop) rather than letting a daemon whose whole purpose is a trustworthy
+/// absence-of-change proof carry on with a broken one. `core` forbids I/O, so there is no fallback
+/// log; the panic carries the orphaned correlation for triage.
 ///
 /// `!panicking()` is the *only* reason the crash is conditional: a second panic while already
-/// unwinding aborts the process and masks the first failure — strictly less diagnosable, the
-/// opposite of the intent. The engine `step` is single-threaded, so an orphan observed only during
-/// an unrelated unwind is moot — no further step runs, **because no `catch_unwind` wraps the engine
+/// unwinding aborts the process and masks the first failure — strictly less diagnosable, the opposite
+/// of the intent. The engine `step` is single-threaded, so an orphan observed only during an
+/// unrelated unwind is moot — no further step runs, **because no `catch_unwind` wraps the engine
 /// driver: a mid-`step` panic terminates the process** (the driver's `run`/`tick` carry a matching
 /// no-`catch_unwind` note). The `catch_unwind`s that *do* exist (sensor prober workers, actuator
 /// pipe/pool waiters, the bin's watcher / config-watcher / actuator supervision loops) are all on
 /// threads that hold no `ProbeSlot`; this silence-in-unwind carve-out depends on that separation.
 ///
-/// This is the **sole** explicit `Drop` in `core`/`engine`. Every enclosing carrier
-/// (`PreFirePhase`, `PostFirePhase`, `PreFireBurst`, `PostFireBurst`, `ProfileState`,
-/// `DescentState`, …) reaches this guard through auto drop-glue, *not* its own `impl Drop`: partial
-/// moves out of those carriers (draining a sibling field at burst-end) depend on the absence of an
-/// explicit `Drop` (E0509). An `impl Drop` anywhere up the tree would both break those moves and be
-/// redundant — drop-glue already propagates this tripwire.
+/// This is the **sole** explicit `Drop` in `core`/`engine`. Every enclosing carrier (`PreFirePhase`,
+/// `PostFirePhase`, `PreFireBurst`, `PostFireBurst`, `ProfileState`, `DescentState`, …) reaches this
+/// guard through auto drop-glue, *not* its own `impl Drop`: partial moves out of those carriers
+/// (draining a sibling field at burst-end) depend on the absence of an explicit `Drop` (E0509). An
+/// `impl Drop` anywhere up the tree would both break those moves and be redundant — drop-glue already
+/// propagates this tripwire.
 impl Drop for ProbeSlot {
     fn drop(&mut self) {
         let Some(correlation) = &self.inner else {
@@ -109,8 +109,8 @@ impl ProbeSlot {
     }
 
     /// Arm an idle slot. Unconditional assert on a double-arm: a re-arm without an intervening
-    /// [`Self::disarm`] would orphan the prior correlation, so this is a programming error that
-    /// must surface in every build, not a silent overwrite.
+    /// [`Self::disarm`] would orphan the prior correlation, so this is a programming error that must
+    /// surface in every build, not a silent overwrite.
     pub fn arm(&mut self, c: ProbeCorrelation) {
         assert!(
             self.inner.is_none(),
@@ -213,9 +213,9 @@ mod tests {
     }
 
     /// Dropping an **armed** slot (not during an unwind) trips the linearity tripwire: it panics,
-    /// and the payload names both the "dropped while armed" class and the orphaned correlation.
-    /// This is the *destroy*-edge dual of the double-`arm` assert — an armed slot reaching drop
-    /// orphans its correlation just as a re-arm would.
+    /// and the payload names both the "dropped while armed" class and the orphaned correlation. This
+    /// is the *destroy*-edge dual of the double-`arm` assert — an armed slot reaching drop orphans
+    /// its correlation just as a re-arm would.
     #[test]
     fn drop_while_armed_panics_with_orphaned_correlation() {
         let panicked = catch_unwind(AssertUnwindSafe(|| {
@@ -258,8 +258,8 @@ mod tests {
     /// The `!std::thread::panicking()` guard: an armed slot dropped *while a panic is already
     /// unwinding* must stay silent, so the original panic propagates intact rather than a
     /// double-panic aborting the process and masking it. The holder's armed slot drops as the
-    /// `"primary"` unwind tears the frame down; the caught payload must still be `"primary"`,
-    /// proving the ProbeSlot `Drop` observed `panicking() == true` and did not abort.
+    /// `"primary"` unwind tears the frame down; the caught payload must still be `"primary"`, proving
+    /// the ProbeSlot `Drop` observed `panicking() == true` and did not abort.
     #[test]
     fn drop_while_armed_during_unwind_does_not_double_panic() {
         struct Holder {

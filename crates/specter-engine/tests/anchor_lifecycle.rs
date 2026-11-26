@@ -10,13 +10,13 @@
 //! safely, a descendant-LCA `Vanished` resolves a live anchor in one hop, and a delete-then-write
 //! save parks the descent (narrated) until the create lands.
 //!
-//! The probe-shape pins: `discard_anchor_state` clears `Profile.kind` at every loss, so a stale
-//! kind cannot misroute the recovery probe (`Some(File)` against a recreated-as-Dir slot would emit
-//! a wasted `ProbeRequest::AnchorFile`). The two loss flavors then diverge:
+//! The probe-shape pins: `discard_anchor_state` clears `Profile.kind` at every loss, so a stale kind
+//! cannot misroute the recovery probe (`Some(File)` against a recreated-as-Dir slot would emit a
+//! wasted `ProbeRequest::AnchorFile`). The two loss flavors then diverge:
 //!
 //! - **Observed loss**: the parent's directory listing re-classifies the anchor's kind *before* any
-//!   anchor probe is emitted — the recovery Seed probes with the freshly-observed shape in both
-//!   flip directions (File→Dir ⇒ Subtree; Dir→File ⇒ AnchorFile), one anchor probe per recovery.
+//!   anchor probe is emitted — the recovery Seed probes with the freshly-observed shape in both flip
+//!   directions (File→Dir ⇒ Subtree; Dir→File ⇒ AnchorFile), one anchor probe per recovery.
 //! - **Probe `Failed`**: the Profile parks anchorless (`ProfileState::Parked`) with `kind = None`.
 //!   A recovery event at the anchor slot re-enters descent through the event-scan recovery arm; the
 //!   re-classifying descent feeds the kind-agnostic Subtree arm of the materialised Seed.
@@ -112,8 +112,8 @@ fn replace_cycle(
         );
         assert!(p.current().is_none());
     }
-    // Parent STRUCTURE event (the rename's dir notification): the live descent absorbs it — the
-    // latch is already set and the I5 gate drops the re-probe.
+    // Parent STRUCTURE event (the rename's dir notification): the live descent absorbs it — the latch
+    // is already set and the I5 gate drops the re-probe.
     let t2 = t1 + Duration::from_millis(1);
     let _ = e.step(
         Input::FsEvent {
@@ -143,13 +143,13 @@ fn replace_cycle(
 
 #[test]
 fn recovery_from_file_to_dir_anchor_uses_subtree_probe() {
-    // Multi-Profile sharing a File-classified anchor. Profile P loses its anchor via probe
-    // Vanished; `discard_anchor_state` clears `kind`. With Q's anchor claim keeping the watch
-    // alive, a subsequent FsEvent at the anchor routes through `drive_burst` into
-    // `start_seed_burst` for P (Idle, current=None). Post-fix: kind=None, start_seed_burst routes
-    // through the kind-agnostic Subtree arm — recovery in one round-trip via descent regardless of
-    // the recreated anchor's shape. Pre-fix the cached `Some(File)` misrouted as a
-    // `ProbeRequest::AnchorFile` and wasted a round-trip.
+    // Multi-Profile sharing a File-classified anchor. Profile P loses its anchor via probe Vanished;
+    // `discard_anchor_state` clears `kind`. With Q's anchor claim keeping the watch alive, a
+    // subsequent FsEvent at the anchor routes through `drive_burst` into `start_seed_burst` for P
+    // (Idle, current=None). Post-fix: kind=None, start_seed_burst routes through the kind-agnostic
+    // Subtree arm — recovery in one round-trip via descent regardless of the recreated anchor's
+    // shape. Pre-fix the cached `Some(File)` misrouted as a `ProbeRequest::AnchorFile` and wasted a
+    // round-trip.
     let mut e = Engine::new();
     let parent = e.tree_mut().ensure_root("var", ResourceRole::User);
     e.tree_mut().set_kind(parent, ResourceKind::Dir);
@@ -203,8 +203,8 @@ fn recovery_from_file_to_dir_anchor_uses_subtree_probe() {
     assert_eq!(e.tree().get(anchor).unwrap().watch_demand(), 2);
 
     // Expire P's first settle window → first Seed probe, then drive it to Vanished.
-    // discard_anchor_state clears P.kind, P.current, P.baseline, P.anchor_claim. Vanished
-    // terminates the Seed on its first response.
+    // discard_anchor_state clears P.kind, P.current, P.baseline, P.anchor_claim. Vanished terminates
+    // the Seed on its first response.
     let (p_corr, p_at) = assert_seed_verifying(&mut e, pid_p, t_p);
     e.step(
         Input::ProbeResponse(ProbeResponse {
@@ -244,8 +244,8 @@ fn recovery_from_file_to_dir_anchor_uses_subtree_probe() {
     );
 
     // Expire the recovery Seed's settle window → the recovery Seed probe materializes. The
-    // freshly-observed Dir routes it through the Subtree arm; a stale `Some(File)` would have
-    // emitted a `ProbeRequest::AnchorFile`.
+    // freshly-observed Dir routes it through the Subtree arm; a stale `Some(File)` would have emitted
+    // a `ProbeRequest::AnchorFile`.
     let probe_at = mat_at + SETTLE;
     let mut p_probe_out = None;
     while let Some(en) = e.pop_expired(probe_at) {
@@ -427,8 +427,8 @@ fn anchor_loss_via_probe_failed_clears_kind_and_recovers_via_subtree() {
         "cold-arm Seed: probe emitted at burst construction",
     );
 
-    // Expire P's first settle window → first Seed probe; drive it to Failed.
-    // dispatch_pre_fire_failed clears P.kind and terminates the Seed on its first response.
+    // Expire P's first settle window → first Seed probe; drive it to Failed. dispatch_pre_fire_failed
+    // clears P.kind and terminates the Seed on its first response.
     let (p_corr, p_at) = assert_seed_verifying(&mut e, pid_p, t_p);
     e.step(
         Input::ProbeResponse(ProbeResponse {
@@ -466,8 +466,8 @@ fn anchor_loss_via_probe_failed_clears_kind_and_recovers_via_subtree() {
 
     // The descent re-classifies the anchor as a Dir (File→Dir flip) → cold Seed (Verifying-first,
     // unwitnessed recovery). The Seed's probe materializes inline with the descent's terminal
-    // response and must be Subtree-shaped: the Failed-driven discard left kind=None, and the
-    // descent observed a Dir.
+    // response and must be Subtree-shaped: the Failed-driven discard left kind=None, and the descent
+    // observed a Dir.
     let settle_out = descent_advance(&mut e, pid_p, Some(EntryKind::Dir), recovery_t0);
     let p_probe = settle_out
         .probe_ops()
@@ -513,8 +513,8 @@ fn replace_of_fired_anchor_recovery_fires() {
 }
 
 /// A static file watch that has NEVER fired: the loss-entry latch makes the terminal-driven descent
-/// witnessed, so the first replace classifies `FreshSeedFire` and fires once the settle window
-/// passes — `has_fired` flips through a replace.
+/// witnessed, so the first replace classifies `FreshSeedFire` and fires once the settle window passes
+/// — `has_fired` flips through a replace.
 #[test]
 fn replace_of_never_fired_anchor_fires_first_fire() {
     let mut e = Engine::new();
@@ -654,8 +654,8 @@ fn standard_vanished_at_descendant_lca_recovers_live_anchor_and_fires() {
         .lookup(Some(dir), "f.txt")
         .expect("per-file reconcile created the child slot");
 
-    // A change at the child opens a Standard burst whose dirty-LCA — and probe target — is the
-    // child itself.
+    // A change at the child opens a Standard burst whose dirty-LCA — and probe target — is the child
+    // itself.
     let t1 = t0 + SETTLE;
     let _ = e.step(
         Input::FsEvent {
@@ -707,9 +707,9 @@ fn standard_vanished_at_descendant_lca_recovers_live_anchor_and_fires() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// Save storm: N replace cycles inside one settle window debounce to exactly one fire — each
-/// terminal lands during the previous cycle's Seed Batching, loops finalize → descend → Seed, and
-/// only the last save's Seed survives its settle window.
+/// Save storm: N replace cycles inside one settle window debounce to exactly one fire — each terminal
+/// lands during the previous cycle's Seed Batching, loops finalize → descend → Seed, and only the
+/// last save's Seed survives its settle window.
 #[test]
 fn replace_storm_within_settle_window_fires_once() {
     let mut e = Engine::new();
@@ -731,8 +731,8 @@ fn replace_storm_within_settle_window_fires_once() {
         now,
     );
 
-    // Three replaces 10ms apart — all inside one settle window. The anchor's slot id is stable
-    // across replaces ((parent, segment) identity).
+    // Three replaces 10ms apart — all inside one settle window. The anchor's slot id is stable across
+    // replaces ((parent, segment) identity).
     let mut t = t0 + SETTLE;
     let mut fired_during_storm = 0;
     for _ in 0..3 {
@@ -861,9 +861,9 @@ fn repeated_terminal_mid_verifying_cancels_and_recovers() {
 
 /// A non-atomic delete-then-write save: the witnessed descent finds the prefix but not the awaited
 /// segment and parks — narrated via `PendingPathAwaitingSegment` (witnessed descents only;
-/// attach-time descents park silently as their steady state) — then the create's parent
-/// notification re-probes, the advance does not narrate, and the latched recovery still owes — and
-/// fires — the save's fire.
+/// attach-time descents park silently as their steady state) — then the create's parent notification
+/// re-probes, the advance does not narrate, and the latched recovery still owes — and fires — the
+/// save's fire.
 #[test]
 fn delete_then_write_parks_narrated_then_recovers() {
     let mut e = Engine::new();

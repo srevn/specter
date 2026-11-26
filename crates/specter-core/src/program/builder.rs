@@ -5,8 +5,8 @@
 //! - **Bounded size.** Every emitted op gets a `u32` index. The builder upholds the post-condition
 //!   `pending.len() <= u32::MAX` after every successful emit by refusing to push when
 //!   `pending.len() == u32::MAX`. This is a precondition failure (panic, not Result) — a program
-//!   with `u32::MAX + 1` ops is physically impossible to load (~128 GiB of in-memory builder
-//!   state). Downstream casts of `pending.len()` to `u32` rely on this invariant.
+//!   with `u32::MAX + 1` ops is physically impossible to load (~128 GiB of in-memory builder state).
+//!   Downstream casts of `pending.len()` to `u32` rely on this invariant.
 //! - **Forward-only.** A `Continue(target)` may only point past the origin op (`target > origin`).
 //! - **In-bounds.** A `Continue(target)` must land on an emitted op (`target < final_ops_len`). The
 //!   patch-time check is the loose bound `target <= pending.len()` — the `==` case is the "future
@@ -17,8 +17,8 @@
 //!   [`ProgramBuilder::build`]; an unpatched edge surfaces as [`ProgramError::UnpatchedEdge`] with
 //!   the offending edge identity.
 //!
-//! The terminal targets [`super::BranchTarget::Terminate`] and [`super::BranchTarget::Escape`]
-//! carry no payload and are always valid — they get no bounds check.
+//! The terminal targets [`super::BranchTarget::Terminate`] and [`super::BranchTarget::Escape`] carry
+//! no payload and are always valid — they get no bounds check.
 
 use super::ActionProgram;
 use super::error::ProgramError;
@@ -41,9 +41,9 @@ pub struct ProgramBuilder {
 
 /// Opaque handle to an emitted op.
 ///
-/// Returned by [`ProgramBuilder::emit`] and consumed by the patch methods. `Copy` so the same
-/// handle can be passed to both [`ProgramBuilder::patch_on_ok`] and
-/// [`ProgramBuilder::patch_on_failed`] without re-emitting.
+/// Returned by [`ProgramBuilder::emit`] and consumed by the patch methods. `Copy` so the same handle
+/// can be passed to both [`ProgramBuilder::patch_on_ok`] and [`ProgramBuilder::patch_on_failed`]
+/// without re-emitting.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct OpHandle(u32);
 
@@ -120,9 +120,9 @@ impl ProgramBuilder {
         self.patch(h, Edge::OnFailed, target)
     }
 
-    /// Patch the named `edge` of `h`. Equivalent to [`Self::patch_on_ok`] /
-    /// [`Self::patch_on_failed`] but selects the edge by [`Edge`] value — for callers (the lowering
-    /// pass) that carry the edge as a runtime token alongside the handle.
+    /// Patch the named `edge` of `h`. Equivalent to [`Self::patch_on_ok`] / [`Self::patch_on_failed`]
+    /// but selects the edge by [`Edge`] value — for callers (the lowering pass) that carry the edge
+    /// as a runtime token alongside the handle.
     ///
     /// Two independent preconditions:
     ///
@@ -134,8 +134,9 @@ impl ProgramBuilder {
     ///   and is a no-op for the payload-free `Terminate` / `Escape`.
     ///
     /// The origin check runs *first* and unconditionally: a stale handle is a stale handle regardless
-    /// of the target, and the target check early-returns for `Terminate` / `Escape`, so deferring to
-    /// it would leave `pending[h.0]` to panic on those targets (release-mode: silent out-of-bounds).
+    /// of the target, and the target check early-returns for `Terminate` / `Escape`, so deferring
+    /// to it would leave `pending[h.0]` to panic on those targets (release-mode: silent
+    /// out-of-bounds).
     pub fn patch(
         &mut self,
         h: OpHandle,
@@ -563,10 +564,11 @@ mod tests {
     /// A handle minted by one builder used against a smaller one is *guaranteed* detected — the
     /// origin range-check is total and runs before the target is examined, so detection does not
     /// depend on the target accidentally tripping a bounds check. Here the target is a forward
-    /// `Continue`; the stale origin is caught by the origin check before the target (which would also
-    /// surface `OutOfBoundsEdge`) is examined. The `Terminate` / `Escape` targets (where the target
-    /// check is a no-op) are pinned by `stale_handle_on_terminate_or_escape_is_reported_not_panicked`
-    /// — together they cover every `BranchTarget`.
+    /// `Continue`; the stale origin is caught by the origin check before the target (which would
+    /// also surface `OutOfBoundsEdge`) is examined. The `Terminate` / `Escape` targets (where the
+    /// target check is a no-op) are pinned by
+    /// `stale_handle_on_terminate_or_escape_is_reported_not_panicked` — together they cover every
+    /// `BranchTarget`.
     #[test]
     fn handle_with_out_of_range_index_rejected_at_patch() {
         // `OpHandle` is `Copy` and minted only by `emit`; reuse one from a larger builder against a
@@ -589,10 +591,10 @@ mod tests {
 
     /// A handle that does not index this builder's pending ops is the caller's hygiene bug (only
     /// obtainable by reusing a handle minted by a *different* builder). `patch` owns this
-    /// precondition because it indexes `pending[h.0]`; `patch_target_check` validates only the
-    /// TARGET and early-returns for `Terminate` / `Escape`, so without an explicit origin
-    /// range-check those targets would panic-index a non-existent slot (release-mode: silent UB).
-    /// Both terminal targets must surface `StaleHandle` instead of panicking.
+    /// precondition because it indexes `pending[h.0]`; `patch_target_check` validates only the TARGET
+    /// and early-returns for `Terminate` / `Escape`, so without an explicit origin range-check those
+    /// targets would panic-index a non-existent slot (release-mode: silent UB). Both terminal targets
+    /// must surface `StaleHandle` instead of panicking.
     #[test]
     fn stale_handle_on_terminate_or_escape_is_reported_not_panicked() {
         let mut larger = ProgramBuilder::new();

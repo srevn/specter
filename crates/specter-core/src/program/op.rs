@@ -28,9 +28,9 @@ use std::sync::Arc;
 /// through [`Self::target`] (semantic, outcome-routed) or the structural [`Self::body`] /
 /// [`Self::on_ok`] / [`Self::on_failed`] accessors.
 ///
-/// Structural `Eq` propagates from [`SpawnBody`] and [`BranchTarget`]; consumed by
-/// `SubRegistryDiff` for hot-reload no-op suppression (two `Arc<ActionProgram>`s with byte-equal
-/// ops compare equal even when the Arc allocations differ).
+/// Structural `Eq` propagates from [`SpawnBody`] and [`BranchTarget`]; consumed by `SubRegistryDiff`
+/// for hot-reload no-op suppression (two `Arc<ActionProgram>`s with byte-equal ops compare equal
+/// even when the Arc allocations differ).
 ///
 /// ```compile_fail
 /// use specter_core::program::{ProgramOp, SpawnBody, ExecAction, ArgTemplate, ArgPart, BranchTarget};
@@ -152,10 +152,10 @@ impl MultiStage {
 
 /// Spawn shape — what the actuator actually launches.
 ///
-/// `Exec` is one process; `Pipe` is N processes wired stdout→stdin with pipefail-on aggregation
-/// (last non-zero exit, first observed signal). A `Pipe` always has ≥2 stages: [`MultiStage`] is
-/// its sole producer and rejects fewer, so a single-stage "pipe" is unrepresentable — one command
-/// lowers to a top-level `Exec`, not a `Pipe`.
+/// `Exec` is one process; `Pipe` is N processes wired stdout→stdin with pipefail-on aggregation (last
+/// non-zero exit, first observed signal). A `Pipe` always has ≥2 stages: [`MultiStage`] is its sole
+/// producer and rejects fewer, so a single-stage "pipe" is unrepresentable — one command lowers to
+/// a top-level `Exec`, not a `Pipe`.
 ///
 /// `Pipe`'s [`MultiStage`] is a zero-cost wrapper over the shared `Arc<[ExecAction]>`, so coalesced
 /// Effects still share one stages allocation; the Arc travels from `lower_to_program` into every
@@ -169,9 +169,9 @@ pub enum SpawnBody {
 /// Edge endpoint chosen on outcome.
 ///
 /// `Continue(BranchIndex)` is the only in-program target; `BranchIndex` can be constructed only by
-/// [`super::ProgramBuilder`], which enforces the forward-only-and-in-bounds invariant at patch
-/// time. The two no-op terminal variants — `Terminate` and `Escape` — can be minted directly: they
-/// carry no payload that needs builder validation.
+/// [`super::ProgramBuilder`], which enforces the forward-only-and-in-bounds invariant at patch time.
+/// The two no-op terminal variants — `Terminate` and `Escape` — can be minted directly: they carry
+/// no payload that needs builder validation.
 ///
 /// `Escape` is the typed encoding of "natural completion" — a conditional whose `then` branch ran
 /// and there is no `else`, or a top-level reach past the last op. Without it, the IR would need an

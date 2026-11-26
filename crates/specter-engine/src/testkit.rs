@@ -42,11 +42,11 @@ pub const DEFAULT_EVENTS: ClassSet = ClassSet::DEFAULT_SUBTREE_ROOT;
 
 /// Blanket-drain every timer due at `at`, stepping each.
 ///
-/// Returns every [`Diagnostic`] the drained steps emit, in step order: most callers drive the
-/// engine for its side effects and drop the return, but a pin that must observe a diagnostic raised
-/// while a timer fires — a breach surfacing only on the timer-driven transition, say — binds it
-/// (and can assert its absence too). Not `#[must_use]`: the drain is the point, the diagnostics are
-/// a byproduct.
+/// Returns every [`Diagnostic`] the drained steps emit, in step order: most callers drive the engine
+/// for its side effects and drop the return, but a pin that must observe a diagnostic raised while
+/// a timer fires — a breach surfacing only on the timer-driven transition, say — binds it (and can
+/// assert its absence too). Not `#[must_use]`: the drain is the point, the diagnostics are a
+/// byproduct.
 ///
 /// This is the *parked-siblings* drain discipline: correct when any co-Profile in flight holds no
 /// timer expirable at `at` (a Verifying Profile has no settle timer; a Draining one holds only its
@@ -129,8 +129,8 @@ pub fn reconfirm_probed(out: &StepOutput, pid: ProfileId) -> bool {
 
 /// `pid`'s burst is in the `Draining` phase.
 ///
-/// Phase-only: this does **not** assert the `BurstFinish` directive — a test that pins
-/// `ReturnToIdle` vs `Reap` keeps that match inline (it is the test's claim, not drive mechanism).
+/// Phase-only: this does **not** assert the `BurstFinish` directive — a test that pins `ReturnToIdle`
+/// vs `Reap` keeps that match inline (it is the test's claim, not drive mechanism).
 #[must_use]
 pub fn is_draining(e: &Engine, pid: ProfileId) -> bool {
     e.profiles().get(pid).unwrap().state().is_draining()
@@ -149,8 +149,8 @@ pub fn attach_request(
     (sid, pid, out)
 }
 
-/// Attach a subtree-root Sub at `anchor`, returning the attach `StepOutput` too — for tests
-/// asserting on the attach step (probe present/absent, diagnostics).
+/// Attach a subtree-root Sub at `anchor`, returning the attach `StepOutput` too — for tests asserting
+/// on the attach step (probe present/absent, diagnostics).
 ///
 /// Fixture defaults: `SETTLE`, `/bin/true`, `EffectScope::SubtreeRoot`. `max_settle` is explicit,
 /// not defaulted: it folds into `config_hash`, so a distinct `max_settle` forks a distinct Profile
@@ -262,11 +262,11 @@ pub fn attach_structure_only(
 /// MAX_SETTLE`.
 ///
 /// Under the Pass-1 verdict floor (`Authoritative ⇒ fire`), `responses.len() == 1` is the canonical
-/// shape: the first sample's Authoritative fold fires unconditionally. Under the post-Layer-C
-/// verdict floor for an events-incomplete fire-bearing burst, two consecutive samples must agree on
-/// the response hash for `Stable`, so the canonical shape is the three-sample slow-writer pattern
-/// `[s1, s2, s2]` — `read1`, then `read2 ≠ read1` re-loops, then `read3 = read2` fires. The helper
-/// is invariant on which side of the refactor it runs against: the loop reads only the StepOutput's
+/// shape: the first sample's Authoritative fold fires unconditionally. Under the post-Layer-C verdict
+/// floor for an events-incomplete fire-bearing burst, two consecutive samples must agree on the
+/// response hash for `Stable`, so the canonical shape is the three-sample slow-writer pattern `[s1,
+/// s2, s2]` — `read1`, then `read2 ≠ read1` re-loops, then `read3 = read2` fires. The helper is
+/// invariant on which side of the refactor it runs against: the loop reads only the StepOutput's
 /// effects, and both verdict shapes converge through it.
 ///
 /// Panics if `responses` is empty or the loop exhausts the slice without firing — the test author
@@ -319,10 +319,10 @@ pub fn drive_standard_n2_until_stable(
 
 /// Assert `pid` is in cold-arm `Active(PreFire(Verifying))` and read its in-flight probe correlation.
 ///
-/// Post-`start_seed_burst(None)` shape under the cold-arm Verifying-first contract: the probe is
-/// in flight at burst construction (no Batching settle to drain on the way in), so the helper is a
-/// state projection — it asserts the phase and returns the correlation plus `at` unchanged so call
-/// sites stay symmetric with helpers that do advance time.
+/// Post-`start_seed_burst(None)` shape under the cold-arm Verifying-first contract: the probe is in
+/// flight at burst construction (no Batching settle to drain on the way in), so the helper is a state
+/// projection — it asserts the phase and returns the correlation plus `at` unchanged so call sites
+/// stay symmetric with helpers that do advance time.
 #[must_use]
 pub fn assert_seed_verifying(
     e: &mut Engine,
@@ -346,11 +346,12 @@ pub fn assert_seed_verifying(
 /// Drive a fresh cold-arm Seed burst for `pid` through its quiescence verdict to pinned `Idle`,
 /// answering the cold walk probe with `make_outcome()`.
 ///
-/// The cold-arm Seed burst pins on the first `Authoritative` response: a `SilentPin` consequence does
-/// not owe quiescence proof, so the witness is [`specter_core::QuiescenceWitness::EventsReliable`]
-/// and the fold reaches `Stable(StableReason::Natural)`; dispatch then commits the `SilentPin` (a
-/// fresh Seed with no activity) and the burst finishes to Idle. The cold-arm Verifying-first contract
-/// puts the probe in flight at burst construction — no Batching settle to drain on the way in.
+/// The cold-arm Seed burst pins on the first `Authoritative` response: a `SilentPin` consequence
+/// does not owe quiescence proof, so the witness is
+/// [`specter_core::QuiescenceWitness::EventsReliable`] and the fold reaches
+/// `Stable(StableReason::Natural)`; dispatch then commits the `SilentPin` (a fresh Seed with no
+/// activity) and the burst finishes to Idle. The cold-arm Verifying-first contract puts the probe
+/// in flight at burst construction — no Batching settle to drain on the way in.
 ///
 /// `start` is the instant the Seed burst was constructed; the probe response steps at `start +
 /// SETTLE` (one settle window past the cold-arm so later bursts get a clean rebase window). Returns
@@ -399,8 +400,8 @@ pub fn seed_to_idle(
 /// The pre-fire verify dispatch outcome for `pid`: the response [`StepOutput`] and the [`Instant`]
 /// the response stepped at.
 ///
-/// Single-sample shape: under the verdict floor's `EventsReliable` witness one Authoritative
-/// response folds to `Stable`, so this struct carries exactly one [`StepOutput`]. Tests driving an
+/// Single-sample shape: under the verdict floor's `EventsReliable` witness one Authoritative response
+/// folds to `Stable`, so this struct carries exactly one [`StepOutput`]. Tests driving an
 /// events-incomplete N=2 retry loop chain two [`verify`] calls (first sample → re-Batch; second
 /// sample → Stable) or reach for [`drive_standard_n2_until_stable`] when the intermediate state is
 /// uninteresting.
@@ -455,14 +456,14 @@ pub fn verify(e: &mut Engine, pid: ProfileId, snap: &Arc<DirSnapshot>, start: In
 /// The clean post-fire rebase to Idle for `pid`.
 ///
 /// `pid` is already in `Active(PostFire(Rebasing))` with the rebase probe in flight —
-/// `EffectComplete` drove `Awaiting → Rebasing` directly (probe-first), so there is no settle
-/// window before the first sample. Answers the in-flight rebase probe with `proven(snap)`; the
-/// response folds through `quiescence_verdict` to `Stable(StableReason::Natural)` → commit + finish
-/// (or restart on a non-empty residual).
+/// `EffectComplete` drove `Awaiting → Rebasing` directly (probe-first), so there is no settle window
+/// before the first sample. Answers the in-flight rebase probe with `proven(snap)`; the response
+/// folds through `quiescence_verdict` to `Stable(StableReason::Natural)` → commit + finish (or
+/// restart on a non-empty residual).
 ///
-/// Returns the finish step output and its instant. **Carve-out:** a test that injects a custom
-/// absorb in the final window or exercises the [`specter_core::QuiescenceVerdict::Retry`] loop-back
-/// (which re-enters `Settling`) composes the finer primitives inline.
+/// Returns the finish step output and its instant. **Carve-out:** a test that injects a custom absorb
+/// in the final window or exercises the [`specter_core::QuiescenceVerdict::Retry`] loop-back (which
+/// re-enters `Settling`) composes the finer primitives inline.
 #[derive(Debug)]
 pub struct RebasePostFire {
     pub finish: StepOutput,
@@ -499,9 +500,9 @@ pub fn rebase_post_fire_to_idle(
 /// materialises the anchor, opening a Seed); `None` — absent under a healthy prefix (the descent
 /// parks on the standing absence observation).
 ///
-/// Returns the full `StepOutput`: the caller reads the next descent correlation, asserts the
-/// terminal Seed shape, or asserts no-progress. Descent runs outside the Burst lifecycle, so this
-/// is a primitive beside [`assert_seed_verifying`], composing neither.
+/// Returns the full `StepOutput`: the caller reads the next descent correlation, asserts the terminal
+/// Seed shape, or asserts no-progress. Descent runs outside the Burst lifecycle, so this is a
+/// primitive beside [`assert_seed_verifying`], composing neither.
 #[must_use]
 pub fn descent_advance(
     e: &mut Engine,
@@ -620,9 +621,9 @@ pub fn anchor_dir(e: &mut Engine, name: &str) -> ResourceId {
 ///
 /// Every real (non-root) segment is classified `Dir`, so the chain models directories the engine
 /// has already discovered on disk — each slot reads [`specter_core::Resource::is_disk_observed`],
-/// not as a never-observed scaffold. The FS-root stays the `Unknown` wildcard the bootstrap
-/// intends. Kinding only the leaf would leave intermediates looking unobserved, so a `Path` attach
-/// over them would descend from `/` rather than the pre-placed prefix.
+/// not as a never-observed scaffold. The FS-root stays the `Unknown` wildcard the bootstrap intends.
+/// Kinding only the leaf would leave intermediates looking unobserved, so a `Path` attach over them
+/// would descend from `/` rather than the pre-placed prefix.
 pub fn pre_place_dir(e: &mut Engine, segments: &[&str]) -> ResourceId {
     let mut comps = Vec::with_capacity(segments.len() + 1);
     comps.push(FS_ROOT_SEGMENT);

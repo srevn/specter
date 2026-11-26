@@ -16,8 +16,8 @@
 //! renamed_to<TAB><new-rel-path><TAB><inode>
 //! ```
 //!
-//! Each rename emits two consecutive lines (same inode in both, since renames preserve inode in
-//! v1's single-mount probes). Path is anchor-relative (`EntryRef.segment`); user scripts join with
+//! Each rename emits two consecutive lines (same inode in both, since renames preserve inode in v1's
+//! single-mount probes). Path is anchor-relative (`EntryRef.segment`); user scripts join with
 //! `$SPECTER_ANCHOR` for absolute.
 //!
 //! # Lifecycle
@@ -27,16 +27,16 @@
 //! before returning). Callers treating `Err` as "no file to track" are correct by construction.
 //!
 //! The handle is shared across plan steps via `Arc<DiffTmpFile>`: every `pool::state::RunningJob` /
-//! `pool::state::PlanContinuation` co-owns the Arc, and the last drop — at plan terminus, after
-//! every step has reaped and `pool::state::ActuatorState::terminate_plan` has returned — fires
+//! `pool::state::PlanContinuation` co-owns the Arc, and the last drop — at plan terminus, after every
+//! step has reaped and `pool::state::ActuatorState::terminate_plan` has returned — fires
 //! [`DiffTmpFile::drop`], which unlinks the file (best-effort, ENOENT-silent). The
 //! leak-on-process-crash case (no `Drop` runs on `process::exit`) is acceptable — a daemon crash is
 //! rare and tmpfiles.d / periodic sweeps catch the orphan.
 //!
 //! # Embedded-delimiter limitation
 //!
-//! v1's sensor walk accepts any filename byte except `/` and NUL — including `\n` and `\t`.
-//! Segments carrying these bytes corrupt both this file's tab-separated format and the resolver's
+//! v1's sensor walk accepts any filename byte except `/` and NUL — including `\n` and `\t`. Segments
+//! carrying these bytes corrupt both this file's tab-separated format and the resolver's
 //! newline-joined `SPECTER_{CREATED,DELETED,MODIFIED,RENAMED_FROM,RENAMED_TO,EXCLUDED}` env vars.
 //! Operators with such filenames in watched trees should parse `SPECTER_DIFF_PATH` records
 //! defensively (e.g., a NUL-terminated reader) or constrain their watch roots. v2 will switch to
@@ -86,9 +86,9 @@ impl DiffTmpFile {
         }
     }
 
-    /// Borrow the on-disk path. The returned `&Path` is valid for as long as any `Arc<Self>`
-    /// co-owner of `*self` is alive — the resolver borrows for one `resolve_step` call;
-    /// `Slot::running` / `Slot::plan_continue` co-own the Arc across the rest of the plan.
+    /// Borrow the on-disk path. The returned `&Path` is valid for as long as any `Arc<Self>` co-owner
+    /// of `*self` is alive — the resolver borrows for one `resolve_step` call; `Slot::running` /
+    /// `Slot::plan_continue` co-own the Arc across the rest of the plan.
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }
@@ -194,9 +194,9 @@ mod tests {
     }
 
     /// Pins the tmp-dir override and filename pattern: `create` MUST use its `temp_dir`,
-    /// `actuator_pid`, and `correlation` arguments to build the on-disk path. A regression that
-    /// reads from `std::env::temp_dir()` or `std::process::id()` would fail this test (custom
-    /// temp_dir + custom pid won't appear in the resulting path).
+    /// `actuator_pid`, and `correlation` arguments to build the on-disk path. A regression that reads
+    /// from `std::env::temp_dir()` or `std::process::id()` would fail this test (custom temp_dir +
+    /// custom pid won't appear in the resulting path).
     #[test]
     fn create_uses_provided_temp_dir_pid_and_correlation_in_path() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -279,9 +279,9 @@ mod tests {
         assert!(!body.contains("/abs"));
     }
 
-    /// The diff body discloses watched-path segments and inodes, and `temp_dir` is a shared
-    /// location other local users can list. Pins the `0o600` creation mode — a regression to
-    /// `File::create` (mode `0o644`) would leave the file world-readable and fail here.
+    /// The diff body discloses watched-path segments and inodes, and `temp_dir` is a shared location
+    /// other local users can list. Pins the `0o600` creation mode — a regression to `File::create`
+    /// (mode `0o644`) would leave the file world-readable and fail here.
     #[test]
     fn create_sets_owner_only_file_mode() {
         use std::os::unix::fs::PermissionsExt;

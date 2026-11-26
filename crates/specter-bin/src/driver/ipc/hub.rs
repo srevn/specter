@@ -3,9 +3,9 @@
 //! deregister.
 //!
 //! Constructed once by `App::run` from the [`Registry`] clone minted via
-//! [`crate::driver::Reactor::registry_clone`]. Owned by [`crate::driver::EngineDriver`] for the
-//! rest of the daemon's lifetime, dropped BEFORE [`crate::driver::Reactor`] so the explicit `Drop`
-//! impl below can deregister listener + every live conn stream against a still-live Poll selector.
+//! [`crate::driver::Reactor::registry_clone`]. Owned by [`crate::driver::EngineDriver`] for the rest
+//! of the daemon's lifetime, dropped BEFORE [`crate::driver::Reactor`] so the explicit `Drop` impl
+//! below can deregister listener + every live conn stream against a still-live Poll selector.
 //!
 //! # Drop order
 //!
@@ -21,9 +21,9 @@
 //! 2. **`listener`** drops — closes the bound socket fd; any racing client connect that observed
 //!    the listener now sees the socket gone before any other server state is torn down.
 //! 3. **`conns`** drops — each [`super::conns::ConnState`]'s stream Drop fires; the corresponding
-//!    mio-side registration was explicitly deregistered above so a `ConnState` reaching Drop
-//!    without going through `terminate_conn` does not strand a registration. The conn map is the
-//!    only path that removes entries — the audit grep `conns.remove\|conns.drain` returns only
+//!    mio-side registration was explicitly deregistered above so a `ConnState` reaching Drop without
+//!    going through `terminate_conn` does not strand a registration. The conn map is the only path
+//!    that removes entries — the audit grep `conns.remove\|conns.drain` returns only
 //!    [`Hub::terminate_conn`].
 //! 4. **`registry`** drops — the [`Registry::try_clone()`] handle releases one Arc-reference on the
 //!    underlying selector. The Reactor's Poll still holds the other reference; the selector closes
@@ -32,11 +32,11 @@
 //!
 //! # Visibility
 //!
-//! Every export is `pub(in crate::driver)` or `pub(crate)`. The crate-visible surface is
-//! [`Hub::new`] (called by `App::run`); every other method is `pub(in crate::driver)` — only the
-//! surrounding `driver` module reaches them. `tick.rs` drives [`Hub::drain_accept`],
-//! [`Hub::drain_writable`], [`Hub::terminate_conn`], [`Hub::arm_writable_interests`]; the IPC verb
-//! handler reaches per-conn helpers; `forward.rs` drives [`Hub::dispatch_to_subscribers`].
+//! Every export is `pub(in crate::driver)` or `pub(crate)`. The crate-visible surface is [`Hub::new`]
+//! (called by `App::run`); every other method is `pub(in crate::driver)` — only the surrounding
+//! `driver` module reaches them. `tick.rs` drives [`Hub::drain_accept`], [`Hub::drain_writable`],
+//! [`Hub::terminate_conn`], [`Hub::arm_writable_interests`]; the IPC verb handler reaches per-conn
+//! helpers; `forward.rs` drives [`Hub::dispatch_to_subscribers`].
 
 use super::conns::{self, ConnRole, ConnState, DiagSub, PushOutcome};
 use crate::ipc::framing::{InfallibleSerialize, MAX_LINE_BYTES, encode_line};
@@ -50,8 +50,8 @@ use std::time::SystemTime;
 
 /// First per-conn Token value. Chosen well above the static set so a new static Source can be added
 /// (Token(5..0xFF) are reserved) without migrating per-conn allocation; the gap also makes a
-/// debug-mode `assert!(token.0 >= TOKEN_CONN_BASE)` in per-conn arms a cheap structural check
-/// against accidental static-token aliasing.
+/// debug-mode `assert!(token.0 >= TOKEN_CONN_BASE)` in per-conn arms a cheap structural check against
+/// accidental static-token aliasing.
 ///
 /// Defined here (not in `reactor.rs`) because allocation is an Hub concern; the reactor dispatch
 /// arm imports it for the per-conn catch-all match.
@@ -100,8 +100,8 @@ pub(in crate::driver) enum EnqueueOutcome {
     Accepted,
     /// Response did not fit under the per-conn accept cap. The arm emitted a structured
     /// [`crate::ipc::protocol::WireErrorCode::ResponseTooBig`] Err line into the per-conn reserve
-    /// and armed `close_after_flush`; the next [`Hub::drain_writable`] flushes the Err (and any
-    /// prior queued bytes) and terminates the conn at the flush-empty edge.
+    /// and armed `close_after_flush`; the next [`Hub::drain_writable`] flushes the Err (and any prior
+    /// queued bytes) and terminates the conn at the flush-empty edge.
     Refused,
     /// `token` is not in the conn map — the caller addressed a conn that closed between an earlier
     /// point in this tick and the enqueue (a read drain that observed EOF terminated it, or a write
@@ -117,8 +117,8 @@ pub(in crate::driver) enum EnqueueOutcome {
 /// - `Continue` — the read end is alive (or pending). The caller processes any drained lines and
 ///   then pairs with [`Hub::try_terminate_if_idle`] in case an oversize-line guard armed
 ///   `close_after_flush` against an empty queue.
-/// - `PeerGone` — peer EOF or a non-recoverable read transport error. The caller terminates the
-///   conn unconditionally; any pending write-queue bytes are wasted because the peer's read end has
+/// - `PeerGone` — peer EOF or a non-recoverable read transport error. The caller terminates the conn
+///   unconditionally; any pending write-queue bytes are wasted because the peer's read end has
 ///   closed.
 #[must_use]
 #[derive(Debug, Eq, PartialEq)]
@@ -129,9 +129,9 @@ pub(in crate::driver) enum ReadOutcome {
 
 /// Outcome of one [`Hub::drain_writable`] call.
 ///
-/// Three discriminants — the tick's WRITABLE pass needs to know not only "does this conn keep
-/// going" but also "did the conn vanish mid-tick" (the read drain may have terminated it earlier
-/// this tick, in which case the WRITABLE pass's reach is a benign no-op).
+/// Three discriminants — the tick's WRITABLE pass needs to know not only "does this conn keep going"
+/// but also "did the conn vanish mid-tick" (the read drain may have terminated it earlier this tick,
+/// in which case the WRITABLE pass's reach is a benign no-op).
 ///
 /// The three discriminants are:
 /// - `Continue` ⇒ keep going,
@@ -147,8 +147,8 @@ pub(in crate::driver) enum DrainWritableOutcome {
     /// Queue still has bytes, OR queue empty without close-flag. The tick keeps the conn open; mio
     /// re-arming happens at end-of-tick via [`Hub::arm_writable_interests`].
     Continue,
-    /// Queue empty + `close_after_flush` set, OR a transport-level write error. The caller
-    /// terminates the conn via [`Hub::terminate_conn`].
+    /// Queue empty + `close_after_flush` set, OR a transport-level write error. The caller terminates
+    /// the conn via [`Hub::terminate_conn`].
     Terminate,
     /// `token` no longer in the conn map — the read drain earlier this tick already terminated it.
     /// The caller silently skips (the mio-side registration is gone too).
@@ -189,8 +189,8 @@ impl Hub {
         })
     }
 
-    /// Accept every pending connection in this tick, bounded above by `MAX_IPC_CONNS * 2`
-    /// iterations (see [`MAX_IPC_CONNS`]).
+    /// Accept every pending connection in this tick, bounded above by `MAX_IPC_CONNS * 2` iterations
+    /// (see [`MAX_IPC_CONNS`]).
     ///
     /// Edge-triggered: loops `accept(2)` non-blockingly. The natural termination is `WouldBlock`
     /// (accept queue empty); the per-tick cap is the DoS guard for the alternative case where a
@@ -206,10 +206,10 @@ impl Hub {
     ///
     /// # Cap-hit re-arm (mio EPOLLET / EV_CLEAR contract)
     ///
-    /// Returning from the loop short of `WouldBlock` leaves the kernel-side accept queue
-    /// non-empty. Under edge-triggered mio (EPOLLET on Linux, EV_CLEAR on kqueue — see `mio` 1.2.0
-    /// `sys/unix/selector/{epoll,kqueue}.rs`), no future `TOKEN_LISTENER` edge fires until the
-    /// queue transitions empty→non-empty; subsequent SYNs into a non-empty queue do NOT re-fire. To
+    /// Returning from the loop short of `WouldBlock` leaves the kernel-side accept queue non-empty.
+    /// Under edge-triggered mio (EPOLLET on Linux, EV_CLEAR on kqueue — see `mio` 1.2.0
+    /// `sys/unix/selector/{epoll,kqueue}.rs`), no future `TOKEN_LISTENER` edge fires until the queue
+    /// transitions empty→non-empty; subsequent SYNs into a non-empty queue do NOT re-fire. To
     /// preserve forward progress, the cap-hit path re-registers the listener: Linux `EPOLL_CTL_MOD`
     /// calls `ep_modify` which re-checks current readiness and queues a wake-up if ready; kqueue's
     /// `EV_ADD | EV_CLEAR` re-arms with identical semantics. The next `poll` re-fires
@@ -243,9 +243,9 @@ impl Hub {
                     if self.conns.len() >= MAX_IPC_CONNS {
                         // Cap reached. One non-blocking write attempt against the
                         // already-non-blocking mio stream; discard the result (WouldBlock against a
-                        // hostile peer is fine — the stream drops next either way). The
-                        // healthy-peer wire surface stays a structured Busy line; the hostile-peer
-                        // path takes no bytes but preserves the reactor's no-blocking floor.
+                        // hostile peer is fine — the stream drops next either way). The healthy-peer
+                        // wire surface stays a structured Busy line; the hostile-peer path takes no
+                        // bytes but preserves the reactor's no-blocking floor.
                         use std::io::Write;
                         let resp = ResponsePayload::Err {
                             code: WireErrorCode::Busy,
@@ -266,10 +266,10 @@ impl Hub {
                 Err(e) => return Err(e),
             }
         }
-        // Hit the per-tick bound without reaching `WouldBlock`. Under edge-triggered mio the
-        // listener won't re-fire until the accept queue transitions empty→non-empty; force a fresh
-        // readiness evaluation via `reregister` so the next poll re-fires `TOKEN_LISTENER` and the
-        // next tick drains another batch. See method rustdoc for the kernel-level rationale.
+        // Hit the per-tick bound without reaching `WouldBlock`. Under edge-triggered mio the listener
+        // won't re-fire until the accept queue transitions empty→non-empty; force a fresh readiness
+        // evaluation via `reregister` so the next poll re-fires `TOKEN_LISTENER` and the next tick
+        // drains another batch. See method rustdoc for the kernel-level rationale.
         self.registry.reregister(
             &mut self.listener,
             super::super::reactor::TOKEN_LISTENER,
@@ -279,12 +279,12 @@ impl Hub {
 
     /// Mint a fresh per-conn [`Token`]. Monotone from [`TOKEN_CONN_BASE`].
     ///
-    /// `checked_add` is loud on the unreachable overflow edge: `usize::MAX - TOKEN_CONN_BASE`
-    /// accepts is &gt;10^18 on 64-bit, so hitting the panic requires either an inflation bug at the
-    /// caller (the accept loop somehow runs without ever terminating a conn) or hardware running
-    /// long enough to outlive every realistic deployment. A loud panic on the unreachable edge
-    /// beats a silent wrap-and-alias against the static token set (which would collide a new accept
-    /// with `TOKEN_WATCHER` / `TOKEN_SIGNAL` and route fs events into the conn dispatch arm).
+    /// `checked_add` is loud on the unreachable overflow edge: `usize::MAX - TOKEN_CONN_BASE` accepts
+    /// is &gt;10^18 on 64-bit, so hitting the panic requires either an inflation bug at the caller
+    /// (the accept loop somehow runs without ever terminating a conn) or hardware running long enough
+    /// to outlive every realistic deployment. A loud panic on the unreachable edge beats a silent
+    /// wrap-and-alias against the static token set (which would collide a new accept with
+    /// `TOKEN_WATCHER` / `TOKEN_SIGNAL` and route fs events into the conn dispatch arm).
     const fn allocate_conn_token(&mut self) -> Token {
         let raw = self.next_conn_token;
         self.next_conn_token = raw
@@ -297,10 +297,10 @@ impl Hub {
     /// write_queue.
     ///
     /// Subscriber storage IS the per-conn map: every conn whose role is
-    /// [`super::conns::ConnRole::Sub`] is a subscriber, the stream's filter and back-pressure
-    /// marker accumulator live on the role payload, and the line bytes are pushed directly into
-    /// [`ConnState::write_queue`] on the reactor thread — no envelope, no worker-thread
-    /// re-serialize hop.
+    /// [`super::conns::ConnRole::Sub`] is a subscriber, the stream's filter and back-pressure marker
+    /// accumulator live on the role payload, and the line bytes are pushed directly into
+    /// [`ConnState::write_queue`] on the reactor thread — no envelope, no worker-thread re-serialize
+    /// hop.
     ///
     /// **`about` is caller-computed** — the projection `&Diagnostic → Option<DiagSub>` is an
     /// exhaustive walk of the core enum that lives next to its only call site
@@ -309,11 +309,11 @@ impl Hub {
     ///
     /// **Time threads through two channels.** `wire_at` is the pre-formatted RFC 3339 token the
     /// per-diag construction reuses across the StepOutput (built once in
-    /// [`crate::driver::EngineDriver::forward_diagnostics`], passed by reference here so the RFC 3339
-    /// render allocation is amortized over the whole batch). `at` is
-    /// the full-precision [`SystemTime`] that [`ConnState::try_dispatch_diag`] needs for the
-    /// per-conn `first_dropped_at` back-pressure accounting — distinct timestamps (the marker's own
-    /// `WireTime` is built from `first_dropped_at`, not `wire_at`).
+    /// [`crate::driver::EngineDriver::forward_diagnostics`], passed by reference here so the RFC
+    /// 3339 render allocation is amortized over the whole batch). `at` is the full-precision
+    /// [`SystemTime`] that [`ConnState::try_dispatch_diag`] needs for the per-conn `first_dropped_at`
+    /// back-pressure accounting — distinct timestamps (the marker's own `WireTime` is built from
+    /// `first_dropped_at`, not `wire_at`).
     ///
     /// **One serialize per dispatch.** The JSON bytes are built once before the conn loop and
     /// appended verbatim per subscriber via [`super::conns::ConnState::try_dispatch_diag`], which
@@ -326,10 +326,10 @@ impl Hub {
     ///
     /// **Subscriber-empty short-circuit is defensive.** The hot path already gates fan-out at the
     /// StepOutput-scoped caller ([`crate::driver::EngineDriver::forward_diagnostics`] reads
-    /// [`Self::has_any_subscriber`] once per emission and skips the per-diag `WireTime` /
-    /// `diag_sub` work entirely). The inner check below catches a future caller that bypasses the
-    /// outer gate; the cost is one `O(MAX_IPC_CONNS)` discriminator walk before bailing, well below
-    /// the `WireDiagnostic::from` + `encode_line` build it stands in front of.
+    /// [`Self::has_any_subscriber`] once per emission and skips the per-diag `WireTime` / `diag_sub`
+    /// work entirely). The inner check below catches a future caller that bypasses the outer gate;
+    /// the cost is one `O(MAX_IPC_CONNS)` discriminator walk before bailing, well below the
+    /// `WireDiagnostic::from` + `encode_line` build it stands in front of.
     pub(in crate::driver) fn dispatch_to_subscribers(
         &mut self,
         diag: &Diagnostic,
@@ -355,10 +355,10 @@ impl Hub {
     /// [`Self::dispatch_to_subscribers`].
     ///
     /// Composed by [`crate::driver::EngineDriver::forward_diagnostics`] once per `StepOutput` so
-    /// the no-subscriber common path skips the per-emission [`SystemTime::now`] /
-    /// [`WireTime::from`] / [`crate::driver::forward::diag_sub`] work entirely. The walk is bounded
-    /// above by [`MAX_IPC_CONNS`] enum-discriminator reads — well below the syscall +
-    /// timestamp-render allocation the outer gate would otherwise pay per emission.
+    /// the no-subscriber common path skips the per-emission [`SystemTime::now`] / [`WireTime::from`]
+    /// / [`crate::driver::forward::diag_sub`] work entirely. The walk is bounded above by
+    /// [`MAX_IPC_CONNS`] enum-discriminator reads — well below the syscall + timestamp-render
+    /// allocation the outer gate would otherwise pay per emission.
     ///
     /// [`Self::dispatch_to_subscribers`] retains the same predicate as a defensive inner
     /// short-circuit; the accessor keeps the rule single-source so the two surfaces cannot drift.
@@ -369,8 +369,8 @@ impl Hub {
     }
 
     /// Borrow a per-conn state mutably by [`Token`]. Returns `None` if the conn closed between the
-    /// tick's drain and the caller's reach (e.g., an oversize line set `close_after_flush`, the
-    /// flush completed, and `terminate_conn` ran).
+    /// tick's drain and the caller's reach (e.g., an oversize line set `close_after_flush`, the flush
+    /// completed, and `terminate_conn` ran).
     ///
     /// Used by the IPC dispatcher's `Subscribe` arm to flip the conn's role *after* the ack bytes
     /// have been enqueued — the ack-before-fanout ordering pinned by the wire-side regression test.
@@ -382,11 +382,11 @@ impl Hub {
     /// the map — same lifecycle as [`Self::conn_mut`] (terminate_conn between tick boundaries can
     /// remove the entry).
     ///
-    /// Read-only complement to `conn_mut` for handler-side predicates that need to inspect the
-    /// conn's role / `close_after_flush` / queue state without mutating, and for test introspection
-    /// of the post-tick per-conn shape. The Subscribe handler gates on the conn's existing role
-    /// here before deciding whether to flip via [`super::conns::ConnState::transition_to_sub`] or
-    /// refuse with [`crate::ipc::protocol::WireErrorCode::AlreadySubscribed`].
+    /// Read-only complement to `conn_mut` for handler-side predicates that need to inspect the conn's
+    /// role / `close_after_flush` / queue state without mutating, and for test introspection of the
+    /// post-tick per-conn shape. The Subscribe handler gates on the conn's existing role here before
+    /// deciding whether to flip via [`super::conns::ConnState::transition_to_sub`] or refuse with
+    /// [`crate::ipc::protocol::WireErrorCode::AlreadySubscribed`].
     pub(in crate::driver) fn conn_ref(&self, token: Token) -> Option<&ConnState> {
         self.conns.get(&token)
     }
@@ -394,16 +394,17 @@ impl Hub {
     /// Drain the per-conn read end into LF-delimited lines.
     ///
     /// Edge-triggered: loops `read(2)` until `WouldBlock`. EOF (`Ok(0)`) returns
-    /// [`ReadOutcome::PeerGone`] so the caller terminates unconditionally. `Interrupted` retries; any
-    /// other read error returns `PeerGone` too (the peer-side is gone, no further bytes will arrive).
+    /// [`ReadOutcome::PeerGone`] so the caller terminates unconditionally. `Interrupted` retries;
+    /// any other read error returns `PeerGone` too (the peer-side is gone, no further bytes will
+    /// arrive).
     ///
-    /// Complete lines are sliced off the front of `conn.read_buf` via `drain(..=nl)` (one
-    /// allocation per line, no tail copy). Each line carries its trailing `\n` — the dispatcher
-    /// trims it once before serde sees the bytes (mirroring `BufRead::read_line`'s convention).
+    /// Complete lines are sliced off the front of `conn.read_buf` via `drain(..=nl)` (one allocation
+    /// per line, no tail copy). Each line carries its trailing `\n` — the dispatcher trims it once
+    /// before serde sees the bytes (mirroring `BufRead::read_line`'s convention).
     ///
-    /// **Oversize line guard.** A line exceeding [`MAX_LINE_BYTES`] is structurally hostile
-    /// (operator IPC verbs are small JSON objects; the largest verb is `Subscribe { name:
-    /// <CompactString> }` at ~60 bytes). The guard arms `close_after_flush` via
+    /// **Oversize line guard.** A line exceeding [`MAX_LINE_BYTES`] is structurally hostile (operator
+    /// IPC verbs are small JSON objects; the largest verb is `Subscribe { name: <CompactString> }`
+    /// at ~60 bytes). The guard arms `close_after_flush` via
     /// [`super::conns::ConnState::arm_close_after_flush`], breaks the line loop, and returns
     /// [`ReadOutcome::Continue`] — the caller pairs this with `try_terminate_if_idle` (so an
     /// armed-close + empty-queue terminates inline rather than lingering for a WRITABLE edge that
@@ -420,8 +421,8 @@ impl Hub {
     ///
     /// Returns `Err(NotFound)` only if `token` is not in the conn map — that would be a tick-body
     /// bug (we drain tokens that arrived this tick; if the conn isn't there, we never accepted it).
-    /// All transport-level read failures map to `Ok(ReadOutcome::PeerGone)` so the caller's
-    /// terminate path is uniform.
+    /// All transport-level read failures map to `Ok(ReadOutcome::PeerGone)` so the caller's terminate
+    /// path is uniform.
     pub(in crate::driver) fn read_conn_into_lines(
         &mut self,
         token: Token,
@@ -491,14 +492,14 @@ impl Hub {
     /// [`super::conns::RESPONSE_TOO_BIG_RESERVE`] bytes below
     /// [`super::conns::WRITE_QUEUE_HIGH_WATER`]), the queue is left untouched, `close_after_flush`
     /// is armed, and this returns [`EnqueueOutcome::Refused`]. The refusal arm then emits a
-    /// structured [`crate::ipc::protocol::WireErrorCode::ResponseTooBig`] Err line into the
-    /// per-conn reserve via [`super::conns::ConnState::push_err_in_reserve`] — the reserve's
-    /// existence guarantees the Err line fits regardless of queue state, so the operator branches
-    /// on `response_too_big` instead of decoding an `UnexpectedEof`. With the Err line queued, the
-    /// conn is no longer idle, so the trailing [`Self::try_terminate_if_idle`] is a structural
-    /// no-op; the next WRITABLE drain flushes the Err and observes `close_after_flush` at the
-    /// flush-empty edge. The path converges with the queue-non-empty case: the in-flight bytes
-    /// drain, then the Err drains, then the conn terminates.
+    /// structured [`crate::ipc::protocol::WireErrorCode::ResponseTooBig`] Err line into the per-conn
+    /// reserve via [`super::conns::ConnState::push_err_in_reserve`] — the reserve's existence
+    /// guarantees the Err line fits regardless of queue state, so the operator branches on
+    /// `response_too_big` instead of decoding an `UnexpectedEof`. With the Err line queued, the conn
+    /// is no longer idle, so the trailing [`Self::try_terminate_if_idle`] is a structural no-op;
+    /// the next WRITABLE drain flushes the Err and observes `close_after_flush` at the flush-empty
+    /// edge. The path converges with the queue-non-empty case: the in-flight bytes drain, then the
+    /// Err drains, then the conn terminates.
     ///
     /// The cap-class signal vocabulary now matches the accept-cap's `Err { code: Busy }` shape
     /// ([`Self::drain_accept`]'s cap arm): both cap surfaces emit a closed-vocabulary structured
@@ -506,8 +507,8 @@ impl Hub {
     ///
     /// The `T: InfallibleSerialize` bound is the structural floor for the serializer-cannot-fail
     /// claim — every call site passes a type whose marker impl carries an audit of its serialize
-    /// tree, so the wrapper's `expect` lives at the contract source in [`crate::ipc::framing`]
-    /// rather than scattered as one-off `.expect("…")` strings at every enqueue arm.
+    /// tree, so the wrapper's `expect` lives at the contract source in [`crate::ipc::framing`] rather
+    /// than scattered as one-off `.expect("…")` strings at every enqueue arm.
     pub(in crate::driver) fn enqueue_response<T: InfallibleSerialize>(
         &mut self,
         token: Token,
@@ -539,8 +540,8 @@ impl Hub {
                 };
                 let err_bytes = encode_line(&err_payload);
                 // push_response just refused (so conn was in the map and close_after_flush is armed).
-                // The same &mut self borrow continues here — nothing between the two reaches has had
-                // the opportunity to remove the entry. The reserve invariant (ACCEPT_CAP +
+                // The same &mut self borrow continues here — nothing between the two reaches has
+                // had the opportunity to remove the entry. The reserve invariant (ACCEPT_CAP +
                 // RESPONSE_TOO_BIG_RESERVE = WRITE_QUEUE_HIGH_WATER) makes push_err_in_reserve total.
                 self.conns
                     .get_mut(&token)
@@ -596,18 +597,18 @@ impl Hub {
     /// **Queue-empty bookkeeping.** When the queue empties:
     /// 1. If `close_after_flush` is set (oversize line, over-water response, etc.), return
     ///    [`DrainWritableOutcome::Terminate`] so the caller runs `terminate_conn` — the
-    ///    reregister-to-READABLE is short-circuited (the conn is about to be deregistered
-    ///    entirely). The arm-for-close → drain → close sequence guarantees the last queued bytes
-    ///    reach the wire before teardown.
-    /// 2. Otherwise re-register the conn with `READABLE` only — the WRITABLE interest was a
-    ///    transient "drain me" flag; leaving it armed against an empty queue would have mio fire on
-    ///    every socket-send-buffer-room edge.
+    ///    reregister-to-READABLE is short-circuited (the conn is about to be deregistered entirely).
+    ///    The arm-for-close → drain → close sequence guarantees the last queued bytes reach the wire
+    ///    before teardown.
+    /// 2. Otherwise re-register the conn with `READABLE` only — the WRITABLE interest was a transient
+    ///    "drain me" flag; leaving it armed against an empty queue would have mio fire on every
+    ///    socket-send-buffer-room edge.
     ///
     /// Three-state return ([`DrainWritableOutcome`]) — `Continue` (keep the conn open), `Terminate`
-    /// (caller closes), `ConnGone` (already terminated this tick; benign no-op). Any non-
-    /// `WouldBlock` write error folds into `Terminate`; a re-register failure on the queue-empty
-    /// edge does the same (the conn's fd is somehow gone, which means the next read-or-write would
-    /// fail anyway; close it now).
+    /// (caller closes), `ConnGone` (already terminated this tick; benign no-op). Any non-`WouldBlock`
+    /// write error folds into `Terminate`; a re-register failure on the queue-empty edge does the
+    /// same (the conn's fd is somehow gone, which means the next read-or-write would fail anyway;
+    /// close it now).
     pub(in crate::driver) fn drain_writable(&mut self, token: Token) -> DrainWritableOutcome {
         use std::io::Write;
         let Some(conn) = self.conns.get_mut(&token) else {
@@ -615,8 +616,8 @@ impl Hub {
         };
         while !conn.write_queue.is_empty() {
             // `as_slices().0` is the contiguous front slice — no need to defragment for the write.
-            // `VecDeque::drain(..n)` peels off the consumed prefix in O(n) (the tail shifts
-            // forward); under steady-state the queue is small and the shift is negligible.
+            // `VecDeque::drain(..n)` peels off the consumed prefix in O(n) (the tail shifts forward);
+            // under steady-state the queue is small and the shift is negligible.
             let front = conn.write_queue.as_slices().0;
             match conn.stream.write(front) {
                 Ok(0) => break,
@@ -633,8 +634,8 @@ impl Hub {
         }
         if conn.write_queue.is_empty() {
             // Close-after-flush short-circuits the reregister: the caller terminates the conn on
-            // `Terminate`, which deregisters the stream entirely — re-registering with
-            // READABLE-only first would be a wasted syscall on the close-after-flush edge.
+            // `Terminate`, which deregisters the stream entirely — re-registering with READABLE-only
+            // first would be a wasted syscall on the close-after-flush edge.
             if conn.close_after_flush {
                 return DrainWritableOutcome::Terminate;
             }
@@ -649,17 +650,17 @@ impl Hub {
         DrainWritableOutcome::Continue
     }
 
-    /// Remove a conn from the map, deregistering its mio source first so no straggler event for
-    /// this Token reaches the dispatch loop after teardown.
+    /// Remove a conn from the map, deregistering its mio source first so no straggler event for this
+    /// Token reaches the dispatch loop after teardown.
     ///
     /// The deregister-before-drop discipline matches mio's "deregister explicitly before drop"
     /// contract — a `ConnState::stream` that drops without going through this function would strand
     /// a registration, and the next `poll` would fire events against a Token whose conn has gone
     /// (silent miss; harmless in practice but technically a programmer-error).
     ///
-    /// Deregister errors are logged at debug — the most common cause is "fd already closed" (a
-    /// write failure earlier in the tick); the path is best-effort, the next `terminate_conn` for
-    /// the same Token would be a `None` on the map.
+    /// Deregister errors are logged at debug — the most common cause is "fd already closed" (a write
+    /// failure earlier in the tick); the path is best-effort, the next `terminate_conn` for the same
+    /// Token would be a `None` on the map.
     ///
     /// Audit grep: `conns.remove\|conns.drain` returns only this function — the single removal path
     /// keeps the deregister-before-drop discipline structurally enforced.
@@ -741,8 +742,8 @@ impl Hub {
     /// Used by
     /// [`super::super::tests::arm_writable_interests_per_conn_failure_terminates_only_failing_conn`]
     /// to exercise the per-conn failure-isolation contract on Linux, where `EPOLL_CTL_MOD` returns
-    /// `ENOENT` for an unregistered fd. macOS's kqueue `EV_ADD | EV_CLEAR` is add-or-modify and
-    /// would succeed on the same surface, so the behavioral test is Linux-gated; the cross-platform
+    /// `ENOENT` for an unregistered fd. macOS's kqueue `EV_ADD | EV_CLEAR` is add-or-modify and would
+    /// succeed on the same surface, so the behavioral test is Linux-gated; the cross-platform
     /// contract is enforced by the signature change ([`Self::arm_writable_interests`] returns `()`,
     /// not `io::Result`, so per-conn failures cannot propagate to daemon shutdown structurally).
     #[cfg(all(test, target_os = "linux"))]
@@ -758,20 +759,20 @@ impl Hub {
 }
 
 impl Drop for Hub {
-    /// Explicit `deregister` for the listener + every live conn stream ahead of the field-order
-    /// drop that closes their fds. mio's contract calls for "deregister before drop"; relying on
-    /// the source's own `Drop` to release the registration is a contract violation, even though in
+    /// Explicit `deregister` for the listener + every live conn stream ahead of the field-order drop
+    /// that closes their fds. mio's contract calls for "deregister before drop"; relying on the
+    /// source's own `Drop` to release the registration is a contract violation, even though in
     /// practice the field-order drop reaches each fd before the underlying selector closes.
     ///
-    /// The Reactor's Poll selector is still live at this moment (the
-    /// [`crate::driver::EngineDriver`] field order places `ipc` before `reactor`), so the
-    /// deregister calls reach the same kernel-side state the registrations created.
+    /// The Reactor's Poll selector is still live at this moment (the [`crate::driver::EngineDriver`]
+    /// field order places `ipc` before `reactor`), so the deregister calls reach the same kernel-side
+    /// state the registrations created.
     ///
     /// Errors are best-effort. `NotFound` is benign on a stream whose fd was already closed by a
-    /// prior `terminate_conn`. A non-`NotFound` error here is a programmer-error worth knowing
-    /// about but not worth panicking — Drop must not unwind. The log channel may already be gone at
-    /// this teardown phase, which is fine: the next process boot re-creates everything against a
-    /// fresh selector regardless.
+    /// prior `terminate_conn`. A non-`NotFound` error here is a programmer-error worth knowing about
+    /// but not worth panicking — Drop must not unwind. The log channel may already be gone at this
+    /// teardown phase, which is fine: the next process boot re-creates everything against a fresh
+    /// selector regardless.
     fn drop(&mut self) {
         let _ = self.registry.deregister(&mut self.listener);
         for conn in self.conns.values_mut() {

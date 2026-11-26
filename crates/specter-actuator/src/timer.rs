@@ -21,8 +21,9 @@
 //! # Why one thread per step
 //!
 //! v1 uses a thread-per-step to mirror the existing wait-thread shape: same lifetime, same ownership
-//! model, same `Arc<dyn ChildSignaler>` sharing pattern. A consolidated timer heap would amortise OS
-//! thread cost at high pid volumes but reintroduces a single coordination point that v1 doesn't need.
+//! model, same `Arc<dyn ChildSignaler>` sharing pattern. A consolidated timer heap would amortise
+//! OS thread cost at high pid volumes but reintroduces a single coordination point that v1 doesn't
+//! need.
 //!
 //! # Spawn-failure policy
 //!
@@ -35,14 +36,15 @@
 //!
 //! # Thread name budget
 //!
-//! Linux `pthread_setname_np` truncates to 15 bytes plus a null; macOS allows 64. The names built by
-//! [`TimerContext::os_thread_name`] are shaped around what `ps -T` / `gdb info threads` can render:
+//! Linux `pthread_setname_np` truncates to 15 bytes plus a null; macOS allows 64. The names built
+//! by [`TimerContext::os_thread_name`] are shaped around what `ps -T` / `gdb info threads` can
+//! render:
 //!
 //! - Exec: `act-timer-c{cursor}-pid{pid}` — fits a 9-char pid unscathed at `cursor=0`.
 //! - PipeStage: `act-timer-pipe-c{cursor}-s{stage}-pid{pid}` — exceeds the Linux ceiling at any
-//!   non-trivial stage/pid, so live-system inspection on Linux must cross-reference via the
-//!   `tracing` log keyed on the same `pid` (the spawn-failure error line and the
-//!   `tracing::debug!("spawned …")` line both carry `?key` + `pid`).
+//!   non-trivial stage/pid, so live-system inspection on Linux must cross-reference via the `tracing`
+//!   log keyed on the same `pid` (the spawn-failure error line and the `tracing::debug!("spawned
+//!   …")` line both carry `?key` + `pid`).
 //!
 //! The sub identifier is intentionally omitted — adding it would push even the Exec name past the
 //! Linux ceiling.
@@ -54,8 +56,8 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-/// Observability identity for a timer arm — the structured fields the spawn-failure log emits and the
-/// typed parts the OS thread name is built from. Kept as a typed enum (rather than loose `&str` +
+/// Observability identity for a timer arm — the structured fields the spawn-failure log emits and
+/// the typed parts the OS thread name is built from. Kept as a typed enum (rather than loose `&str` +
 /// opaque log payload) so the two variants — exec single-process and pipe per-stage — share one shape
 /// at the seam and the variant-specific name / log differences are encapsulated in this module.
 #[derive(Debug, Clone, Copy)]
@@ -152,15 +154,15 @@ pub(crate) fn arm_timer(
 /// Timer-thread body. Extracted for direct unit testing without standing up a
 /// `thread::Builder::spawn` call (the spawned variant would race the test's polling).
 ///
-/// Takes the signaler as `&dyn` rather than `Arc<dyn>` so the unit test can construct it on the
-/// stack against a custom impl. The production caller [`arm_timer`] passes `&*signaler` (the
-/// `Arc::deref`) into this function from the spawned closure.
+/// Takes the signaler as `&dyn` rather than `Arc<dyn>` so the unit test can construct it on the stack
+/// against a custom impl. The production caller [`arm_timer`] passes `&*signaler` (the `Arc::deref`)
+/// into this function from the spawned closure.
 ///
 /// Signal-failure logs at `tracing::warn!`: the production [`crate::spawner::ChildSignaler`] impl
 /// ESRCH-collapses and re-checks `is_dead` internally, so a `signal_term`/`signal_kill` `Err`
-/// surfacing here is a non-ESRCH, non-already-dead kernel boundary error (e.g. EPERM after
-/// PID-reuse landing on another user's process). An operator triaging "child never terminated
-/// despite SIGKILL" needs this surfaced.
+/// surfacing here is a non-ESRCH, non-already-dead kernel boundary error (e.g. EPERM after PID-reuse
+/// landing on another user's process). An operator triaging "child never terminated despite SIGKILL"
+/// needs this surfaced.
 fn run_timer(deadline: Duration, grace: Duration, signaler: &dyn ChildSignaler) {
     thread::sleep(deadline);
     if signaler.is_dead() {
@@ -265,8 +267,8 @@ mod tests {
         let probe = Probe::new();
         std::thread::scope(|s| {
             s.spawn(|| {
-                // Wait for the observable SIGTERM before marking dead — racing two wall-clock
-                // sleeps flakes under scheduler skew.
+                // Wait for the observable SIGTERM before marking dead — racing two wall-clock sleeps
+                // flakes under scheduler skew.
                 while probe.term_calls() == 0 {
                     std::thread::sleep(Duration::from_millis(1));
                 }

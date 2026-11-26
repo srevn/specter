@@ -101,10 +101,10 @@ mod tests {
         let disabled = BTreeSet::<CompactString>::new();
         let config = Config::from_str("").expect("empty config parses");
 
-        // Sleep a measurable amount so `start_instant.elapsed()` is non-zero in seconds with
-        // extreme tolerance for CI scheduler jitter — the projection's wiring is "did we read
-        // `start_instant.elapsed().as_secs()`?", not "is the clock moving?". A boolean witness
-        // keeps the test deterministic.
+        // Sleep a measurable amount so `start_instant.elapsed()` is non-zero in seconds with extreme
+        // tolerance for CI scheduler jitter — the projection's wiring is "did we read
+        // `start_instant.elapsed().as_secs()`?", not "is the clock moving?". A boolean witness keeps
+        // the test deterministic.
         sleep(Duration::from_millis(5));
         let r = status(
             &engine,
@@ -114,8 +114,8 @@ mod tests {
             &PathBuf::from("/etc/specter.toml"),
         );
         // u64 is unsigned; the constraint reduces to "this read didn't panic and we got a number".
-        // A regression that swapped `start_instant.elapsed()` for, say, `start_wall.elapsed()`
-        // would fail at compile time (different methods).
+        // A regression that swapped `start_instant.elapsed()` for, say, `start_wall.elapsed()` would
+        // fail at compile time (different methods).
         let _: u64 = r.uptime_secs;
     }
 
@@ -199,8 +199,8 @@ mod tests {
     }
 
     /// `discovery_active` counts templates — the operator's "how many patterns" view. Two dynamic
-    /// blocks and one static watch attach; the count is exactly the template count while
-    /// `sub_total` carries all three.
+    /// blocks and one static watch attach; the count is exactly the template count while `sub_total`
+    /// carries all three.
     #[test]
     fn status_discovery_active_counts_templates() {
         let config = config_from_watches(&[

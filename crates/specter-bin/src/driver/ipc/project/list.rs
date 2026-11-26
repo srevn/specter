@@ -191,8 +191,8 @@ mod tests {
         assert!(row.sub.is_some(), "engine row carries SubId");
     }
 
-    /// Insertion order across sources does not break sort — the BTreeMap reorders
-    /// deterministically. Construct in reverse and observe alphabetic output.
+    /// Insertion order across sources does not break sort — the BTreeMap reorders deterministically.
+    /// Construct in reverse and observe alphabetic output.
     #[test]
     fn list_alphabetic_order_across_sources() {
         // Source order: TOML first (disabled), then runtime, then engine.
@@ -242,9 +242,9 @@ mod tests {
         assert!(row.disabled.is_none(), "attached row's disabled is None");
     }
 
-    /// A discovery template's row discriminates as `mint` and carries `None` fire stats — a
-    /// template never fires, so there is no history whose counters could move; the `reaction`
-    /// column attributes the n/a (distinguishing it from a non-attached row's `None`s).
+    /// A discovery template's row discriminates as `mint` and carries `None` fire stats — a template
+    /// never fires, so there is no history whose counters could move; the `reaction` column
+    /// attributes the n/a (distinguishing it from a non-attached row's `None`s).
     #[test]
     fn list_template_row_discriminates_mint_with_no_fire_stats() {
         let tmp = tempfile::TempDir::new().unwrap();

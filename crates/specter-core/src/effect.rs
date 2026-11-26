@@ -21,12 +21,12 @@ use std::sync::Arc;
 /// Effect — a command-to-be plus the bookkeeping needed to spawn and coalesce it.
 ///
 /// The flat fields are irreducible identity scalars (frozen at emit time; `(sub, profile, anchor)`
-/// survives any post-emit state churn) plus the substitution payload the actuator-side resolver
-/// reads to render argv/env/cwd. The fire *shape* — whole-subtree vs per-stable-file — is the
+/// survives any post-emit state churn) plus the substitution payload the actuator-side resolver reads
+/// to render argv/env/cwd. The fire *shape* — whole-subtree vs per-stable-file — is the
 /// [`EffectTarget`] sum. Every cross-cutting concern ([`key`](Effect::key),
 /// [`sort_key`](Effect::sort_key), [`target_path`](Effect::target_path), [`diff`](Effect::diff),
-/// [`relative`](Effect::relative)) is a derived method, never a stored field, so a stored
-/// projection cannot drift from the shape.
+/// [`relative`](Effect::relative)) is a derived method, never a stored field, so a stored projection
+/// cannot drift from the shape.
 ///
 /// `program` / `anchor_path` / `exclude` are `Arc`-shared so coalesced Effects from one emit call
 /// reuse one allocation each.
@@ -134,8 +134,8 @@ impl Effect {
     }
 
     /// Coalescing identity — the actuator's `BTreeMap<DedupKey, Slot>`. The engine's fire-history
-    /// is per-Sub ([`crate::Sub::has_fired`]), not a projection of this key. Slotmap keys are
-    /// `Copy`, so this is cheap; callers need it owned anyway.
+    /// is per-Sub ([`crate::Sub::has_fired`]), not a projection of this key. Slotmap keys are `Copy`,
+    /// so this is cheap; callers need it owned anyway.
     #[must_use]
     pub const fn key(&self) -> DedupKey {
         match &self.target {
@@ -155,8 +155,8 @@ impl Effect {
     /// PerFile on the file resource. Replay determinism depends on this being stable.
     ///
     /// No `ProfileId` in the tuple. `SubId` already determines the Profile (`Sub.profile` is
-    /// functional), so adding it cannot refine the partition. [`DedupKey::PerFile`] carries it for an
-    /// unrelated reason — that key doubles as the actuator's per-Profile completion-credit lookup.
+    /// functional), so adding it cannot refine the partition. [`DedupKey::PerFile`] carries it for
+    /// an unrelated reason — that key doubles as the actuator's per-Profile completion-credit lookup.
     #[must_use]
     pub const fn sort_key(&self) -> (SubId, ResourceId) {
         let resource = match &self.target {
@@ -234,8 +234,8 @@ impl DedupKey {
     }
 
     /// The Sub that emitted this key. Both variants carry the field; callers needing the `(sub,
-    /// target)` sort key for [`crate::StepOutput::sort_for_emission`] reach through here rather
-    /// than re-implementing the match.
+    /// target)` sort key for [`crate::StepOutput::sort_for_emission`] reach through here rather than
+    /// re-implementing the match.
     #[must_use]
     pub const fn sub(&self) -> SubId {
         match *self {
@@ -264,8 +264,8 @@ impl Default for DedupKey {
 /// not a routing input.
 ///
 /// `Hash` is intentionally not derived — outcomes are consumed by name (`Ok` vs `Failed`) at the
-/// engine's effect-completion dispatcher; no caller keys a map by an outcome, so a `Hash` impl
-/// would be dead surface.
+/// engine's effect-completion dispatcher; no caller keys a map by an outcome, so a `Hash` impl would
+/// be dead surface.
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub enum EffectOutcome {
     #[default]
@@ -297,9 +297,9 @@ pub enum Termination {
 /// One identity across three layers: the actuator's wait thread builds it, the controller threads
 /// it through unchanged, the engine consumes it via [`crate::Input::EffectComplete`].
 ///
-/// `Clone` is derived so [`crate::Input`] (which the bin's wake-bearing adapters lift the value
-/// into) can stay `Clone` symmetric with every other variant — production code moves the envelope
-/// by value through each layer, but tests that record `Input` streams need it cloneable.
+/// `Clone` is derived so [`crate::Input`] (which the bin's wake-bearing adapters lift the value into)
+/// can stay `Clone` symmetric with every other variant — production code moves the envelope by value
+/// through each layer, but tests that record `Input` streams need it cloneable.
 #[derive(Debug, Clone)]
 pub struct EffectCompletion {
     pub sub: SubId,
@@ -310,9 +310,9 @@ pub struct EffectCompletion {
 /// Sender-side error vocabulary for every cross-thread sink that lands at the engine boundary.
 ///
 /// Both the sensor's [`crate::Input::ProbeResponse`] path and the actuator's
-/// [`crate::Input::EffectComplete`] path classify the same failure mode: "the engine's input
-/// consumer is gone." Single shared vocabulary lets the workspace-wide adapter glue stay symmetric
-/// across both sinks.
+/// [`crate::Input::EffectComplete`] path classify the same failure mode: "the engine's input consumer
+/// is gone." Single shared vocabulary lets the workspace-wide adapter glue stay symmetric across
+/// both sinks.
 ///
 /// One variant today; reserved as an `enum` rather than `()` so future transports (bounded
 /// backpressure, batch submit) can extend the vocabulary without churning every call site.

@@ -5,17 +5,17 @@ use std::collections::BTreeMap;
 
 /// Compute the hot-reload diff between two validated [`Config`]s.
 ///
-/// A pure function of `(old, new)` — no id maps. The returned [`SubRegistryDiff`] is
-/// **name-keyed**: `removed` carries operator names; `added` / `modified_*` carry pre-id requests
-/// whose name lives inside the request. The engine resolves name → id at apply time through its own
-/// authoritative `by_name` index — identity resolution is a registry-owner operation, not the
-/// loader's. Dynamic `[[watch]]` blocks ride the same buckets.
+/// A pure function of `(old, new)` — no id maps. The returned [`SubRegistryDiff`] is **name-keyed**:
+/// `removed` carries operator names; `added` / `modified_*` carry pre-id requests whose name lives
+/// inside the request. The engine resolves name → id at apply time through its own authoritative
+/// `by_name` index — identity resolution is a registry-owner operation, not the loader's. Dynamic
+/// `[[watch]]` blocks ride the same buckets.
 ///
-/// Filters both sides through [`Config::active_watches`] before the name-keyed comparison: a
-/// disabled entry on either side is structurally equivalent to "absent." Flipping `enabled = true →
-/// false` therefore surfaces as `removed`; the reverse as `added`. Edits to fields on a disabled
-/// entry are invisible to the diff (the entry isn't in either filtered set) — they apply on the
-/// next `false → true` transition via the fresh attach.
+/// Filters both sides through [`Config::active_watches`] before the name-keyed comparison: a disabled
+/// entry on either side is structurally equivalent to "absent." Flipping `enabled = true → false`
+/// therefore surfaces as `removed`; the reverse as `added`. Edits to fields on a disabled entry are
+/// invisible to the diff (the entry isn't in either filtered set) — they apply on the next `false →
+/// true` transition via the fresh attach.
 ///
 /// Modified entries are partitioned by `SubSpec::requires_new_profile`:
 ///
@@ -29,9 +29,9 @@ use std::collections::BTreeMap;
 /// The partition is exhaustive and disjoint: every modified entry lands in exactly one bucket.
 ///
 /// Determinism: `removed` is name-ordered structurally — it is built from a `BTreeMap`'s `keys()`
-/// iterator (ascending by API contract), so the order is established at construction and a
-/// debug-mode `is_sorted` check pins the invariant without paying for a runtime sort. `modified_*`
-/// is name-sorted load-bearing — built from source-order `active_watches`, sorted at the end via
+/// iterator (ascending by API contract), so the order is established at construction and a debug-mode
+/// `is_sorted` check pins the invariant without paying for a runtime sort. `modified_*` is
+/// name-sorted load-bearing — built from source-order `active_watches`, sorted at the end via
 /// `sort_unstable_by` (names are unique by validation, so stability is unobservable). `added`
 /// preserves new-source order.
 #[must_use]
@@ -66,8 +66,8 @@ pub fn diff(old: &Config, new: &Config) -> SubRegistryDiff {
     // `removed` is collected from a `BTreeMap`'s keys, so it is already name-ordered by construction
     // — the debug assertion pins the invariant without paying for a runtime sort. Both `modified_*`
     // buckets are built from source-order `active_watches()` and are the load-bearing sort: replay
-    // stability keys on config content, never slotmap mint order. Names are unique by validation, so
-    // `sort_unstable_by` is observably indistinguishable from a stable sort and strictly cheaper.
+    // stability keys on config content, never slotmap mint order. Names are unique by validation,
+    // so `sort_unstable_by` is observably indistinguishable from a stable sort and strictly cheaper.
     debug_assert!(
         removed.is_sorted(),
         "removed must inherit BTreeMap key order",
@@ -107,8 +107,8 @@ mod tests {
         )
     }
 
-    /// Build a watch block with an explicit `settle`. `max_settle` is left to the default (1h),
-    /// which is comfortably above the floor for any reasonable `settle`.
+    /// Build a watch block with an explicit `settle`. `max_settle` is left to the default (1h), which
+    /// is comfortably above the floor for any reasonable `settle`.
     fn block_full(name: &str, exec: &str, settle: &str) -> String {
         format!(
             "[[watch]]\nname = \"{name}\"\npath = \"{ROOT}\"\n\
@@ -252,8 +252,8 @@ mod tests {
     }
 
     /// `settle` is a per-Sub field, not a Profile-identity field ⇒ `modified_params`. Pinning the
-    /// bucket guards against a future `settle`-into-identity drift that would silently re-route
-    /// this case through `modified_identity` (detach+attach with baseline loss) instead of in-place
+    /// bucket guards against a future `settle`-into-identity drift that would silently re-route this
+    /// case through `modified_identity` (detach+attach with baseline loss) instead of in-place
     /// rebind.
     #[test]
     fn settle_change_lands_in_modified_params() {
@@ -372,11 +372,11 @@ mod tests {
         );
     }
 
-    /// `scan` (recursive flag) folds into `ProfileIdentity::config_hash` ⇒ `modified_identity`.
-    /// Same name, same path, different scan ⇒ the Sub must move to a different Profile. Distinct
-    /// from `events_change_lands_in_modified_identity` because `scan` is a nested struct
-    /// (`ScanConfig`) where `events` is a `ClassSet` bitmask — exercising a struct-equality path
-    /// the bitmask test doesn't.
+    /// `scan` (recursive flag) folds into `ProfileIdentity::config_hash` ⇒ `modified_identity`. Same
+    /// name, same path, different scan ⇒ the Sub must move to a different Profile. Distinct from
+    /// `events_change_lands_in_modified_identity` because `scan` is a nested struct (`ScanConfig`)
+    /// where `events` is a `ClassSet` bitmask — exercising a struct-equality path the bitmask test
+    /// doesn't.
     #[test]
     fn scan_change_lands_in_modified_identity() {
         let old_blocks = [block("a", "echo")];
@@ -421,8 +421,8 @@ mod tests {
         assert!(d.modified_params.is_empty());
     }
 
-    /// Removing a dynamic [[watch]] populates `removed` with the operator name — the engine's
-    /// detach cascade reaps the minted set from the template Sub.
+    /// Removing a dynamic [[watch]] populates `removed` with the operator name — the engine's detach
+    /// cascade reaps the minted set from the template Sub.
     #[test]
     fn discovery_removed_populates_removed_with_name() {
         let old_blocks = [dyn_block("logs", "/srv/log/*", "echo")];
@@ -569,8 +569,8 @@ mod tests {
         ));
     }
 
-    /// Mixed reload: one static modify, one discovery add, one of each removed. Static and
-    /// discovery entries ride the same buckets without interaction.
+    /// Mixed reload: one static modify, one discovery add, one of each removed. Static and discovery
+    /// entries ride the same buckets without interaction.
     #[test]
     fn mixed_static_and_discovery_changes_compose_independently() {
         let old_blocks = [
@@ -643,8 +643,8 @@ mod tests {
     }
 
     /// Edits to other fields while the entry is disabled produce no diff: both sides are filtered
-    /// out before the comparison, so the engine sees nothing. The new field values apply on the
-    /// next `false → true` transition via the fresh attach.
+    /// out before the comparison, so the engine sees nothing. The new field values apply on the next
+    /// `false → true` transition via the fresh attach.
     #[test]
     fn disabled_to_disabled_with_field_change_yields_empty_diff() {
         let old = cfg(&[block_with_enabled("a", "echo", false).as_str()]);

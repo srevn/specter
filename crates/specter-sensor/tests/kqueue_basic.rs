@@ -2,8 +2,8 @@
 //! the corresponding `FsEvent` arrives via `drain_ready` driven by a `mio::Poll` registered on the
 //! watcher's `AsFd::as_fd`. macOS / FreeBSD only — kqueue is BSD-only.
 //!
-//! Each test passes the minimum [`ClassSet`] needed to fire the event it asserts on (identity floor
-//! + class-aware mapping):
+//! Each test passes the minimum [`ClassSet`] needed to fire the event it asserts on (identity floor +
+//! class-aware mapping):
 //! - Terminal events (`Removed`, `Renamed`, `Revoked`) work with `EMPTY` because `IDENTITY_FLOOR =
 //!   NOTE_DELETE | NOTE_RENAME | NOTE_REVOKE` is OR-ed onto every registration.
 //! - `StructureChanged` on a Dir needs [`ClassSet::STRUCTURE`].
@@ -40,16 +40,16 @@ fn poll_for(w: &KqueueWatcher) -> Poll {
     poll
 }
 
-/// Drain events from `w` into a `(ResourceId, FsEvent)` accumulator until at least one matches
-/// `pred` or the deadline elapses. Returns the accumulated events.
+/// Drain events from `w` into a `(ResourceId, FsEvent)` accumulator until at least one matches `pred`
+/// or the deadline elapses. Returns the accumulated events.
 ///
 /// Blocks via `mio::Poll` on the watcher's `AsFd::as_fd`; pumps every readable edge through
 /// `drain_ready`. Spurious wakes are harmless — `drain_ready` is idempotent on an empty queue
 /// (`Ok(0)`).
 ///
-/// kqueue must not emit [`WatcherEvent::Overflow`] under v1 (`EV_CLEAR` coalesces but never
-/// silently drops at the kernel level); the helper `panic!`s if it sees one so a future regression
-/// here surfaces as a loud test failure rather than silent event loss.
+/// kqueue must not emit [`WatcherEvent::Overflow`] under v1 (`EV_CLEAR` coalesces but never silently
+/// drops at the kernel level); the helper `panic!`s if it sees one so a future regression here
+/// surfaces as a loud test failure rather than silent event loss.
 fn drain_until<F: Fn(&(ResourceId, FsEvent)) -> bool>(
     w: &mut KqueueWatcher,
     pred: F,

@@ -19,18 +19,18 @@
 //! ## What v1 keeps and what it throws away
 //!
 //! v1 collapses every name-bearing structure event into [`specter_core::FsEvent::StructureChanged`]
-//! and re-discovers the delta via a parent probe — `cookie` and `name` are never consumed. The
-//! parser preserves them anyway so a future optimization that mints a typed `Input::ChildEvent {
-//! parent, name, kind }` directly from inotify does not have to reshape the record API. Cost is one
+//! and re-discovers the delta via a parent probe — `cookie` and `name` are never consumed. The parser
+//! preserves them anyway so a future optimization that mints a typed `Input::ChildEvent { parent,
+//! name, kind }` directly from inotify does not have to reshape the record API. Cost is one
 //! byte-slice borrow per record on the hot path.
 //!
 //! ## Truncation discipline
 //!
 //! The kernel returns `EINVAL` if the user buffer is below the per-event minimum (`sizeof(struct
-//! inotify_event) + NAME_MAX + 1` ≈ 273 bytes, per `inotify(7)`). The watcher sizes its drain
-//! buffer well above that — see [`super::watcher`] — so `read` never returns a truncated record.
-//! The defensive guards below silently end iteration on a malformed buffer rather than panic, but
-//! those branches are observationally dead under healthy invariants.
+//! inotify_event) + NAME_MAX + 1` ≈ 273 bytes, per `inotify(7)`). The watcher sizes its drain buffer
+//! well above that — see [`super::watcher`] — so `read` never returns a truncated record. The
+//! defensive guards below silently end iteration on a malformed buffer rather than panic, but those
+//! branches are observationally dead under healthy invariants.
 
 use libc::c_int;
 
@@ -54,8 +54,8 @@ pub(super) struct Record<'a> {
     /// probes the parent on `StructureChanged`); preserved for v3+ named-event handling.
     #[allow(dead_code)]
     pub cookie: u32,
-    /// Basename portion (NUL padding stripped). Empty for non-name events. Borrows from the
-    /// watcher's drain buffer; lifetime matches the parser's input slice.
+    /// Basename portion (NUL padding stripped). Empty for non-name events. Borrows from the watcher's
+    /// drain buffer; lifetime matches the parser's input slice.
     pub name: &'a [u8],
 }
 
@@ -218,8 +218,8 @@ mod tests {
 
     #[test]
     fn iter_advances_through_padded_records_in_order() {
-        // Three back-to-back records with varying name lengths and padding; verify the iterator
-        // hands them back in order.
+        // Three back-to-back records with varying name lengths and padding; verify the iterator hands
+        // them back in order.
         let mut buf = encode(10, libc::IN_CREATE, 0, b"a", 3);
         buf.extend(encode(11, libc::IN_DELETE, 0, b"bb", 2));
         buf.extend(encode(12, libc::IN_ATTRIB, 0, b"ccc", 1));

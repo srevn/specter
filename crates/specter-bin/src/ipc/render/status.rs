@@ -29,9 +29,9 @@ use std::fmt::Write as _;
 
 /// Render the status response as one operator-readable block.
 ///
-/// `_wide` is reserved for future extensions (currently unused; the `status` view fits on one
-/// screen of the default columns) — keeps the signature aligned with the other renderers. `sty`
-/// gates ANSI styling on the resolved stdout stream.
+/// `_wide` is reserved for future extensions (currently unused; the `status` view fits on one screen
+/// of the default columns) — keeps the signature aligned with the other renderers. `sty` gates ANSI
+/// styling on the resolved stdout stream.
 pub(crate) fn render(out: &mut String, resp: &StatusResponse, _wide: bool, sty: Styler) {
     out.reserve(512);
     let _ = writeln!(out, "{}", sty.paint(style::LABEL, "specter status"));
@@ -78,8 +78,8 @@ pub(crate) fn render(out: &mut String, resp: &StatusResponse, _wide: bool, sty: 
         label_cell(sty, "discovery", LABEL_WIDTH),
         counted(resp.discovery_active, "template", "templates"),
     );
-    // `WirePath: Display` writes its inner UTF-8 / lossy-projected string verbatim — zero-alloc
-    // into `out`, no intermediate.
+    // `WirePath: Display` writes its inner UTF-8 / lossy-projected string verbatim — zero-alloc into
+    // `out`, no intermediate.
     let _ = writeln!(
         out,
         "{}{}",

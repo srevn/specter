@@ -10,18 +10,18 @@
 //!
 //! Two channel-bundle types pair through one [`ActuatorIO::pair`] call:
 //!
-//! - [`ActuatorIO`] — driver-side handles. Lives on [`crate::driver::EngineDriver`] for the
-//!   daemon's lifetime; [`crate::driver::EngineDriver::dispatch_signal_with_exit_fn`] pulses
+//! - [`ActuatorIO`] — driver-side handles. Lives on [`crate::driver::EngineDriver`] for the daemon's
+//!   lifetime; [`crate::driver::EngineDriver::dispatch_signal_with_exit_fn`] pulses
 //!   `shutdown_actuator_tx` / `hard_shutdown_actuator_tx` and waits on `hard_shutdown_done_rx`.
 //!   `effects_tx` carries every emitted [`EffectOp`].
 //! - [`RunWiring`] — actuator-thread handles. Owned by the actuator's
-//!   [`specter_actuator::SubprocessActuator::run`] for the lifetime of the call. There is no
-//!   bin-side mirror name: the actuator's own contract is the one struct that crosses the seam.
+//!   [`specter_actuator::SubprocessActuator::run`] for the lifetime of the call. There is no bin-side
+//!   mirror name: the actuator's own contract is the one struct that crosses the seam.
 //!
 //! `effect_complete_tx` is NOT in either struct — it's lifted into a
 //! [`specter_actuator::EffectCompleteSender`] trait object (the bin's `WakingEffectCompleteSender`)
-//! at `App::run`'s wiring point so the actuator never names [`specter_core::Input`]. The trait
-//! object is passed alongside the [`RunWiring`] into the actuator-thread spawn.
+//! at `App::run`'s wiring point so the actuator never names [`specter_core::Input`]. The trait object
+//! is passed alongside the [`RunWiring`] into the actuator-thread spawn.
 //!
 //! Prober traffic does NOT live here. The prober's response channel pairs the driver's
 //! [`crate::driver::Reactor`] `prober_response_rx` with the bin's `WakingProberResponseSender`
@@ -32,8 +32,8 @@
 //!
 //! - `effects_tx` is **`bounded(1024)`** — headroom for one large initial-attach burst (hundreds of
 //!   effects per Sub on a fresh daemon). The driver's [`crate::driver::EngineDriver::forward`] uses
-//!   `try_send` with advisory drop on `Full` (the engine's `gate_deadline` recovery covers the
-//!   missed Submit); `Disconnected` is terminal.
+//!   `try_send` with advisory drop on `Full` (the engine's `gate_deadline` recovery covers the missed
+//!   Submit); `Disconnected` is terminal.
 //! - **Shutdown legs** are `bounded(1)` — coalesces redundant pulses at the kernel queue layer; the
 //!   consumer drains via `try_recv` before the next pulse can land.
 
@@ -53,9 +53,9 @@ use specter_core::EffectOp;
 #[derive(Debug)]
 #[must_use]
 pub struct ActuatorIO {
-    /// Effects pipe. The driver dispatches every emitted [`EffectOp`] here; the actuator's
-    /// controller drains it via `select!` against its shutdown legs. `bounded(1024)` — see the
-    /// module rustdoc for the cap rationale.
+    /// Effects pipe. The driver dispatches every emitted [`EffectOp`] here; the actuator's controller
+    /// drains it via `select!` against its shutdown legs. `bounded(1024)` — see the module rustdoc
+    /// for the cap rationale.
     pub effects_tx: Sender<EffectOp>,
     /// Soft-shutdown pulse. The driver pulses once on the first SIGINT / SIGTERM observation; the
     /// actuator's controller drains this to enter its graceful-stop arm (SIGTERM-then-wait fanout
@@ -65,8 +65,8 @@ pub struct ActuatorIO {
     /// [`crate::signals::HARD_EXIT_WINDOW`]. The actuator's controller pre-empts its grace window
     /// and runs SIGKILL fanout against every running child.
     pub hard_shutdown_actuator_tx: Sender<()>,
-    /// Hard-shutdown confirmation receiver. The actuator pulses once after SIGKILL fanout
-    /// completes. The driver's hard-exit path waits on this (bounded by
+    /// Hard-shutdown confirmation receiver. The actuator pulses once after SIGKILL fanout completes.
+    /// The driver's hard-exit path waits on this (bounded by
     /// [`crate::signals::HARD_SHUTDOWN_CONFIRM_TIMEOUT`]) before calling [`std::process::exit`] so
     /// the parent doesn't abort while children are still being signaled.
     pub hard_shutdown_done_rx: Receiver<()>,
@@ -102,9 +102,9 @@ mod tests {
     use super::*;
     use crossbeam::channel::TrySendError;
 
-    /// [`ActuatorIO::pair`] yields a `bounded(1024)` effects channel. Pins the cap against
-    /// accidental relaxation; the driver's `try_send` policy and the actuator's drain cadence are
-    /// calibrated around this width.
+    /// [`ActuatorIO::pair`] yields a `bounded(1024)` effects channel. Pins the cap against accidental
+    /// relaxation; the driver's `try_send` policy and the actuator's drain cadence are calibrated
+    /// around this width.
     #[test]
     fn pair_creates_bounded_effects_at_1024() {
         let (io, wiring) = ActuatorIO::pair();

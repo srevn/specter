@@ -1,8 +1,8 @@
 //! `specter list` client handler.
 //!
-//! Same shape as [`super::status::run`]: round-trip through [`super::connect::round_trip`],
-//! dispatch on the output format, render through [`crate::ipc::render::list`] or emit the
-//! deserialised JSON verbatim.
+//! Same shape as [`super::status::run`]: round-trip through [`super::connect::round_trip`], dispatch
+//! on the output format, render through [`crate::ipc::render::list`] or emit the deserialised JSON
+//! verbatim.
 //!
 //! Exit codes match the rest of the client surface: `0` success, `1` connect / protocol /
 //! unexpected-response failure.

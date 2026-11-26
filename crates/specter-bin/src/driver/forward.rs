@@ -2,9 +2,9 @@
 //! tracing map, and the diagnostic fan-out to operator-IPC subscribers.
 //!
 //! [`EngineDriver::forward`] ships every [`StepOutput`] onward: `watch_ops` →
-//! [`crate::driver::Reactor::apply_watch_ops`] (inline against the owned watcher; rejected ops
-//! queue as [`Input::WatchOpRejected`] in the deferred-input replay queue); `probe_ops` →
-//! `prober.submit` / `cancel`; `cancel_effects` + `effects` → `actuator_io.effects_tx` (lifted to
+//! [`crate::driver::Reactor::apply_watch_ops`] (inline against the owned watcher; rejected ops queue
+//! as [`Input::WatchOpRejected`] in the deferred-input replay queue); `probe_ops` → `prober.submit`
+//! / `cancel`; `cancel_effects` + `effects` → `actuator_io.effects_tx` (lifted to
 //! [`EffectOp::Cancel`] / [`EffectOp::Submit`], cancels first so a defensive same-step cancel +
 //! submit for one profile would kill stale before spawn new); `diagnostics` → [`log_diagnostic`]
 //! AND [`crate::driver::Hub::dispatch_to_subscribers`] (fan-out to live IPC subscribers, with a
@@ -12,9 +12,9 @@
 //! for the same emission).
 //!
 //! **No `shutdown_engine_rx` arm.** Signals dispatch inline on the reactor thread via
-//! [`super::EngineDriver::dispatch_signal`], and a wedged effects channel surfaces through
-//! `try_send` rather than blocking the reactor mid-tick. Per-channel disconnect policy is explicit
-//! at the call site; the rationale lives on the method.
+//! [`super::EngineDriver::dispatch_signal`], and a wedged effects channel surfaces through `try_send`
+//! rather than blocking the reactor mid-tick. Per-channel disconnect policy is explicit at the call
+//! site; the rationale lives on the method.
 //!
 //! `log_diagnostic` is the per-variant hand-mapping of a [`Diagnostic`] to a tracing event; its
 //! severities are the operator-facing catalogue.
@@ -40,30 +40,30 @@ impl<W: FsWatcher> EngineDriver<W> {
     ///
     /// **`effects_tx` is `try_send` with advisory drop on `Full`.** The engine's `gate_deadline`
     /// recovery contract covers a missed Submit identically to "actuator wedged" — both produce a
-    /// `EffectComplete` that never arrives, so the burst force-transitions `Awaiting → Rebasing`
-    /// on the same timer. Advisory drop on `Full` is therefore safe; the cost is a single missed
-    /// effect, recovered through the same path operators already observe under actuator pressure.
+    /// `EffectComplete` that never arrives, so the burst force-transitions `Awaiting → Rebasing` on
+    /// the same timer. Advisory drop on `Full` is therefore safe; the cost is a single missed effect,
+    /// recovered through the same path operators already observe under actuator pressure.
     /// `Disconnected` remains terminal (actuator thread is gone — no recovery possible).
     ///
-    /// **Probe ops dispatch directly.** [`StepOutput::into_parts`] yields an owner-keyed map (at most
-    /// one op per owner by construction), the producer-side image of the prober's own `expected` map.
-    /// So the prober's non-commuting `submit` / `cancel` never see a superseded same-owner pair: the
-    /// shape collapses it before the wire. Probe *correctness* is the engine's — a stale or
+    /// **Probe ops dispatch directly.** [`StepOutput::into_parts`] yields an owner-keyed map (at
+    /// most one op per owner by construction), the producer-side image of the prober's own `expected`
+    /// map. So the prober's non-commuting `submit` / `cancel` never see a superseded same-owner pair:
+    /// the shape collapses it before the wire. Probe *correctness* is the engine's — a stale or
     /// superseded response folds to `StaleProbeResponse` at its response gate, never this drain's.
     ///
-    /// **Diagnostic fan-out lives on [`Self::forward_diagnostics`].** The wall-clock +
-    /// per-subscriber byte-identical `at` contract is documented there; the call site below is one
-    /// line so the terminal-drain ordering above is unobstructed by it.
+    /// **Diagnostic fan-out lives on [`Self::forward_diagnostics`].** The wall-clock + per-subscriber
+    /// byte-identical `at` contract is documented there; the call site below is one line so the
+    /// terminal-drain ordering above is unobstructed by it.
     pub(super) fn forward(&mut self, out: StepOutput) -> ControlFlow<()> {
         // Terminal-consumer drain: `out` is already resealed (every `StepOutput`-returning entry
         // point sorts before returning), so a single by-value destructure preserves the sort and
         // the dispatch order below without one clone per Effect.
         let (watch_ops, probe_ops, effects, cancel_effects, diagnostics) = out.into_parts();
 
-        // Apply watch ops inline against the Reactor-owned watcher. The rejected list is the
-        // producer side of the `Input::WatchOpRejected` replay queue — every rejection runs through
-        // `engine.step` on the next tick's `replay_deferred_inputs` pass, so the engine's
-        // claim-purge dispatch fires within one tick of the failure.
+        // Apply watch ops inline against the Reactor-owned watcher. The rejected list is the producer
+        // side of the `Input::WatchOpRejected` replay queue — every rejection runs through
+        // `engine.step` on the next tick's `replay_deferred_inputs` pass, so the engine's claim-purge
+        // dispatch fires within one tick of the failure.
         for (resource, failure) in self.reactor.apply_watch_ops(&watch_ops) {
             self.deferred_inputs
                 .push_back(Input::WatchOpRejected { resource, failure });
@@ -82,8 +82,8 @@ impl<W: FsWatcher> EngineDriver<W> {
         // cancel), but if a future emission site ever introduced the cross-stream race, "kill stale
         // before spawn new" is the right ordering and is structural here, not a documented
         // convention. The single `effects_tx` channel keeps the engine→actuator FIFO single, so
-        // causal order between same-profile cancel and a later submit (in a later step) is
-        // preserved automatically.
+        // causal order between same-profile cancel and a later submit (in a later step) is preserved
+        // automatically.
         for profile in cancel_effects {
             match self
                 .actuator_io
@@ -135,17 +135,17 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// fast client cannot observe a slower client's `at`.
     ///
     /// **`WireTime` projection is also once per call.** The RFC 3339 render allocation runs once
-    /// here; every per-diag [`crate::ipc::wire::WireDiagnostic::from`]
-    /// projection bumps the `Arc<str>` refcount instead of re-formatting. For a high-fanout
-    /// `StepOutput` (e.g., a 256-fanout `DiscoveryMinted` burst) this collapses N format calls into
-    /// 1 + N atomic refcount bumps.
+    /// here; every per-diag [`crate::ipc::wire::WireDiagnostic::from`] projection bumps the
+    /// `Arc<str>` refcount instead of re-formatting. For a high-fanout `StepOutput` (e.g., a
+    /// 256-fanout `DiscoveryMinted` burst) this collapses N format calls into 1 + N atomic refcount
+    /// bumps.
     ///
     /// **Empty-slice short-circuit.** Most ticks emit zero diagnostics; the early return keeps the
     /// [`SystemTime::now`] syscall and the `WireTime` projection off the common path.
     ///
     /// **Subscriber-empty short-circuit.** When no operator is subscribed
-    /// ([`crate::driver::Hub::has_any_subscriber`] → `false`), only [`log_diagnostic`] runs per
-    /// diag — the per-emission [`SystemTime::now`] / [`WireTime::from`] / [`diag_sub`] /
+    /// ([`crate::driver::Hub::has_any_subscriber`] → `false`), only [`log_diagnostic`] runs per diag
+    /// — the per-emission [`SystemTime::now`] / [`WireTime::from`] / [`diag_sub`] /
     /// `dispatch_to_subscribers` work is skipped entirely. For a `StepOutput` carrying N diags on a
     /// quiet daemon this collapses to N tracing emits plus one conn-map walk, rather than N times
     /// the same walk inside the dispatch path's defensive inner gate.
@@ -172,18 +172,18 @@ impl<W: FsWatcher> EngineDriver<W> {
 /// Map a [`Diagnostic`] to a tracing event.
 ///
 /// Most variants are `warn` (drops + race conditions). With auto-reload landed,
-/// `EffectCompleteForUnknownSub` is `warn` too — the auto-reload path makes the
-/// detach-during-effect race routine; engine bugs surface via test assertions on the `Diagnostic::`
-/// variant rather than via log severity. `ProfileReaped` and `ReapPendingCancelled` are `info`
-/// (informational; the Profile was reaped — see `via` for the trigger — or the deferred reap was
-/// pre-empted by a revival). `StaleProbeResponse` is `debug`: the response gate fires it for
-/// designed supersedes (an overflow reseed, a post-cancel arrival, a fresh mint), so `warn` would
-/// misread a routine, self-fencing race as an operator-actionable fault.
+/// `EffectCompleteForUnknownSub` is `warn` too — the auto-reload path makes the detach-during-effect
+/// race routine; engine bugs surface via test assertions on the `Diagnostic::` variant rather than
+/// via log severity. `ProfileReaped` and `ReapPendingCancelled` are `info` (informational; the
+/// Profile was reaped — see `via` for the trigger — or the deferred reap was pre-empted by a
+/// revival). `StaleProbeResponse` is `debug`: the response gate fires it for designed supersedes
+/// (an overflow reseed, a post-cancel arrival, a fresh mint), so `warn` would misread a routine,
+/// self-fencing race as an operator-actionable fault.
 ///
-/// These per-variant levels are also the client-side severity catalogue: `specter tail` colours
-/// each line by the same judgment in `crate::ipc::render::diag::severity` (`error!`→red,
-/// `warn!`→yellow, `info!`/`debug!`/`trace!`→unstyled, with `SubFired` elevated to green).
-/// Re-judging a variant means moving it in both places.
+/// These per-variant levels are also the client-side severity catalogue: `specter tail` colours each
+/// line by the same judgment in `crate::ipc::render::diag::severity` (`error!`→red, `warn!`→yellow,
+/// `info!`/`debug!`/`trace!`→unstyled, with `SubFired` elevated to green). Re-judging a variant means
+/// moving it in both places.
 pub(super) fn log_diagnostic(d: &Diagnostic) {
     match d {
         Diagnostic::StaleProbeResponse { owner, correlation } => tracing::debug!(
@@ -490,8 +490,8 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
             name,
             minted_by,
         } => match minted_by {
-            // Operator-declared attach: high signal, low rate (one per `[[watch]]` block per
-            // reload). INFO is the operator-facing default per the catalog severity table.
+            // Operator-declared attach: high signal, low rate (one per `[[watch]]` block per reload).
+            // INFO is the operator-facing default per the catalog severity table.
             None => tracing::info!(?sub, %name, "sub attached"),
             // A minted attach: one per match, which can be many per pass. DEBUG keeps operator logs
             // uncluttered; `DiscoveryMinted` carries the path at the same severity.
@@ -705,9 +705,9 @@ mod tests {
         ProfileId::from(KeyData::from_ffi(raw))
     }
 
-    /// Every per-Sub [`Diagnostic`] variant projects to its Sub, a line about a Sub the engine
-    /// holds with the template that minted it, a reap with both the match and its template, and a
-    /// pass's line to its template. A regression here is a `wait <name>` bug.
+    /// Every per-Sub [`Diagnostic`] variant projects to its Sub, a line about a Sub the engine holds
+    /// with the template that minted it, a reap with both the match and its template, and a pass's
+    /// line to its template. A regression here is a `wait <name>` bug.
     #[test]
     fn diag_sub_pairs_each_line_with_its_template() {
         let (s, t, p) = (sid(1), sid(2), pid(0xAA));
@@ -777,8 +777,8 @@ mod tests {
     }
 
     /// Profile-keyed and metadata-only variants project to `None` — they reach unfiltered
-    /// subscribers, never filtered ones. Catches a future variant that carries a [`SubId`] but
-    /// lands in the wrong arm.
+    /// subscribers, never filtered ones. Catches a future variant that carries a [`SubId`] but lands
+    /// in the wrong arm.
     #[test]
     fn diag_sub_profile_keyed_returns_none() {
         let p = pid(0xAA);

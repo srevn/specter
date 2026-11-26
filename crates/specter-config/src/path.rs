@@ -21,9 +21,9 @@ pub(crate) enum PathError {
     /// during canonicalisation.
     ContainsParentDir,
     /// `canonicalize` surfaced a non-`NotFound` `io::Error` — `PermissionDenied`, symlink loop,
-    /// `NotADirectory`, EIO, etc. `at` carries the cursor at the point of failure (equal to the
-    /// input on a top-level fail, a deeper ancestor on a mid-walk fail), and `source` preserves the
-    /// raw `io::Error` for the operator-visible detail line.
+    /// `NotADirectory`, EIO, etc. `at` carries the cursor at the point of failure (equal to the input
+    /// on a top-level fail, a deeper ancestor on a mid-walk fail), and `source` preserves the raw
+    /// `io::Error` for the operator-visible detail line.
     Inaccessible { at: PathBuf, source: std::io::Error },
     /// The canonicalised buffer carries one or more non-UTF-8 segments — typically via symlink
     /// resolution onto a non-UTF-8 byte path. The engine's [`specter_core::Tree::parse_attach_path`]
@@ -68,8 +68,8 @@ impl std::error::Error for PathError {
 /// Internally three phases:
 ///
 /// 1. **Structural pre-normalisation** ([`normalize_structure`]): no I/O — rejects empty,
-///    non-absolute, and `..`-bearing inputs. The downstream phases rely on its post-condition
-///    (every cursor has a `file_name`; walk-up terminates at root).
+///    non-absolute, and `..`-bearing inputs. The downstream phases rely on its post-condition (every
+///    cursor has a `file_name`; walk-up terminates at root).
 /// 2. **Filesystem resolution** ([`resolve_filesystem`]): walks the parent chain via in-place
 ///    `cursor.pop()` until `canonicalize` succeeds; reattaches the missing tail. Non-`NotFound`
 ///    errors collapse to [`PathError::Inaccessible`] carrying the cursor at fault.
@@ -158,10 +158,10 @@ fn resolve_filesystem(input: &Path) -> Result<PathBuf, PathError> {
     }
 }
 
-/// Post-resolution UTF-8 check. Symlink resolution can surface a non-UTF-8 segment that the
-/// engine's [`specter_core::Tree::parse_attach_path`] gate would reject; catch it here so the
-/// validator's contract ("ok ⇒ engine accepts the path") holds. Original TOML input is UTF-8 by
-/// construction, so the only way this fails is through symlink resolution.
+/// Post-resolution UTF-8 check. Symlink resolution can surface a non-UTF-8 segment that the engine's
+/// [`specter_core::Tree::parse_attach_path`] gate would reject; catch it here so the validator's
+/// contract ("ok ⇒ engine accepts the path") holds. Original TOML input is UTF-8 by construction,
+/// so the only way this fails is through symlink resolution.
 fn enforce_utf8(p: PathBuf) -> Result<PathBuf, PathError> {
     if p.to_str().is_some() {
         Ok(p)

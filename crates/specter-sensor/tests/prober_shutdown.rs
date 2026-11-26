@@ -1,7 +1,7 @@
-//! `shutdown(self)` cleanly drops the queue Sender, joins workers, and returns each worker's
-//! `(index, thread::Result<()>)` for the bin to log. `drop(prober)` without an explicit shutdown
-//! still terminates workers via channel disconnect — workers run to completion on pending probes,
-//! then exit.
+//! `shutdown(self)` cleanly drops the queue Sender, joins workers, and returns each worker's `(index,
+//! thread::Result<()>)` for the bin to log. `drop(prober)` without an explicit shutdown still
+//! terminates workers via channel disconnect — workers run to completion on pending probes, then
+//! exit.
 
 #![cfg(unix)]
 

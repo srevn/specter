@@ -11,8 +11,8 @@
 //!   completions diagnose.
 //! - `reap_pending` mid-Awaiting reaps without re-probing.
 //! - Anchor loss during Awaiting / Rebasing finishes the burst cleanly.
-//! - The Seed-side drift path that produces zero effects skips Awaiting; the Standard-side
-//!   hash-dedup suppression skips Awaiting too.
+//! - The Seed-side drift path that produces zero effects skips Awaiting; the Standard-side hash-dedup
+//!   suppression skips Awaiting too.
 
 use compact_str::CompactString;
 use specter_core::testkit::{covered, dir_snap, dir_snap_nested, empty_program, proven};
@@ -41,9 +41,9 @@ const MAX_SETTLE: Duration = Duration::from_secs(6);
 const DEFAULT_EVENTS: ClassSet = ClassSet::DEFAULT_SUBTREE_ROOT;
 
 /// Single-file directory snapshot with an explicit `size`, so a post-rebase read can carry a
-/// different leaf hash for the same `inode` (an in-place formatter rewrite). The canonical
-/// `dir_snap` bakes `size = 0` and offers no override, so this distinct sized fixture stays
-/// file-local — two consumers is not a shared pattern.
+/// different leaf hash for the same `inode` (an in-place formatter rewrite). The canonical `dir_snap`
+/// bakes `size = 0` and offers no override, so this distinct sized fixture stays file-local — two
+/// consumers is not a shared pattern.
 fn sized_file_snap(
     name: &str,
     kind: EntryKind,
@@ -68,9 +68,9 @@ fn sized_file_snap(
 }
 
 /// Subtree-root attach request returning a recursive Sub with `/bin/true`. Uses [`DEFAULT_EVENTS`]
-/// so a single Authoritative sample closes the verdict floor's hash-equality channel — the
-/// canonical shape every test in this file relies on. Tests that need a different mask construct
-/// their own request inline.
+/// so a single Authoritative sample closes the verdict floor's hash-equality channel — the canonical
+/// shape every test in this file relies on. Tests that need a different mask construct their own
+/// request inline.
 fn subtree_request(name: &str, r: ResourceId) -> SubAttachRequest {
     SubAttachRequest::for_anchor(
         name.into(),
@@ -136,8 +136,8 @@ fn attach_and_complete_seed(
 ///
 /// A Standard burst's first probe diffs against the seed baseline; if the response carries a
 /// different snapshot, the verdict is unstable and the burst re-arms `Batching`. The second probe
-/// (with the same response) should match the just-grafted `current` and stabilise. This helper
-/// drives the loop until either an Effect fires or the burst self-terminates.
+/// (with the same response) should match the just-grafted `current` and stabilise. This helper drives
+/// the loop until either an Effect fires or the burst self-terminates.
 fn drive_to_awaiting(
     e: &mut Engine,
     pid: ProfileId,
@@ -195,11 +195,12 @@ fn drive_to_awaiting(
 
 #[test]
 fn fire_cycle_terminates_in_one_run_for_idempotent_command() {
-    // Subtree-root Sub on /src; baseline = empty. FsEvent → Standard burst → stable verdict (response
-    // == seed snap) → Awaiting (one Effect). EffectComplete::Ok → Rebasing directly (probe-first; the
-    // rebase probe is already in flight). The post-fire rebase closes on the Authoritative response
-    // (idempotent command) → Idle, baseline == current. A fresh FsEvent identical to the first must
-    // NOT re-fire — hash dedup catches it because fired_subs matches the current view.
+    // Subtree-root Sub on /src; baseline = empty. FsEvent → Standard burst → stable verdict
+    // (response == seed snap) → Awaiting (one Effect). EffectComplete::Ok → Rebasing directly
+    // (probe-first; the rebase probe is already in flight). The post-fire rebase closes on the
+    // Authoritative response (idempotent command) → Idle, baseline == current. A fresh FsEvent
+    // identical to the first must NOT re-fire — hash dedup catches it because fired_subs matches
+    // the current view.
     let mut e = Engine::new();
     let r = anchor_dir(&mut e, "src");
     let now = Instant::now();
@@ -224,8 +225,8 @@ fn fire_cycle_terminates_in_one_run_for_idempotent_command() {
         PostFirePhase::Awaiting { outstanding: 1, .. }
     ));
 
-    // EffectComplete::Ok goes probe-first: Awaiting → Rebasing directly, with the WholeSubtree
-    // rebase probe already in flight in this step.
+    // EffectComplete::Ok goes probe-first: Awaiting → Rebasing directly, with the WholeSubtree rebase
+    // probe already in flight in this step.
     let _ = complete_effect_to_rebasing(
         &mut e,
         sid,
@@ -406,8 +407,8 @@ fn fire_cycle_post_rebase_residual_restarts_debounced_burst() {
         "FsEvent during the Rebasing round-trip absorbed",
     );
 
-    // The anchor's kernel watch taken at start_standard_burst is held through the loop (the
-    // surviving refcount).
+    // The anchor's kernel watch taken at start_standard_burst is held through the loop (the surviving
+    // refcount).
     let watch_before = e.tree().get(r).unwrap().watch_demand();
     assert_eq!(watch_before, 1, "anchor watched for the in-flight burst");
 
@@ -473,17 +474,17 @@ fn fire_cycle_post_rebase_residual_restarts_debounced_burst() {
 
 #[test]
 fn fire_cycle_forced_rebase_terminal_restarts_from_residual() {
-    // The Forced rebase terminal runs the identical final-round-trip race window as the Natural
-    // one, so it takes the identical restart exit. Drive a hung actuator to the gate deadline
-    // (which latches `CeilingState::Reached` and forces the FINAL rebase walk), absorb a
-    // kernel-delivered in-mask event while that walk is in flight, and answer Authoritative:
-    // `Stable(Forced)` must narrate the ceiling AND restart a debounced Standard burst from the
-    // residual — the companion pin to `fire_cycle_post_rebase_residual_restarts_debounced_burst`
-    // (the Natural terminal). The restarted burst then fires the absorbed change.
+    // The Forced rebase terminal runs the identical final-round-trip race window as the Natural one,
+    // so it takes the identical restart exit. Drive a hung actuator to the gate deadline (which
+    // latches `CeilingState::Reached` and forces the FINAL rebase walk), absorb a kernel-delivered
+    // in-mask event while that walk is in flight, and answer Authoritative: `Stable(Forced)` must
+    // narrate the ceiling AND restart a debounced Standard burst from the residual — the companion
+    // pin to `fire_cycle_post_rebase_residual_restarts_debounced_burst` (the Natural terminal). The
+    // restarted burst then fires the absorbed change.
     //
     // The seed snapshot carries a `Covered` child Dir (not `dir_snap`'s `Uncovered` shape): the
-    // restarted burst's verify targets the dirty-LCA — the child — and the response graft must
-    // splice through the baseline's child hop.
+    // restarted burst's verify targets the dirty-LCA — the child — and the response graft must splice
+    // through the baseline's child hop.
     let mut e = Engine::new();
     let r = anchor_dir(&mut e, "src");
     let child = e
@@ -513,9 +514,9 @@ fn fire_cycle_forced_rebase_terminal_restarts_from_residual() {
         .pending_probe_for(pid)
         .expect("forced rebase probe in flight");
 
-    // A kernel-delivered, in-mask change lands during the FINAL probe round-trip — the residual
-    // reset at the Rebasing entry means this absorb is exactly the final-window race the residual
-    // exists to save.
+    // A kernel-delivered, in-mask change lands during the FINAL probe round-trip — the residual reset
+    // at the Rebasing entry means this absorb is exactly the final-window race the residual exists
+    // to save.
     let absorb_out = e.step(
         Input::FsEvent {
             resource: child,
@@ -532,9 +533,9 @@ fn fire_cycle_forced_rebase_terminal_restarts_from_residual() {
         "the final-window event is absorbed into the residual",
     );
 
-    // The forced walk responds Authoritative (it raced the write — same snapshot). The gate
-    // projects forced = true off `CeilingState::Reached` ⇒ Stable(Forced): the ceiling narrates
-    // BEFORE the exit, then the non-empty residual restarts.
+    // The forced walk responds Authoritative (it raced the write — same snapshot). The gate projects
+    // forced = true off `CeilingState::Reached` ⇒ Stable(Forced): the ceiling narrates BEFORE the
+    // exit, then the non-empty residual restarts.
     let t_term = t_gate + Duration::from_millis(5);
     let term_out = e.step(
         Input::ProbeResponse(ProbeResponse {
@@ -643,9 +644,9 @@ fn fire_cycle_gate_deadline_force_transitions_to_rebasing() {
         )),
         "gate-deadline force-rebasing diagnostic emitted",
     );
-    // The engine tells the actuator to abandon in-flight effects on the same edge it gives up
-    // waiting on them; without this, orphaned children would hold permits, FDs, and diff-tmp files
-    // until process exit.
+    // The engine tells the actuator to abandon in-flight effects on the same edge it gives up waiting
+    // on them; without this, orphaned children would hold permits, FDs, and diff-tmp files until
+    // process exit.
     let cancels: Vec<_> = combined.cancel_effects().iter().collect();
     assert_eq!(
         cancels,
@@ -675,10 +676,10 @@ fn fire_cycle_gate_deadline_force_transitions_to_rebasing() {
 
 #[test]
 fn fire_cycle_gate_deadline_on_zombie_burst_reaps_profile() {
-    // Detach the only Sub mid-Awaiting → BurstFinish::Reap (the zombie burst), then let
-    // gate_deadline expire. handle_gate_deadline emits AwaitGateDeadlineReap (not ForceRebasing)
-    // and routes through finish_burst_to_idle → reap_profile, eliding the rebase probe a dying
-    // Profile has no consumer for.
+    // Detach the only Sub mid-Awaiting → BurstFinish::Reap (the zombie burst), then let gate_deadline
+    // expire. handle_gate_deadline emits AwaitGateDeadlineReap (not ForceRebasing) and routes through
+    // finish_burst_to_idle → reap_profile, eliding the rebase probe a dying Profile has no consumer
+    // for.
     let mut e = Engine::new();
     let r = anchor_dir(&mut e, "src");
     let now = Instant::now();
@@ -817,9 +818,9 @@ fn fire_cycle_late_effect_complete_after_gate_deadline_diagnoses() {
 
 #[test]
 fn fire_cycle_anchor_loss_during_awaiting_drops_burst() {
-    // Drive to Awaiting; inject anchor terminal event; finalize_anchor_lost releases anchor,
-    // finishes burst → Parked (root anchor — no recovery parent). Inject late EffectComplete →
-    // diagnoses outside Awaiting.
+    // Drive to Awaiting; inject anchor terminal event; finalize_anchor_lost releases anchor, finishes
+    // burst → Parked (root anchor — no recovery parent). Inject late EffectComplete → diagnoses
+    // outside Awaiting.
     let mut e = Engine::new();
     let r = anchor_dir(&mut e, "src");
     let now = Instant::now();
@@ -932,14 +933,14 @@ fn fire_cycle_anchor_loss_during_rebasing_cancels_probe() {
 
 #[test]
 fn fire_cycle_fresh_seed_skips_awaiting() {
-    // Covers the **no-activity** fresh Seed: a fresh attach with NO FsEvents injected. With an
-    // empty `dirty` provenance, `seed_owes_first_fire` is false and `seed_drift_observed` is false
-    // (never-fired) ⇒ `classify_consequence` yields the silent `SilentPin` ⇒ finish_to_idle
-    // directly, no Awaiting tail. Probe 1 (Retry, prior None) re-batches into PreFire(Batching);
-    // probe 2 (Stable, hash-equal) pins straight to Idle. The witnessed-activity case (a fresh Seed
-    // that *did* see events fires one Effect and *does* enter Awaiting) is covered by the
-    // `fresh_seed_fires::*` reproduction tests — this test deliberately exercises only the
-    // silent-pin path.
+    // Covers the **no-activity** fresh Seed: a fresh attach with NO FsEvents injected. With an empty
+    // `dirty` provenance, `seed_owes_first_fire` is false and `seed_drift_observed` is false
+    // (never-fired) ⇒ `classify_consequence` yields the silent `SilentPin` ⇒ finish_to_idle directly,
+    // no Awaiting tail. Probe 1 (Retry, prior None) re-batches into PreFire(Batching); probe 2
+    // (Stable, hash-equal) pins straight to Idle. The witnessed-activity case (a fresh Seed that
+    // *did* see events fires one Effect and *does* enter Awaiting) is covered by the
+    // `fresh_seed_fires::*` reproduction tests — this test deliberately exercises only the silent-pin
+    // path.
     let mut e = Engine::new();
     let r = anchor_dir(&mut e, "src");
     let now = Instant::now();
@@ -1127,10 +1128,10 @@ fn fire_cycle_reap_pending_during_awaiting_reaps_at_gate_close() {
 
 #[test]
 fn fire_cycle_zombie_rebase_retry_short_circuits_to_reap() {
-    // A burst whose last Sub detached mid-tail (`BurstFinish::Reap`) has no consumer for the
-    // baseline its rebase loop would walk to certify. The next Retry-folding response must finish
-    // the burst (and reap the Profile) instead of walking settle-spaced `WholeSubtree` probes to
-    // the ceiling — mirroring `handle_gate_deadline`'s zombie route.
+    // A burst whose last Sub detached mid-tail (`BurstFinish::Reap`) has no consumer for the baseline
+    // its rebase loop would walk to certify. The next Retry-folding response must finish the burst
+    // (and reap the Profile) instead of walking settle-spaced `WholeSubtree` probes to the ceiling
+    // — mirroring `handle_gate_deadline`'s zombie route.
     let mut e = Engine::new();
     let r = anchor_dir(&mut e, "src");
     let now = Instant::now();
@@ -1261,9 +1262,9 @@ fn fire_cycle_burst_deadline_during_awaiting_dropped_silently() {
 
 #[test]
 fn fire_cycle_concurrent_user_edit_during_awaiting_folds_into_baseline() {
-    // Concurrent user edit during Awaiting on a covered descendant: absorbed into the fire-tail. The
-    // post-fire rebase captures the post-edit state via its WholeSubtree read; the user's edit folds
-    // into the new baseline; it does not fire its own Effect (v1 documented loss-of-fidelity).
+    // Concurrent user edit during Awaiting on a covered descendant: absorbed into the fire-tail.
+    // The post-fire rebase captures the post-edit state via its WholeSubtree read; the user's edit
+    // folds into the new baseline; it does not fire its own Effect (v1 documented loss-of-fidelity).
     //
     // CONTENT events mask so the ContentChanged event passes the class filter.
     let mut e = Engine::new();
@@ -1301,8 +1302,8 @@ fn fire_cycle_concurrent_user_edit_during_awaiting_folds_into_baseline() {
         seed_done + Duration::from_millis(15),
     );
     // Effect completes — probe-first: Awaiting → Rebasing directly. The absorbed edit is cleared
-    // from `dirty` at the Rebasing entry (`reset_residual`); the WholeSubtree rebase walk
-    // re-observes it regardless via the post-edit response below.
+    // from `dirty` at the Rebasing entry (`reset_residual`); the WholeSubtree rebase walk re-observes
+    // it regardless via the post-edit response below.
     let _ = complete_effect_to_rebasing(
         &mut e,
         sid,
@@ -1311,8 +1312,8 @@ fn fire_cycle_concurrent_user_edit_during_awaiting_folds_into_baseline() {
     );
 
     // The rebase read carries the post-edit snapshot (the user's edit changed the directory; the
-    // post-command tree is now quiescent at that state). The rebase settles on it and the
-    // post-rebase baseline reflects the new state.
+    // post-command tree is now quiescent at that state). The rebase settles on it and the post-rebase
+    // baseline reflects the new state.
     let snap_after_edit = dir_snap(&[
         ("child", EntryKind::Dir, 7),
         ("user_edit.txt", EntryKind::File, 99),
@@ -1411,8 +1412,8 @@ fn fire_cycle_standard_b1_suppresses_post_rebase_phantom_for_non_idempotent_comm
         "rebase aligned baseline with the post-Effect tree",
     );
 
-    // Burst 2 — phantom event. The verify probe responds with post_effect (the tree the user
-    // actually has now). B1 dedup derives suppress from `baseline.hash() == current.hash()` AND
+    // Burst 2 — phantom event. The verify probe responds with post_effect (the tree the user actually
+    // has now). B1 dedup derives suppress from `baseline.hash() == current.hash()` AND
     // `fired_subs.contains(dk)` — both true here, so the phantom is suppressed.
     let phantom_out = drive_to_awaiting(
         &mut e,
@@ -1434,11 +1435,11 @@ fn fire_cycle_standard_b1_suppresses_post_rebase_phantom_for_non_idempotent_comm
 
 #[test]
 fn fire_cycle_perfile_suppresses_post_rebase_phantom_for_non_idempotent_format() {
-    // PerFile mirror of the Subtree test. A formatter-style non-idempotent command rewrites
-    // foo.rs's content **in place** (same inode, different leaf-hash inputs — `size` here, the same
-    // shape as a real formatter's `mtime`/`size` change). The slot survives `graft` (same
-    // inode/device → identity match). Post-rebase the baseline carries the post-Effect leaf hash,
-    // so a phantom event at the same file diffs empty against the rebased baseline — no re-fire.
+    // PerFile mirror of the Subtree test. A formatter-style non-idempotent command rewrites foo.rs's
+    // content **in place** (same inode, different leaf-hash inputs — `size` here, the same shape as
+    // a real formatter's `mtime`/`size` change). The slot survives `graft` (same inode/device →
+    // identity match). Post-rebase the baseline carries the post-Effect leaf hash, so a phantom event
+    // at the same file diffs empty against the rebased baseline — no re-fire.
     //
     // `sized_file_snap` builds a `foo.rs` LeafEntry with an explicit `size` so post-rebase carries
     // a different leaf hash for the same `inode` (the canonical `dir_snap` bakes `size = 0`).
@@ -1583,8 +1584,8 @@ fn fire_cycle_perfile_refires_on_real_change_not_gated_by_fire_history() {
         "idempotent rebase loop closes Stable → Idle (empty residual ⇒ no restart)",
     );
     // A PerStableFile Sub's fire-history flag is NEVER set: `mark_fired` is called only by the
-    // SubtreeRoot emit arm. PerFile has no B1 fire-history suppression — it is
-    // diff-membership-gated only, so there is no flag to set and none to dedup against.
+    // SubtreeRoot emit arm. PerFile has no B1 fire-history suppression — it is diff-membership-gated
+    // only, so there is no flag to set and none to dedup against.
     assert!(
         !e.subs().get(sid).unwrap().has_fired(),
         "PerStableFile Sub is never fire-history-marked (mark_fired is SubtreeRoot-only)",
@@ -1609,15 +1610,15 @@ fn fire_cycle_perfile_refires_on_real_change_not_gated_by_fire_history() {
 
 /// The user-reported scp regression, reduced to its Standard-burst shape. A structure-only Profile
 /// attached to a Dir; scp creates the destination file (a `StructureChanged` event at the anchor)
-/// then streams data into it across many settle windows. Pre-Layer-C the verdict's
-/// `Stable(Natural)` folded to `Stable` on the first sample regardless of mask, firing seconds into
-/// a multi-minute transfer (kernel-silent without tree-quiescent — no per-file FDs wired, no
-/// `CONTENT` subscription to catch `NOTE_WRITE`).
+/// then streams data into it across many settle windows. Pre-Layer-C the verdict's `Stable(Natural)`
+/// folded to `Stable` on the first sample regardless of mask, firing seconds into a multi-minute
+/// transfer (kernel-silent without tree-quiescent — no per-file FDs wired, no `CONTENT` subscription
+/// to catch `NOTE_WRITE`).
 ///
-/// Layer-C: the hash channel is active (events-incomplete + fire-bearing burst), so the carrier
-/// holds the fire until two consecutive samples observe equal `dir_hash`. Two settle-spaced
-/// still-moving samples (`size = 10` → `size = 4096`) fold to `Retry`; the third sample (file
-/// stabilised) closes `Stable` and the burst fires exactly once.
+/// Layer-C: the hash channel is active (events-incomplete + fire-bearing burst), so the carrier holds
+/// the fire until two consecutive samples observe equal `dir_hash`. Two settle-spaced still-moving
+/// samples (`size = 10` → `size = 4096`) fold to `Retry`; the third sample (file stabilised) closes
+/// `Stable` and the burst fires exactly once.
 #[test]
 fn scp_into_structure_only_does_not_fire_during_growing_file() {
     let mut e = Engine::new();

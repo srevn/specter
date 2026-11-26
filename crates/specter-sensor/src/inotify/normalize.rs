@@ -34,8 +34,8 @@ use libc::{
 };
 use specter_core::{FsEvent, ResourceKind};
 
-/// Map a single inotify record's mask + the watcher's cached kind to at most one [`FsEvent`].
-/// Returns `None` when:
+/// Map a single inotify record's mask + the watcher's cached kind to at most one [`FsEvent`]. Returns
+/// `None` when:
 ///
 /// - `IN_IGNORED` is set (sensor-internal cleanup signal),
 /// - the mask carries no actionable bit (registration ack on a record the kernel emitted with only
@@ -71,9 +71,9 @@ pub(super) const fn mask_to_fs_event(mask: u32, kind: ResourceKind) -> Option<Fs
     // translator and the engine's class filter.
     let effective = kind.effective();
 
-    // Non-terminal CONTENT bits collapse on kind. The translator requests these only on File
-    // watches, so the Dir arm is defensive (kernel-anomaly safety net): a stray IN_MODIFY on a Dir
-    // folds into StructureChanged, matching kqueue's NOTE_WRITE-on-Dir policy.
+    // Non-terminal CONTENT bits collapse on kind. The translator requests these only on File watches,
+    // so the Dir arm is defensive (kernel-anomaly safety net): a stray IN_MODIFY on a Dir folds into
+    // StructureChanged, matching kqueue's NOTE_WRITE-on-Dir policy.
     if mask & (IN_MODIFY | IN_CLOSE_WRITE) != 0 {
         return Some(if matches!(effective, ResourceKind::Dir) {
             FsEvent::StructureChanged

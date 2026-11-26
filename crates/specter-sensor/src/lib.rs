@@ -1,6 +1,6 @@
 //! `specter-sensor` — dual-backend Watcher (kqueue / inotify) + Prober pool. The traits are
-//! platform-agnostic; the backend implementations are `#[cfg]`-gated modules (kqueue on BSD /
-//! macOS, inotify on Linux).
+//! platform-agnostic; the backend implementations are `#[cfg]`-gated modules (kqueue on BSD / macOS,
+//! inotify on Linux).
 
 // Sensor legitimately needs `unsafe` for kqueue / inotify / epoll / eventfd FFI; `warn` is the
 // looser-than-workspace setting that lets individual sites opt in to silenced unsafe at the audit
@@ -12,8 +12,8 @@
 // non-FFI helper to either file would inherit the silence — so don't.
 //
 // Per-call-site `#[allow(unsafe_code)]` is reserved for the rare isolated `unsafe` block that lives
-// outside an FFI-only module (currently none in sensor; see `actuator/src/os.rs:325` for the
-// pattern in another crate).
+// outside an FFI-only module (currently none in sensor; see `actuator/src/os.rs:325` for the pattern
+// in another crate).
 #![warn(unsafe_code)]
 
 use specter_core::{ClassSet, FsEvent, ProbeRequest, ProfileId, ResourceId, ResourceKind};
@@ -43,12 +43,12 @@ pub trait WatchFailureExt: Sized {
     ///
     /// # Preconditions
     ///
-    /// Classifies errors from **watch-install and watcher-drain syscalls only**
-    /// (`inotify_add_watch` / `open(O_EVTONLY)` / `kevent` / `read(inotify_fd)`). `ENOSPC` is
-    /// interpreted as inotify watch-limit (`max_user_watches`) exhaustion and maps to
-    /// [`WatchFailure::Pressure`]; passing an `io::Error` from a data-path syscall (where `ENOSPC`
-    /// means "disk full") would misclassify a real I/O fault as watch-pressure. Every backend call
-    /// site honours this; the precondition is the contract for any future caller.
+    /// Classifies errors from **watch-install and watcher-drain syscalls only** (`inotify_add_watch`
+    /// / `open(O_EVTONLY)` / `kevent` / `read(inotify_fd)`). `ENOSPC` is interpreted as inotify
+    /// watch-limit (`max_user_watches`) exhaustion and maps to [`WatchFailure::Pressure`]; passing
+    /// an `io::Error` from a data-path syscall (where `ENOSPC` means "disk full") would misclassify
+    /// a real I/O fault as watch-pressure. Every backend call site honours this; the precondition
+    /// is the contract for any future caller.
     fn from_io(e: &io::Error) -> Self;
 }
 
@@ -93,16 +93,16 @@ impl ProbeFailureExt for ProbeFailure {
 ///
 /// Two variants:
 ///
-/// - [`Fs`](Self::Fs) — a per-resource filesystem event. The dominant variant; every
-///   `WatchOp::Watch` install can produce these.
+/// - [`Fs`](Self::Fs) — a per-resource filesystem event. The dominant variant; every `WatchOp::Watch`
+///   install can produce these.
 /// - [`Overflow`](Self::Overflow) — a kernel-level "events were dropped" signal that has no
 ///   `ResourceId` attached. inotify emits this on `IN_Q_OVERFLOW` (the `IDR` overflow → queue-wide
 ///   → `Global` scope); kqueue never emits it under v1 because `EV_CLEAR` coalesces but never
 ///   silently drops at the kernel level.
 ///
-/// The bin lifts each variant into the engine's input vocabulary: `Fs` → `Input::FsEvent`;
-/// `Overflow` → `Input::SensorOverflow`. The engine's response to `Overflow` is to reseed every
-/// in-scope Profile.
+/// The bin lifts each variant into the engine's input vocabulary: `Fs` → `Input::FsEvent`; `Overflow`
+/// → `Input::SensorOverflow`. The engine's response to `Overflow` is to reseed every in-scope
+/// Profile.
 #[derive(Debug, Clone)]
 pub enum WatcherEvent {
     Fs {
@@ -116,37 +116,37 @@ pub enum WatcherEvent {
 
 /// Single-owner filesystem watcher.
 ///
-/// `Send + AsFd`. One thread at a time owns the watcher and drives every
-/// [`watch`](FsWatcher::watch) / [`unwatch`](FsWatcher::unwatch) /
-/// [`drain_ready`](FsWatcher::drain_ready) call. The `Send` bound is load-bearing for the bin's
-/// boot-time ownership transfer: the watcher is constructed on the main thread and *moved* into the
-/// driver's `DriverHub` for the lifetime of the process. Once inside that owner, every call is on
-/// the same thread by construction — there is no internal synchronization. Blocking is the caller's
-/// responsibility: a reactor (mio::Poll, libc::poll, etc.) registers [`AsFd::as_fd`] in
-/// edge-triggered mode and invokes `drain_ready` only when the reactor reports the fd readable. The
-/// trait itself is non-blocking — there is no wake mechanism, no deadline, no internal block;
-/// cross-thread coordination lives in the reactor (e.g. `mio::Waker`), not on the watcher.
+/// `Send + AsFd`. One thread at a time owns the watcher and drives every [`watch`](FsWatcher::watch)
+/// / [`unwatch`](FsWatcher::unwatch) / [`drain_ready`](FsWatcher::drain_ready) call. The `Send` bound
+/// is load-bearing for the bin's boot-time ownership transfer: the watcher is constructed on the
+/// main thread and *moved* into the driver's `DriverHub` for the lifetime of the process. Once inside
+/// that owner, every call is on the same thread by construction — there is no internal
+/// synchronization. Blocking is the caller's responsibility: a reactor (mio::Poll, libc::poll, etc.)
+/// registers [`AsFd::as_fd`] in edge-triggered mode and invokes `drain_ready` only when the reactor
+/// reports the fd readable. The trait itself is non-blocking — there is no wake mechanism, no
+/// deadline, no internal block; cross-thread coordination lives in the reactor (e.g. `mio::Waker`),
+/// not on the watcher.
 ///
 /// # `AsFd` contract
 ///
 /// `as_fd()` is the load-bearing surface for reactor integration. The implementor's obligations:
 ///
 /// - **Long-lived FD.** Return a [`std::os::fd::BorrowedFd`] backed by an owned kernel resource
-///   (kqueue / inotify_init1 / equivalent) acquired in the watcher's constructor and held until
-///   drop. Re-acquiring the resource per call would invalidate any external mio / epoll
-///   registration the reactor took out against the returned RawFd.
+///   (kqueue / inotify_init1 / equivalent) acquired in the watcher's constructor and held until drop.
+///   Re-acquiring the resource per call would invalidate any external mio / epoll registration the
+///   reactor took out against the returned RawFd.
 /// - **Readability ⇒ events queued.** The kernel must mark the fd readable iff at least one record
 ///   is queued for delivery via [`drain_ready`](FsWatcher::drain_ready). A spurious wake (readable,
-///   drain returns no events) is permitted but should be rare; a missed wake (events queued, fd
-///   stays non-readable) silently strands the records.
+///   drain returns no events) is permitted but should be rare; a missed wake (events queued, fd stays
+///   non-readable) silently strands the records.
 /// - **Edge-triggered support.** Reactors register with edge semantics (`Interest::READABLE`); the
 ///   fd must transition from "drained" to "non-drained" via the kernel's internal queue state on
 ///   every fresh event arrival. [`drain_ready`](FsWatcher::drain_ready)'s drain-to-empty discipline
 ///   (see below) is the implementor's complement to this contract — partial drains leave the queue
 ///   non-empty, the next arrival can't fire an edge, and the record is silently stranded.
-/// - **`BorrowedFd` lifetime.** The returned borrow is the call expression's scope; reactors
-///   capture the underlying RawFd (`as_fd().as_raw_fd()` is `Copy`) before the borrow ends. Holding
-///   the BorrowedFd across `&mut self` calls is unnecessary.
+/// - **`BorrowedFd` lifetime.** The returned borrow is the call expression's scope; reactors capture
+///   the underlying RawFd (`as_fd().as_raw_fd()` is `Copy`) before the borrow ends. Holding the
+///   BorrowedFd across `&mut self` calls is unnecessary.
 ///
 /// # Caller pattern (illustrative)
 ///
@@ -189,9 +189,9 @@ pub trait FsWatcher: Send + AsFd {
     /// wildcard — the watcher accepts whatever inode resolves and caches the observed kind for
     /// downstream normalization. Re-watch paths reuse the cached kind and ignore this argument.
     ///
-    /// `events` is the per-Resource event-class union. The watcher diffs it against the cached
-    /// per-FD mask and re-registers iff different; `ClassSet::EMPTY` degrades to
-    /// identity-floor-only delivery.
+    /// `events` is the per-Resource event-class union. The watcher diffs it against the cached per-FD
+    /// mask and re-registers iff different; `ClassSet::EMPTY` degrades to identity-floor-only
+    /// delivery.
     fn watch(
         &mut self,
         r: ResourceId,
@@ -207,10 +207,10 @@ pub trait FsWatcher: Send + AsFd {
     /// sensor-internal and never cross the trait boundary.
     fn unwatch(&mut self, r: ResourceId);
 
-    /// Drain every record currently queued on the underlying kqueue / inotify fd into `out`,
-    /// looping internally until the kernel reports `EAGAIN` (or `EAGAIN`-equivalent: a `kevent(2)`
-    /// call with a zero `timespec` returning `n == 0`). Returns the count of [`WatcherEvent`]s
-    /// pushed *this call*.
+    /// Drain every record currently queued on the underlying kqueue / inotify fd into `out`, looping
+    /// internally until the kernel reports `EAGAIN` (or `EAGAIN`-equivalent: a `kevent(2)` call with
+    /// a zero `timespec` returning `n == 0`). Returns the count of [`WatcherEvent`]s pushed *this
+    /// call*.
     ///
     /// Non-blocking by contract. The caller owns blocking via a reactor on [`AsFd::as_fd`]; this
     /// method translates "kernel says fd readable" into "here are the events."
@@ -255,11 +255,11 @@ pub trait FsWatcher: Send + AsFd {
 /// running process's config path) and no engine vocabulary at the boundary — just "kernel said
 /// something happened (substantively)" or "nothing yet."
 ///
-/// `Send + AsFd`: same discipline as [`FsWatcher`]. One thread at a time owns the watcher and
-/// drives [`drain_ready`](Self::drain_ready); the `Send` bound supports the bin's boot-time
-/// hand-off into the driver thread the same way it does for `FsWatcher`. A reactor blocks on
-/// [`AsFd::as_fd`] and invokes `drain_ready` only when the reactor reports the fd readable. The
-/// trait itself is non-blocking and owns no wake mechanism.
+/// `Send + AsFd`: same discipline as [`FsWatcher`]. One thread at a time owns the watcher and drives
+/// [`drain_ready`](Self::drain_ready); the `Send` bound supports the bin's boot-time hand-off into
+/// the driver thread the same way it does for `FsWatcher`. A reactor blocks on [`AsFd::as_fd`] and
+/// invokes `drain_ready` only when the reactor reports the fd readable. The trait itself is
+/// non-blocking and owns no wake mechanism.
 ///
 /// The `AsFd` contract is the same as [`FsWatcher`]'s: a long-lived kernel-resource-backed
 /// [`std::os::fd::BorrowedFd`], kernel marks readable iff at least one record is queued for
@@ -267,9 +267,9 @@ pub trait FsWatcher: Send + AsFd {
 /// lifetime is the call expression's scope.
 ///
 /// **Why no engine vocabulary?** The kqueue parent-dir filter cannot see basename, so every
-/// dir-contents change in the config's parent becomes a pulse — the watcher cannot pre-classify
-/// "this was about the config file" without a syscall. The driver's lstat-vs-`FileMeta` filter is
-/// the natural place to suppress noise *and* the place that owns the prior-meta-known state, so the
+/// dir-contents change in the config's parent becomes a pulse — the watcher cannot pre-classify "this
+/// was about the config file" without a syscall. The driver's lstat-vs-`FileMeta` filter is the
+/// natural place to suppress noise *and* the place that owns the prior-meta-known state, so the
 /// watcher stays a minimal kernel-event pump.
 ///
 /// # Caller pattern (illustrative)
@@ -294,10 +294,10 @@ pub trait FsWatcher: Send + AsFd {
 /// }
 /// ```
 pub trait ConfigWatcher: Send + AsFd {
-    /// Drain every record currently queued on the underlying inotify / kqueue fd, looping
-    /// internally to the EAGAIN-equivalent. Returns `true` iff at least one substantive event was
-    /// observed (file-side record, or a basename-matched parent record on inotify; any parent pulse
-    /// on kqueue since the watcher cannot pre-classify by basename without an extra syscall).
+    /// Drain every record currently queued on the underlying inotify / kqueue fd, looping internally
+    /// to the EAGAIN-equivalent. Returns `true` iff at least one substantive event was observed
+    /// (file-side record, or a basename-matched parent record on inotify; any parent pulse on kqueue
+    /// since the watcher cannot pre-classify by basename without an extra syscall).
     ///
     /// Same non-blocking + drain-to-empty discipline as [`FsWatcher::drain_ready`]. `Ok(true)` is a
     /// *raw* pulse — the watcher does not decide whether the change is substantive at any deeper
@@ -329,9 +329,9 @@ pub trait ConfigWatcher: Send + AsFd {
 ///
 /// `Send + Sync` so the bin can hold an `Arc<dyn Prober>` (or `Arc<WorkerProber>`) and share it
 /// across threads. v1 issues every `submit` and `cancel` from the bin's engine driver thread (the
-/// sole `StepOutput` forwarder); signal handlers route through channels and the shared shutdown
-/// flag into the engine step, never directly into the prober. The trait bounds reserve the option
-/// of future cross-thread sharing without breaking ABI; the implementation guarantees only that
+/// sole `StepOutput` forwarder); signal handlers route through channels and the shared shutdown flag
+/// into the engine step, never directly into the prober. The trait bounds reserve the option of
+/// future cross-thread sharing without breaking ABI; the implementation guarantees only that
 /// single-submitter discipline. The discipline is the correctness floor, not an optimisation —
 /// `submit` and `cancel` for the same owner do not commute (reordering loses the cancel and runs
 /// the stale correlation).
@@ -342,9 +342,9 @@ pub trait Prober: Send + Sync {
     fn submit(&self, req: ProbeRequest);
 
     /// Best-effort cancel of any *queued* probe for `owner`. In-flight probes are not interrupted;
-    /// the engine drops their responses via stale-correlation discipline. `cancel` clears the
-    /// owner's currently-expected correlation rather than blacklisting the owner: a subsequent
-    /// `submit` for the same owner re-arms the expectation and runs normally.
+    /// the engine drops their responses via stale-correlation discipline. `cancel` clears the owner's
+    /// currently-expected correlation rather than blacklisting the owner: a subsequent `submit` for
+    /// the same owner re-arms the expectation and runs normally.
     fn cancel(&self, owner: ProfileId);
 }
 
@@ -363,11 +363,11 @@ pub trait Prober: Send + Sync {
 ///
 /// # Semantics
 ///
-/// Fire-and-forget. A successful [`send`](Self::send) leaves no further obligation on the caller; an
-/// [`Err`]([`SendError`]) means the consumer is gone (the engine driver dropped its receiver) and the
-/// calling worker should exit its loop. The trait does not carry the rejected payload back on error —
-/// workers do not retry, the bin owns shutdown-cause logging at the appropriate severity, and
-/// dropping the response on the floor is the documented contract once the receiver disappears.
+/// Fire-and-forget. A successful [`send`](Self::send) leaves no further obligation on the caller;
+/// an [`Err`]([`SendError`]) means the consumer is gone (the engine driver dropped its receiver)
+/// and the calling worker should exit its loop. The trait does not carry the rejected payload back
+/// on error — workers do not retry, the bin owns shutdown-cause logging at the appropriate severity,
+/// and dropping the response on the floor is the documented contract once the receiver disappears.
 pub trait ProberResponseSender: Send + Sync + 'static {
     /// Deliver one probe response. Returns `Ok(())` on enqueue; `Err(SendError::Disconnected)` if
     /// the consumer is gone — at which point the caller (a worker) exits its loop.
@@ -428,9 +428,9 @@ pub type DefaultConfigWatcher = InotifyConfigWatcher;
 
 /// Construct the platform's default config-watcher for the supplied path.
 ///
-/// Returns the same concrete type as [`DefaultConfigWatcher`] — no trait-object overhead. The
-/// watcher canonicalises `path` once at construction; symlink retarget at the leaf (or any
-/// path-component move) is a documented restart-required limitation.
+/// Returns the same concrete type as [`DefaultConfigWatcher`] — no trait-object overhead. The watcher
+/// canonicalises `path` once at construction; symlink retarget at the leaf (or any path-component
+/// move) is a documented restart-required limitation.
 ///
 /// On error (`canonicalize` failure / parent dir unreadable / kqueue or inotify init failure), the
 /// bin warn-logs and continues without auto-reload — SIGHUP still works.

@@ -8,9 +8,9 @@
 //! `std::hash::Hash` is explicitly *not* a wire format: `Hash` impls and the `Hasher::write_uXX`
 //! defaults are platform- and version-defined (e.g. `write_u128` defaults to native-endian
 //! `to_ne_bytes`; `siphasher` 1.0.3 specialises `write_u8/16/32/64` little-endian but leaves
-//! `write_u128`/`write_str` on the native-endian/std defaults). A digest built through blanket
-//! `Hash` is therefore *not* reproducible across processes or architectures — the property every
-//! Specter digest comparison depends on.
+//! `write_u128`/`write_str` on the native-endian/std defaults). A digest built through blanket `Hash`
+//! is therefore *not* reproducible across processes or architectures — the property every Specter
+//! digest comparison depends on.
 //!
 //! [`StableHasher`] owns the bytes. Every primitive is the value's **explicit little-endian image**
 //! fed to the SipHash-2-4 `write(&[u8])` core; the seam never calls a width-specialised or
@@ -18,9 +18,9 @@
 //! and finalisation — pinned by the `SipHasher24` type aliases (algorithm) and by the production
 //! golden tests (`dir_hash`/`leaf_hash`/`config_hash`) against crate-upgrade drift. On a
 //! little-endian target the seam is byte-identical to a blanket-`Hash` fold (so the goldens do not
-//! shift); on big-endian it stays *correct*, where a native-endian `write_u128` would diverge.
-//! There is no blanket `Hash` route and no native-endian escape: the inner hasher is only ever
-//! driven by `write(&[u8])`.
+//! shift); on big-endian it stays *correct*, where a native-endian `write_u128` would diverge. There
+//! is no blanket `Hash` route and no native-endian escape: the inner hasher is only ever driven by
+//! `write(&[u8])`.
 //!
 //! These are *fingerprints*, not MACs. There are no secret keys and no adversarial-collision
 //! guarantees: every digest is computed over operator-controlled inputs (config files,
@@ -32,18 +32,18 @@
 //!
 //! - **64-bit ([`hasher`] → [`StableHasher::finish_u64`]):** `config_hash`. One digest per Profile
 //!   lifetime; collisions are a once-per-process event, well below 2⁻³² per-pair risk.
-//! - **128-bit ([`hasher_128`] → [`StableHasher::finish_u128`]):** `dir_hash`, `leaf_hash`.
-//!   Computed at every level of the hierarchical snapshot, on every burst, for every Profile. The
+//! - **128-bit ([`hasher_128`] → [`StableHasher::finish_u128`]):** `dir_hash`, `leaf_hash`. Computed
+//!   at every level of the hierarchical snapshot, on every burst, for every Profile. The
 //!   pair-comparison space is `O(levels × bursts × profiles)`; 64-bit collisions become probable
 //!   over a long-running session and would mask real changes.
 //!
 //! ## Composite encoders
 //!
-//! The seam is a primitive-only byte canonicaliser with zero domain knowledge. Composite types
-//! encode through a single named function sited beside the type, composed only of seam primitives:
-//! [`put_systemtime_into`] here (a `std` type), and `crate::fs_id::encode_into` beside
-//! `FsIdentity`. Callers fold everything explicitly — there is no blanket `Hash` shortcut, which is
-//! what makes a native-endian width unconstructable.
+//! The seam is a primitive-only byte canonicaliser with zero domain knowledge. Composite types encode
+//! through a single named function sited beside the type, composed only of seam primitives:
+//! [`put_systemtime_into`] here (a `std` type), and `crate::fs_id::encode_into` beside `FsIdentity`.
+//! Callers fold everything explicitly — there is no blanket `Hash` shortcut, which is what makes a
+//! native-endian width unconstructable.
 
 use siphasher::sip::SipHasher24 as Sip64;
 use siphasher::sip128::{Hasher128, SipHasher24 as Sip128};
@@ -117,9 +117,9 @@ impl<H: Hasher> StableHasher<H> {
         self.0.write(&v.to_le_bytes());
     }
 
-    /// Fold a string: its UTF-8 bytes followed by the `0xff` prefix-free terminator —
-    /// byte-identical to `std`'s `Hash for str` / `write_str` default, made explicit so the
-    /// encoding cannot drift with a `std`/`siphasher` change.
+    /// Fold a string: its UTF-8 bytes followed by the `0xff` prefix-free terminator — byte-identical
+    /// to `std`'s `Hash for str` / `write_str` default, made explicit so the encoding cannot drift
+    /// with a `std`/`siphasher` change.
     pub fn put_str(&mut self, s: &str) {
         self.0.write(s.as_bytes());
         self.0.write(&[0xFF]);
@@ -138,8 +138,8 @@ pub fn hasher_128() -> StableHasher<Sip128> {
     StableHasher(Sip128::new())
 }
 
-/// Cross-process-stable `SystemTime` encoder — the single canonical route (`std`'s `SystemTime:
-/// Hash` is platform-defined and not stable across macOS / Linux / FreeBSD).
+/// Cross-process-stable `SystemTime` encoder — the single canonical route (`std`'s `SystemTime: Hash`
+/// is platform-defined and not stable across macOS / Linux / FreeBSD).
 ///
 /// Decomposes to `(sign, secs, subsec_nanos)` relative to `UNIX_EPOCH`, folded as `put_u8` /
 /// `put_u64` / `put_u32`. Pre-epoch instants take the `0u8` sign byte and encode the magnitude
@@ -170,8 +170,8 @@ mod seam_tests {
     use std::time::{Duration, UNIX_EPOCH};
 
     /// Reference: a *raw* SipHash-2-4 hasher fed an explicit little-endian byte image through its
-    /// `write(&[u8])` core. The seam's contract is to be byte-identical to this — it owns the
-    /// bytes, it never delegates to a width-specialized or native-endian `write_uXX`.
+    /// `write(&[u8])` core. The seam's contract is to be byte-identical to this — it owns the bytes,
+    /// it never delegates to a width-specialized or native-endian `write_uXX`.
     fn raw128_le(image: &[u8]) -> u128 {
         let mut h = RawSip128::new();
         h.write(image);

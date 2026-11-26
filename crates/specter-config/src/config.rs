@@ -24,14 +24,14 @@ pub(crate) const DEFAULT_SETTLE: Duration = Duration::from_millis(200);
 /// manual triggering is the better answer.
 pub(crate) const DEFAULT_MAX_SETTLE: Duration = Duration::from_hours(1);
 /// Lower bound on `max_settle` relative to `settle`. Catches the swap typo (`settle = "1h"`,
-/// `max_settle = "200ms"`) and the semantic nonsense of `max_settle ≤ settle` (a single settle
-/// round would already exceed it).
+/// `max_settle = "200ms"`) and the semantic nonsense of `max_settle ≤ settle` (a single settle round
+/// would already exceed it).
 const MAX_SETTLE_FLOOR_FACTOR: u32 = 4;
 /// Hard cap on `[[watch.actions]]` conditional nesting depth. Each `when` / `then` / `else` triple
 /// descends one level of validator recursion; [`validate_action_list`] short-circuits with
-/// [`IssueKind::ConditionalNestedTooDeep`] when the depth bound is exceeded, keeping the
-/// validator's stack consumption finite under adversarial input. Sensible operator configs are ≤5
-/// levels deep, so `32` is generous defense-in-depth, not a real workflow constraint. The bound is
+/// [`IssueKind::ConditionalNestedTooDeep`] when the depth bound is exceeded, keeping the validator's
+/// stack consumption finite under adversarial input. Sensible operator configs are ≤5 levels deep,
+/// so `32` is generous defense-in-depth, not a real workflow constraint. The bound is
 /// parser-independent — the underlying TOML crate's own recursion limit is a separate concern.
 const MAX_CONDITIONAL_DEPTH: u8 = 32;
 
@@ -48,8 +48,8 @@ pub struct Config {
 pub struct LogConfig {
     pub level: LogLevel,
     pub destination: LogDestination,
-    /// Required iff `destination == LogDestination::File`. Validated at load time: must be
-    /// absolute. For `LogDestination::Stderr`, callers should ignore this field.
+    /// Required iff `destination == LogDestination::File`. Validated at load time: must be absolute.
+    /// For `LogDestination::Stderr`, callers should ignore this field.
     pub path: Option<PathBuf>,
 }
 
@@ -91,11 +91,11 @@ impl LogConfig {
     }
 }
 
-/// Resolve the `(destination, path)` pair against the
-/// [`LogDestination::File`]-implies-absolute-path rule. Returns `Ok(Some(p))` when File is paired
-/// with an absolute path, `Ok(None)` when [`LogDestination::Stderr`] (path is dropped — File is the
-/// only destination that carries a path) and `Err(issue)` otherwise. Single-issue by construction:
-/// one input pair, one possible failure mode.
+/// Resolve the `(destination, path)` pair against the [`LogDestination::File`]-implies-absolute-path
+/// rule. Returns `Ok(Some(p))` when File is paired with an absolute path, `Ok(None)` when
+/// [`LogDestination::Stderr`] (path is dropped — File is the only destination that carries a path)
+/// and `Err(issue)` otherwise. Single-issue by construction: one input pair, one possible failure
+/// mode.
 ///
 /// Shared by [`LogConfig::merge_cli`] (the CLI-overrides flow, applied post-config-load by
 /// `specter-bin`) and [`validate_log`] (the config-load flow). The structural rule lives here once;
@@ -138,8 +138,8 @@ pub enum LogDestination {
     File,
 }
 
-/// What a `[[watch]]`'s `path` names. A glob discriminator in it ([`PatternSpec::is_dynamic`])
-/// makes it a pattern; anything else is a literal path.
+/// What a `[[watch]]`'s `path` names. A glob discriminator in it ([`PatternSpec::is_dynamic`]) makes
+/// it a pattern; anything else is a literal path.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum WatchTarget {
     /// A literal path, canonicalised leniently: on disk yet or not.
@@ -170,15 +170,15 @@ pub struct SubSpec {
     /// `false` ⇒ the entry is absent from every runtime view ([`Config::active_watches`]); it is
     /// still validated, so a typo surfaces at load and not at re-enable. Disabling and re-enabling
     /// is a remove and an add: the Profile is reaped and its successor starts with no baseline, so
-    /// what changed in between folds into its first Seed instead of firing, and a dynamic watch
-    /// mints its set anew under fresh ids.
+    /// what changed in between folds into its first Seed instead of firing, and a dynamic watch mints
+    /// its set anew under fresh ids.
     pub enabled: bool,
 }
 
 impl SubSpec {
-    /// The request this watch attaches through: its target and every knob as it stands, the
-    /// reaction sealed. What a pattern means beyond that — its anchor, its Profile's identity, the
-    /// template it seats — is the engine's to read off the target.
+    /// The request this watch attaches through: its target and every knob as it stands, the reaction
+    /// sealed. What a pattern means beyond that — its anchor, its Profile's identity, the template
+    /// it seats — is the engine's to read off the target.
     #[must_use]
     pub fn to_attach_request(&self) -> SubAttachRequest {
         SubAttachRequest {
@@ -200,10 +200,10 @@ impl SubSpec {
     }
 
     /// True iff the edit from `self` to `other` moves the watch to another Profile: its target, or
-    /// one of the three axes a firing Profile's identity folds. What is left lowers to the
-    /// request's [`SubParams`] and rebinds in place; `name` is the diff's key and `enabled` its
-    /// filter, so neither reaches here. Field-derived, so no [`core::ProfileIdentity`] is built to
-    /// be compared and dropped.
+    /// one of the three axes a firing Profile's identity folds. What is left lowers to the request's
+    /// [`SubParams`] and rebinds in place; `name` is the diff's key and `enabled` its filter, so
+    /// neither reaches here. Field-derived, so no [`core::ProfileIdentity`] is built to be compared
+    /// and dropped.
     #[must_use]
     pub(crate) fn requires_new_profile(&self, other: &Self) -> bool {
         self.target != other.target
@@ -240,15 +240,15 @@ impl Config {
     /// Iterator over enabled static watches in source order.
     ///
     /// Sole authority for "what's effective right now": every runtime consumer ([`crate::diff()`],
-    /// the bin's initial-attach pass, [`crate::Config`] drain-window derivation, the startup /
-    /// reload load logs) goes through this helper. Iterating the raw [`Self::watches`] field
-    /// directly bypasses the per-entry `enabled` filter and is almost always wrong outside config
+    /// the bin's initial-attach pass, [`crate::Config`] drain-window derivation, the startup / reload
+    /// load logs) goes through this helper. Iterating the raw [`Self::watches`] field directly
+    /// bypasses the per-entry `enabled` filter and is almost always wrong outside config
     /// introspection / round-trip serialization.
     ///
     /// Discipline: `enabled = false ⇔ entry absent from the effective config`. Every Add/Remove
-    /// transition the engine handles flows from a flip in this iterator's output, so disabled
-    /// entries never reach the engine — they remain in `self.watches` for introspection but are
-    /// otherwise inert.
+    /// transition the engine handles flows from a flip in this iterator's output, so disabled entries
+    /// never reach the engine — they remain in `self.watches` for introspection but are otherwise
+    /// inert.
     pub fn active_watches(&self) -> impl Iterator<Item = &SubSpec> + '_ {
         self.watches.iter().filter(|s| s.enabled)
     }
@@ -410,8 +410,8 @@ fn log_config_loaded(cfg: &Config, path: &Path) {
 fn validate(raw: &RawConfig, path: Option<&Path>) -> Result<Config, ConfigError> {
     let mut errors: Vec<ValidationIssue> = Vec::new();
 
-    // Log errors land first in the output (operator-facing ordering). On the failure path the
-    // default `LogConfig` is irrelevant — `errors.is_empty()` below short-circuits to `Err`.
+    // Log errors land first in the output (operator-facing ordering). On the failure path the default
+    // `LogConfig` is irrelevant — `errors.is_empty()` below short-circuits to `Err`.
     let log = match validate_log(&raw.log) {
         Ok(log) => log,
         Err(mut errs) => {
@@ -516,8 +516,8 @@ fn validate_log(raw: &RawLogConfig) -> Result<LogConfig, Vec<ValidationIssue>> {
 /// construction — at most one failure mode per call.
 ///
 /// Both static and dynamic validators call this so the rule lives in one place. Duplicate-name
-/// detection is handled at the outer dispatch loop (it spans both kinds and so cannot be a
-/// per-watch helper concern).
+/// detection is handled at the outer dispatch loop (it spans both kinds and so cannot be a per-watch
+/// helper concern).
 fn validate_name(idx: usize, raw_name: &str) -> Result<(), ValidationIssue> {
     if raw_name.is_empty() {
         return Err(ValidationIssue::new(
@@ -545,9 +545,9 @@ fn validate_name(idx: usize, raw_name: &str) -> Result<(), ValidationIssue> {
 /// [`Result`] shape ties the validated program to the absence of errors at the type level — callers
 /// cannot reach for the `Arc` without first resolving the failure case.
 ///
-/// The empty-input case (`actions = []`) is rejected as [`IssueKind::EmptyActions`]; partial
-/// programs are never handed back (a half-built program in the engine would be observably worse
-/// than none at all).
+/// The empty-input case (`actions = []`) is rejected as [`IssueKind::EmptyActions`]; partial programs
+/// are never handed back (a half-built program in the engine would be observably worse than none at
+/// all).
 ///
 /// The returned Arc is the same allocation the engine's `Sub.program` and every emitted
 /// `Effect.program` references — one shared bytecode IR per validated Sub.
@@ -575,15 +575,15 @@ fn validate_actions(
 }
 
 /// Recursive validation of a `[RawAction]` slice. `path` is the breadcrumb-style label of the slice
-/// within the watch — `"actions"` at the top, `"actions[0].then"` inside a then-branch, etc.
-/// Returns `Ok(Vec<Action>)` iff every element validated; on any failure the per-element errors are
-/// collected and the function returns `Err`.
+/// within the watch — `"actions"` at the top, `"actions[0].then"` inside a then-branch, etc. Returns
+/// `Ok(Vec<Action>)` iff every element validated; on any failure the per-element errors are collected
+/// and the function returns `Err`.
 ///
-/// Empty input is the *caller's* responsibility to reject (only the top-level `actions = []`
-/// carries [`IssueKind::EmptyActions`]; nested empty arrays are rejected via
-/// [`IssueKind::EmptyConditional`] against the enclosing conditional). This function is silent on
-/// emptiness — it returns `Ok(Vec::new())` in that case so the caller can fold the empty branch
-/// into the AST as `None` (no else) or apply the conditional-level check.
+/// Empty input is the *caller's* responsibility to reject (only the top-level `actions = []` carries
+/// [`IssueKind::EmptyActions`]; nested empty arrays are rejected via [`IssueKind::EmptyConditional`]
+/// against the enclosing conditional). This function is silent on emptiness — it returns
+/// `Ok(Vec::new())` in that case so the caller can fold the empty branch into the AST as `None` (no
+/// else) or apply the conditional-level check.
 ///
 /// `depth` is the conditional nesting level of *this* slice: `0` at the [`validate_actions`] entry,
 /// incremented by `1` each time [`validate_conditional`] recurses into a `then` / `else` body. When
@@ -627,9 +627,9 @@ fn validate_action_list(
 /// across `exec`, the conditional triple (`when` + `then` + optional `else`), and (future) `pipe` —
 /// it stays the same shape as new variants land.
 ///
-/// `path` is the action's breadcrumb-style label (`"actions[0]"`, `"actions[0].then[1]"`, etc).
-/// Error messages quote it so operators can locate the offending entry without re-counting nested
-/// arrays. `depth` is the conditional nesting level of the enclosing slice — passed unchanged to
+/// `path` is the action's breadcrumb-style label (`"actions[0]"`, `"actions[0].then[1]"`, etc). Error
+/// messages quote it so operators can locate the offending entry without re-counting nested arrays.
+/// `depth` is the conditional nesting level of the enclosing slice — passed unchanged to
 /// [`validate_conditional`], which bumps it by `1` before descending into `then` / `else`.
 fn validate_one_action(
     watch_idx: usize,
@@ -856,10 +856,10 @@ fn validate_raw_exec(
 /// can't reach the engine.
 ///
 /// `timeout` is the operator-supplied per-step deadline (a duration string at the TOML layer;
-/// [`Duration`] here). When `Some`, the validated duration is also checked for `> 0` — a zero-duration timeout
-/// is rejected as a configuration error: the SIGTERM would fire before the child has any chance to
-/// make progress, which is almost certainly a typo (`"0s"`, `"0ms"`). Operators wanting "no
-/// timeout" omit the field entirely.
+/// [`Duration`] here). When `Some`, the validated duration is also checked for `> 0` — a
+/// zero-duration timeout is rejected as a configuration error: the SIGTERM would fire before the
+/// child has any chance to make progress, which is almost certainly a typo (`"0s"`, `"0ms"`).
+/// Operators wanting "no timeout" omit the field entirely.
 ///
 /// `path` is the surrounding action's breadcrumb (e.g., `"actions[0]"` or `"actions[0].then[1]"`);
 /// `argv_field` is the field name of the argv slot within that action — `"exec"` for both top-level
@@ -974,13 +974,13 @@ fn validate_settle(
     }
 }
 
-/// Validate `scope`. Returns `Ok(EffectScope)` on success; `Err` with the parse failure issue.
-/// Scope failures are single-issue by construction (one input string, one valid set), so the error
-/// path is a single [`ValidationIssue`] rather than a `Vec`.
+/// Validate `scope`. Returns `Ok(EffectScope)` on success; `Err` with the parse failure issue. Scope
+/// failures are single-issue by construction (one input string, one valid set), so the error path
+/// is a single [`ValidationIssue`] rather than a `Vec`.
 ///
 /// The caller forwards a copied [`EffectScope`] to the events parser even when validation fails —
-/// the default ([`EffectScope::default`]) is used solely to keep `parse_events_field` from
-/// cascading a phantom error against an unresolved scope.
+/// the default ([`EffectScope::default`]) is used solely to keep `parse_events_field` from cascading
+/// a phantom error against an unresolved scope.
 fn validate_scope(idx: usize, raw_scope: Option<&str>) -> Result<EffectScope, ValidationIssue> {
     match raw_scope.unwrap_or("subtree-root") {
         "subtree-root" => Ok(EffectScope::SubtreeRoot),
@@ -996,12 +996,12 @@ fn validate_scope(idx: usize, raw_scope: Option<&str>) -> Result<EffectScope, Va
 
 /// Validate a static watch's `path`: lenient-canonicalisable, with one typed [`IssueKind`] per
 /// [`PathError`] variant. Returns `Ok(PathBuf)` on success; `Err(ValidationIssue)` carrying the
-/// operator-actionable category — single-issue by construction (one input, one possible failure
-/// mode per call).
+/// operator-actionable category — single-issue by construction (one input, one possible failure mode
+/// per call).
 ///
-/// Routes [`PathError`] → [`IssueKind`] symmetrically: structural and I/O failures each land in
-/// their own arm so operators can triage "permissions" from "typo in `..`" from "no such file"
-/// without inspecting the error detail string. No `is_absolute()` prefilter is needed —
+/// Routes [`PathError`] → [`IssueKind`] symmetrically: structural and I/O failures each land in their
+/// own arm so operators can triage "permissions" from "typo in `..`" from "no such file" without
+/// inspecting the error detail string. No `is_absolute()` prefilter is needed —
 /// `canonicalize_lenient` enforces the rule itself and routes the failure through
 /// `PathError::NotAbsolute` here.
 fn validate_static_path(idx: usize, raw_path: &str) -> Result<PathBuf, ValidationIssue> {
@@ -1048,14 +1048,14 @@ fn validate_static_path(idx: usize, raw_path: &str) -> Result<PathBuf, Validatio
 /// 1. [`PatternSpec::parse`] (pure) enforces the structural invariants (absolute, no `**`, no
 ///    `.`/`..`, no empty segments, no Windows prefix); a parse failure is
 ///    [`IssueKind::InvalidPattern`].
-/// 2. `canonicalize_lenient` resolves the literal prefix (I/O), and [`PatternSpec::reanchor`]
-///    splices the resolved path back onto the pattern. A resolution fault is **fatal** — exactly
-///    like a static path that cannot canonicalise.
+/// 2. `canonicalize_lenient` resolves the literal prefix (I/O), and [`PatternSpec::reanchor`] splices
+///    the resolved path back onto the pattern. A resolution fault is **fatal** — exactly like a
+///    static path that cannot canonicalise.
 ///
-/// The result's anchor and identity-bearing `source` are both symlink-free, so a dynamic and a
-/// static watch over one tree anchor the same Tree branch and the kernel's unconditional
-/// `O_NOFOLLOW` watch opens (anchor / watch-root parent / descent prefixes) land on real
-/// directories rather than ELOOP-ing on a symlinked prefix component.
+/// The result's anchor and identity-bearing `source` are both symlink-free, so a dynamic and a static
+/// watch over one tree anchor the same Tree branch and the kernel's unconditional `O_NOFOLLOW` watch
+/// opens (anchor / watch-root parent / descent prefixes) land on real directories rather than
+/// ELOOP-ing on a symlinked prefix component.
 fn validate_dynamic_pattern(idx: usize, raw_path: &str) -> Result<PatternSpec, ValidationIssue> {
     let pattern = PatternSpec::parse(raw_path).map_err(|e| {
         ValidationIssue::new(
@@ -1126,10 +1126,10 @@ fn dynamic_prefix_issue(
     ValidationIssue::new(Some(idx), "path", kind, detail)
 }
 
-/// Validate the `[[watch]]` block's scan-config knobs (`recursive`, `hidden`, `max_depth`,
-/// `pattern`, `exclude`) — orthogonal to the path-vs-pattern dispatch. Returns `Ok(SubtreeScan)`
-/// when every field validates; `Err(Vec<ValidationIssue>)` accumulates per-field failures
-/// (max_depth, pattern, and each exclude glob can fire independently).
+/// Validate the `[[watch]]` block's scan-config knobs (`recursive`, `hidden`, `max_depth`, `pattern`,
+/// `exclude`) — orthogonal to the path-vs-pattern dispatch. Returns `Ok(SubtreeScan)` when every
+/// field validates; `Err(Vec<ValidationIssue>)` accumulates per-field failures (max_depth, pattern,
+/// and each exclude glob can fire independently).
 fn validate_scan(idx: usize, raw: &RawWatch) -> Result<SubtreeScan, Vec<ValidationIssue>> {
     let mut errors: Vec<ValidationIssue> = Vec::new();
     let mut sb = SubtreeScan::builder().hidden(raw.hidden);
@@ -1222,8 +1222,8 @@ fn validate_depth(
     }
 }
 
-/// Validate a `[[watch]]`'s `path` into its target: a glob discriminator (`*?[{`) makes it a
-/// pattern, and then only the pattern's validator reads it.
+/// Validate a `[[watch]]`'s `path` into its target: a glob discriminator (`*?[{`) makes it a pattern,
+/// and then only the pattern's validator reads it.
 fn validate_target(idx: usize, raw_path: &str) -> Result<WatchTarget, ValidationIssue> {
     if PatternSpec::is_dynamic(raw_path) {
         validate_dynamic_pattern(idx, raw_path)
@@ -1330,10 +1330,10 @@ fn parse_events_field(
             "content" => ClassSet::CONTENT,
             "metadata" => ClassSet::METADATA,
             other => {
-                // Surface the whitespace-is-significant case explicitly: serde-toml preserves
-                // quoted whitespace, so a raw entry like `events = [" structure "]` reaches us with
-                // the padding intact and silently fails the literal match. The hint catches the
-                // typo at first glance instead of forcing the operator to inspect quoting rules.
+                // Surface the whitespace-is-significant case explicitly: serde-toml preserves quoted
+                // whitespace, so a raw entry like `events = [" structure "]` reaches us with the
+                // padding intact and silently fails the literal match. The hint catches the typo at
+                // first glance instead of forcing the operator to inspect quoting rules.
                 let trimmed = other.trim();
                 let hint = if trimmed != other && !trimmed.is_empty() {
                     format!(
@@ -1496,9 +1496,9 @@ mod tests {
 
     #[test]
     fn log_path_ignored_for_stderr_destination() {
-        // Stderr path is dropped (set to None) — an operator may set `path = ...` alongside a
-        // stderr destination; we drop it rather than fail validation, because the field carries no
-        // meaning when destination = stderr.
+        // Stderr path is dropped (set to None) — an operator may set `path = ...` alongside a stderr
+        // destination; we drop it rather than fail validation, because the field carries no meaning
+        // when destination = stderr.
         let cfg =
             Config::from_str("[log]\ndestination = \"stderr\"\npath = \"/var/log/ignored.log\"")
                 .unwrap();
@@ -1512,8 +1512,9 @@ mod tests {
     /// A relative `--log-path` overrides into a `LogDestination::File` fixture; `merge_cli` returns
     /// the bare typed [`crate::error::ValidationIssue`] (no `Vec`, no [`ConfigError::Validate`]
     /// envelope) so the bin caller can format the CLI-merge context in its own `eprintln!` without
-    /// the `<inline>:` prefix that the config-layer error type would impose. Pinning the field / kind
-    /// here documents the post-Bundle-B contract: CLI-merge failures bypass [`ConfigError`] entirely.
+    /// the `<inline>:` prefix that the config-layer error type would impose. Pinning the field /
+    /// kind here documents the post-Bundle-B contract: CLI-merge failures bypass [`ConfigError`]
+    /// entirely.
     #[test]
     fn merge_cli_relative_log_path_yields_non_absolute_issue() {
         let cfg = LogConfig {
@@ -2045,8 +2046,8 @@ mod tests {
 
     #[test]
     fn events_field_value_is_case_sensitive() {
-        // TOML enum values are kebab-case throughout — uppercase or mixed case is rejected,
-        // matching the existing `scope` parser.
+        // TOML enum values are kebab-case throughout — uppercase or mixed case is rejected, matching
+        // the existing `scope` parser.
         for bad in ["Structure", "STRUCTURE", "Content", "Meta-Data"] {
             let toml = minimal_toml(&format!("events = [\"{bad}\"]\n"));
             assert_only_kind(&toml, IssueKind::InvalidEnum);
@@ -2125,11 +2126,11 @@ mod tests {
         );
     }
 
-    /// The glob-in-canonical-segment wrinkle, end to end: a real directory literally named
-    /// `weird[x]` reached through a symlink lowers its anchor onto `.../weird[x]` with the
-    /// metacharacter segment spliced as a `Literal` — never re-parsed into a `Glob` (which would
-    /// shrink `literal_prefix_len` and mis-site the anchor). Pins that the full canonicalise →
-    /// `reanchor` pipeline never feeds `source` back through `parse`.
+    /// The glob-in-canonical-segment wrinkle, end to end: a real directory literally named `weird[x]`
+    /// reached through a symlink lowers its anchor onto `.../weird[x]` with the metacharacter segment
+    /// spliced as a `Literal` — never re-parsed into a `Glob` (which would shrink
+    /// `literal_prefix_len` and mis-site the anchor). Pins that the full canonicalise → `reanchor`
+    /// pipeline never feeds `source` back through `parse`.
     #[cfg(unix)]
     #[test]
     fn dynamic_prefix_canonical_glob_metachar_segment_stays_literal() {
@@ -2257,8 +2258,8 @@ mod tests {
         assert_eq!(spec.literal_prefix_path(), Path::new("/srv/log"));
     }
 
-    /// Mixed config — both kinds land in the one `watches` list in source order; the kind
-    /// difference is the target.
+    /// Mixed config — both kinds land in the one `watches` list in source order; the kind difference
+    /// is the target.
     #[test]
     fn mixed_static_and_dynamic_routes_each_correctly() {
         let toml = "\
@@ -2279,8 +2280,8 @@ mod tests {
         );
     }
 
-    /// Cross-kind duplicate name still rejected — the duplicate-name check runs at the dispatch
-    /// loop so both lists are scanned.
+    /// Cross-kind duplicate name still rejected — the duplicate-name check runs at the dispatch loop
+    /// so both lists are scanned.
     #[test]
     fn duplicate_name_across_static_and_dynamic_rejected() {
         let toml = "\
@@ -2364,8 +2365,8 @@ mod tests {
 
     /// The full lowering grid: a dynamic block's knobs stay on its spec, as a static block's do,
     /// and its request is addressed to the one parsed pattern and carries every knob as the spec
-    /// holds it — where it anchors, its Profile's identity and the template it seats are the
-    /// engine's to read off the target.
+    /// holds it — where it anchors, its Profile's identity and the template it seats are the engine's
+    /// to read off the target.
     #[test]
     fn dynamic_block_lowers_to_discovery_sub_spec() {
         let toml = "[[watch]]\nname = \"logs\"\npath = \"/srv/log/*\"\n\
@@ -2408,9 +2409,9 @@ mod tests {
         assert_eq!(req.params.spawn.scope(), w.scope);
     }
 
-    /// Dynamic watches accept `pattern` (per-Sub include filter) and `exclude` (per-Sub exclude
-    /// list) the same way static watches do — they're orthogonal to the path-pattern dispatch and
-    /// scope the *minted* Profiles.
+    /// Dynamic watches accept `pattern` (per-Sub include filter) and `exclude` (per-Sub exclude list)
+    /// the same way static watches do — they're orthogonal to the path-pattern dispatch and scope
+    /// the *minted* Profiles.
     #[test]
     fn dynamic_watch_carries_scan_pattern_and_excludes() {
         let toml = "[[watch]]\nname = \"logs\"\npath = \"/srv/log/*\"\n\
@@ -2428,8 +2429,8 @@ mod tests {
         );
     }
 
-    /// Multiple errors in one dynamic watch accumulate — pattern parse failure does NOT
-    /// short-circuit settle / scope / events validation. The operator gets the full list at once.
+    /// Multiple errors in one dynamic watch accumulate — pattern parse failure does NOT short-circuit
+    /// settle / scope / events validation. The operator gets the full list at once.
     #[test]
     fn multiple_errors_in_one_dynamic_watch_accumulate() {
         let toml = "[[watch]]\nname = \"\"\npath = \"/foo/**/x\"\nactions = [{ exec = [] }]\n\
@@ -2534,8 +2535,8 @@ mod from_path_with_meta_tests {
         // The full atomic-capture invariant: `from_path_with_meta`'s returned meta belongs to the
         // inode opened, even when the path is renamed out from under us between `File::open` and
         // any subsequent path-level stat. Simulates the atomic-save race by performing the rename
-        // after the call returns and confirming `meta` still reflects the original (now orphan)
-        // inode while a fresh path-level `from_path` reflects the replacement.
+        // after the call returns and confirming `meta` still reflects the original (now orphan) inode
+        // while a fresh path-level `from_path` reflects the replacement.
         let dir = TempDir::new().unwrap();
         let p = dir.path().join("specter.toml");
         write(&p, MINIMAL.as_bytes());
@@ -2553,7 +2554,7 @@ mod from_path_with_meta_tests {
             meta.inode, lstat_after_save.inode,
             "rename must produce a fresh inode at the path",
         );
-        // The driver's lstat filter would detect this as `stored != current` and fire a reload;
-        // this test asserts the precondition (meta deltas are observable across atomic-save).
+        // The driver's lstat filter would detect this as `stored != current` and fire a reload; this
+        // test asserts the precondition (meta deltas are observable across atomic-save).
     }
 }

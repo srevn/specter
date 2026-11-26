@@ -5,9 +5,9 @@
 //! — the dispatcher reads exactly the edge that matches the spawned-process outcome. There is no
 //! implicit fall-through.
 //!
-//! Programs are constructed via [`ProgramBuilder`]: each op is emitted with both edges pending,
-//! then patched. Builder invariants ensure every `Continue` edge points forward and lands on an
-//! emitted op.
+//! Programs are constructed via [`ProgramBuilder`]: each op is emitted with both edges pending, then
+//! patched. Builder invariants ensure every `Continue` edge points forward and lands on an emitted
+//! op.
 //!
 //! ```ignore
 //! use specter_core::program::{
@@ -34,18 +34,19 @@ pub use op::{BranchIndex, BranchTarget, MultiStage, ProgramOp, SpawnBody};
 /// Lowered execution program — a CFG-shaped bytecode IR.
 ///
 /// Built once at config validation, shared by-Arc across every emitted [`crate::Effect`]. The
-/// actuator walks the op slice by `u32` cursor; each op carries explicit `on_ok` / `on_failed`
-/// branch targets, so dispatch after a process reaps is a single lookup on the outcome.
+/// actuator walks the op slice by `u32` cursor; each op carries explicit `on_ok` / `on_failed` branch
+/// targets, so dispatch after a process reaps is a single lookup on the outcome.
 ///
 /// The op slice is `Box<[ProgramOp]>` — the program shape is fixed at construction time, and the
 /// field is private so [`ProgramBuilder`] is the sole construction path. [`ProgramOp`]'s own
-/// constructor is `pub(super)` and [`BranchIndex`] is sealed, so the guarantee holds at every
-/// level: every value of this type provably came from a builder that validated forward-only edges
-/// and in-bounds Continue targets; the dispatcher does not need to handle backward jumps or
-/// out-of-bounds cursors.
+/// constructor is `pub(super)` and [`BranchIndex`] is sealed, so the guarantee holds at every level:
+/// every value of this type provably came from a builder that validated forward-only edges and
+/// in-bounds Continue targets; the dispatcher does not need to handle backward jumps or out-of-bounds
+/// cursors.
 ///
-/// Structural `Eq` propagates from [`ProgramOp`]: two programs with byte-equal ops compare equal even
-/// when their Arc allocations differ. Consumed by hot-reload diffing to suppress no-op replacements.
+/// Structural `Eq` propagates from [`ProgramOp`]: two programs with byte-equal ops compare equal
+/// even when their Arc allocations differ. Consumed by hot-reload diffing to suppress no-op
+/// replacements.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ActionProgram {
     pub(super) ops: Box<[ProgramOp]>,
