@@ -85,16 +85,10 @@ impl ProgramOp {
         }
     }
 
-    /// `true` iff the body's argv references any diff-derived placeholder. `Pipe` ratchets if any
-    /// stage does.
+    /// `true` iff any stage's argv references a diff-derived placeholder.
     #[must_use]
     pub fn references_diff_derived(&self) -> bool {
-        match &self.body {
-            SpawnBody::Exec(e) => e.references_diff_derived(),
-            SpawnBody::Pipe(stages) => {
-                stages.stages().iter().any(ExecAction::references_diff_derived)
-            }
-        }
+        self.body.stages().iter().any(ExecAction::references_diff_derived)
     }
 }
 
@@ -157,6 +151,17 @@ impl MultiStage {
 pub enum SpawnBody {
     Exec(ExecAction),
     Pipe(MultiStage),
+}
+
+impl SpawnBody {
+    /// The stages to spawn, in order: an exec is one.
+    #[must_use]
+    pub fn stages(&self) -> &[ExecAction] {
+        match self {
+            Self::Exec(exec) => std::slice::from_ref(exec),
+            Self::Pipe(pipe) => pipe.stages(),
+        }
+    }
 }
 
 /// Edge endpoint chosen on outcome.
