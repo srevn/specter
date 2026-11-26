@@ -635,12 +635,14 @@ impl Engine {
     /// `modified_identity` detach+attach path is that every anchor's `watch_demand` stays installed
     /// throughout the rebind — there is no brief "no watcher" window.
     ///
-    /// Each Profile the edge reached has its settle floor refolded ([`recompute_profile_settle`]):
-    /// `sub`'s, and each minted Sub's, where an operator's Sub may sit beside it. Each one, not
+    /// Each Profile the watch fires on has its settle floor refolded
+    /// ([`SubRegistry::firing_profiles`], [`recompute_profile_settle`]): `sub`'s own, or each one
+    /// its template minted onto, where an operator's Sub may sit beside a minted one. Each one, not
     /// only where the template's settle moved: a minted Sub rebound by its own name runs apart from
     /// its template until the template's next rebind restores it, so the template's settle does not
-    /// say whose moved. An armed settle timer keeps its deadline; the next settle window uses the
-    /// new floor.
+    /// say whose moved. A template's own Profile has no floor an edit moves: it holds only
+    /// templates, which debounce at the discovery pair ([`Sub::settle`]). An armed settle timer
+    /// keeps its deadline; the next settle window uses the new floor.
     ///
     /// On a stale [`SubId`] (the dispatcher just resolved it through `find_by_name`, so this is
     /// structurally unexpected), emits [`Diagnostic::RebindUnknownSub`] and changes nothing.
@@ -649,8 +651,7 @@ impl Engine {
             out.diagnostics.push(Diagnostic::RebindUnknownSub { sub });
             return;
         }
-        let rebound = std::iter::once(sub).chain(self.subs.minted(sub));
-        for profile in rebound.filter_map(|rebound| self.subs.get(rebound).map(Sub::profile)) {
+        for profile in self.subs.firing_profiles(sub) {
             recompute_profile_settle(&self.subs, &mut self.profiles, profile);
         }
         out.diagnostics.push(Diagnostic::SubRebound {
