@@ -1,11 +1,11 @@
 //! `specter show <name>` projection — four-way discrimination across engine-attached,
 //! runtime-disabled, TOML-disabled, and Unknown.
 //!
-//! Resolution order matches the `disable` resolver in [`crate::driver::ipc`] so an operator who can
-//! `show foo` can also `disable foo`. Minted Subs are addressed through `list -o json`, not `show`:
-//! a synthesised name resolves through `SubRegistry::find_by_name` to a live id, but a local guard
-//! at the lookup site returns `Unknown` for any minted Sub. The verb's contract lives at its own
-//! callsite, not inside the index.
+//! An `Active` answer names a watch the engine holds, which `disable` admits as well
+//! ([`crate::driver::ipc`]), so an operator who can `show foo` can also `disable foo`. Minted Subs
+//! are addressed through `list -o json`, not `show`: a synthesised name resolves through
+//! `SubRegistry::find_by_name` to a live id, but a local guard at the lookup site returns `Unknown`
+//! for any minted Sub. The verb's contract lives at its own callsite, not inside the index.
 
 use std::collections::BTreeSet;
 use std::time::Instant;
@@ -291,8 +291,7 @@ mod tests {
     }
 
     /// With a name present in the engine AND the runtime-disabled set AND TOML-disabled, resolution
-    /// returns Active — engine wins the precedence ladder. Pins the resolution order; the `disable`
-    /// handler reuses the same ladder.
+    /// returns Active — engine wins the precedence ladder. Pins the resolution order.
     #[test]
     fn show_engine_wins_over_disabled_sources_on_name_conflict() {
         let tmp = tempfile::TempDir::new().unwrap();
