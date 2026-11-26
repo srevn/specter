@@ -3624,6 +3624,53 @@ fn per_stable_file_fires_one_effect_per_created_entry() {
     }
 }
 
+/// A rename inside the tree reaches the diff as `renamed` alone, neither created nor modified, so
+/// the file runs under its new name through `renamed.to`.
+#[test]
+fn per_stable_file_fires_on_a_file_renamed_into_place() {
+    let mut e = Engine::new();
+    let r = e.tree.ensure_root("anchor", ResourceRole::User);
+    e.tree.set_kind(r, ResourceKind::Dir);
+    let now = Instant::now();
+    let req = SubAttachRequest::for_anchor(
+        "fmt".into(),
+        SubAttachAnchor::Resource(r),
+        SubtreeScan::builder().build(),
+        MAX_SETTLE,
+        SETTLE,
+        diff_program(),
+        EffectScope::PerStableFile,
+        ClassSet::DEFAULT_PER_FILE,
+    );
+    let attach_out = e.step(Input::AttachSub(req), now);
+    let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
+    let pid = e.subs.get(sid).unwrap().profile();
+    complete_seed_burst_with(
+        &mut e,
+        pid,
+        dir_tree_snap(vec![("a.rs.tmp", EntryKind::File, 7)]),
+    );
+
+    let out = drive_standard_verdict(
+        &mut e,
+        pid,
+        r,
+        dir_tree_snap(vec![("a.rs", EntryKind::File, 7)]),
+        now + Duration::from_millis(10),
+    );
+    let fired: Vec<&str> = out
+        .effects()
+        .iter()
+        .filter(|eff| matches!(&eff.key(), DedupKey::PerFile { sub, .. } if *sub == sid))
+        .map(specter_core::Effect::relative)
+        .collect();
+    assert_eq!(
+        fired,
+        ["a.rs"],
+        "the renamed file runs once, under its new name"
+    );
+}
+
 #[test]
 fn per_stable_file_skips_dir_entries() {
     // Mixed Diff: 1 created File, 1 created Dir, 1 modified Dir. PerStableFile must fire ONE Effect

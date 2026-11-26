@@ -42,10 +42,9 @@
 //! case (where another Profile still contributes) does not prematurely tear down a still-live slot.
 //!
 //! **File materialization vs Watch.** Every covered diff entry gets a Tree slot —
-//! [`ensure_descendant`] runs unconditionally — so a `PerStableFile` Effect always resolves its
-//! diff entry to a real `ResourceId` (`emit_effects_per_stable_file` walks the same Diff at burst
-//! end). The Watch op (`add_watch`) is gated independently by [`wants_descendant_watch`]: interior
-//! Dirs always; interior Leaves only when `Profile.has_per_file_fds == true`; boundary Dirs never.
+//! [`ensure_descendant`] runs unconditionally — while the Watch op (`add_watch`) is gated
+//! independently by [`wants_descendant_watch`]: interior Dirs always; interior Leaves only when
+//! `Profile.has_per_file_fds == true`; boundary Dirs never.
 
 use crate::coverage::{CoverageClass, classify};
 use crate::refcounts::{add_watch, sub_watch_then_try_reap};
@@ -79,8 +78,7 @@ use std::sync::Arc;
 /// this call then sets to `Dir`. The leaf-kind write is idempotent for the common (kind-stable)
 /// case and load-bearing for the kind-flip case.
 ///
-/// `pub(crate)` so `transitions::emit_effects_per_stable_file` can reuse the same materialization
-/// rules — the diff-entry-to-Resource mapping must agree with what reconcile produced.
+/// `pub(crate)` so every diff-entry-to-Resource resolution agrees with what reconcile produced.
 pub(crate) fn ensure_descendant(
     tree: &mut Tree,
     anchor: ResourceId,
@@ -112,9 +110,8 @@ pub(crate) fn ensure_descendant(
 /// [`ensure_descendant`] — neither helper degrades to "return the anchor" for an empty relative
 /// path).
 ///
-/// `pub(crate)` so descendant-aware sites outside reconcile (e.g.,
-/// `transitions::emit_effects_per_stable_file`, `descent::dispatch_descent_ok`) can resolve a
-/// relative path under an anchor without duplicating the component-walk.
+/// `pub(crate)` so descendant-aware sites outside reconcile can resolve a relative path under an
+/// anchor without duplicating the component-walk.
 ///
 /// **Empty-`rel_path` discipline.** `Diff` entry segments (`EntryRef.segment: CompactString`) are
 /// non-empty by walker construction in v1, but the type admits empty. Returning `Some(anchor)` on
@@ -208,8 +205,7 @@ fn wants_descendant_watch(
 ///    [`add_watch`] wherever [`wants_descendant_watch`] holds (interior Dirs always; interior
 ///    Leaves under `Profile.has_per_file_fds`; boundary Dirs never).
 ///
-/// `diff.modified` entries are Tree-side no-ops — the slot exists and kind is unchanged. Per-file
-/// Effect dispatch (`emit_effects_per_stable_file`) consumes them via the same Diff.
+/// `diff.modified` entries are Tree-side no-ops — the slot exists and kind is unchanged.
 ///
 /// The whole contract is the side effects: Phase 1's watch release / slot reap (with the closing
 /// `Unwatch` [`Tree::try_reap`] folds in) and Phase 2's `add_watch`. There is no reaped-slot return

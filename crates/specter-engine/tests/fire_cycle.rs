@@ -1437,9 +1437,8 @@ fn fire_cycle_perfile_suppresses_post_rebase_phantom_for_non_idempotent_format()
     // PerFile mirror of the Subtree test. A formatter-style non-idempotent command rewrites
     // foo.rs's content **in place** (same inode, different leaf-hash inputs — `size` here, the same
     // shape as a real formatter's `mtime`/`size` change). The slot survives `graft` (same
-    // inode/device → identity match), so the PerFile dedup entry survives the purge. Post-rebase
-    // the baseline carries the post-Effect leaf hash, so a phantom event at the same file diffs
-    // empty against the rebased baseline — no re-fire.
+    // inode/device → identity match). Post-rebase the baseline carries the post-Effect leaf hash,
+    // so a phantom event at the same file diffs empty against the rebased baseline — no re-fire.
     //
     // `sized_file_snap` builds a `foo.rs` LeafEntry with an explicit `size` so post-rebase carries
     // a different leaf hash for the same `inode` (the canonical `dir_snap` bakes `size = 0`).
@@ -1508,16 +1507,9 @@ fn fire_cycle_perfile_suppresses_post_rebase_phantom_for_non_idempotent_format()
         effect_complete_at + Duration::from_millis(5),
     );
 
-    // Post-rebase: baseline := current carries the post-Effect leaf hash; the fire history records a
-    // PerFile key keyed at the file resource (slot survived graft via inode identity). Both signals
-    // gate the phantom-suppress path below — validated behaviourally by that burst producing no fire.
-
     // Burst 2 — phantom event. The verify probe responds with post_effect (foo.rs at inode 42, size
-    // 1 — the "formatted" content). The diff is empty (baseline == response), so
-    // `emit_effects_per_stable_file` walks zero entries — no fire. The Subtree-arm B1 suppress
-    // (`baseline.hash() == current.hash()` AND `fired_subs.contains(dk)`) holds for the SubtreeRoot
-    // key implicitly recorded alongside the PerFile one — so the burst returns to Idle without
-    // entering Awaiting.
+    // 1 — the "formatted" content). The diff is empty (baseline == response), so the per-file fire
+    // finds no file to run on, and the burst returns to Idle without entering Awaiting.
     let phantom_out = drive_to_awaiting(
         &mut e,
         pid,
@@ -1527,7 +1519,7 @@ fn fire_cycle_perfile_suppresses_post_rebase_phantom_for_non_idempotent_format()
     );
     assert!(
         phantom_out.effects().is_empty(),
-        "B1 dedup suppresses PerFile phantom for non-idempotent format",
+        "an empty diff gives the phantom no file to run on",
     );
     assert!(matches!(
         e.profiles().get(pid).unwrap().state(),

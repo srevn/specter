@@ -25,12 +25,12 @@ use compact_str::CompactString;
 use smallvec::SmallVec;
 use specter_core::{
     AbsorbMode, ActiveBurst, AnchorClaim, AwaitVerdict, BurstFinish, BurstIntent, ClaimKind,
-    ClassSet, DedupKey, Denial, DescentRemaining, DescentWitness, DetachReason, Diagnostic, Effect,
-    EffectCommon, EffectOutcome, EffectScope, FsEvent, OverflowScope, PostFirePhase, PreFirePhase,
-    ProbeFailure, ProbeResponse, Profile, ProfileId, ProfileState, ProofAuthority,
-    QuiescenceVerdict, QuiescenceWitness, Reaction, ResourceId, ResourceKind, StableReason,
-    StepOutput, SubId, SubParams, SubRegistryDiff, TimerId, TimerKind, TreeSnapshot, WatchFailure,
-    quiescence_verdict,
+    ClassSet, DedupKey, Denial, DescentRemaining, DescentWitness, DetachReason, Diagnostic, Diff,
+    Effect, EffectCommon, EffectOutcome, EffectScope, EntryKind, FsEvent, OverflowScope,
+    PostFirePhase, PreFirePhase, ProbeFailure, ProbeResponse, Profile, ProfileId, ProfileState,
+    ProofAuthority, QuiescenceVerdict, QuiescenceWitness, Reaction, ResourceId, ResourceKind,
+    StableReason, StepOutput, SubId, SubParams, SubRegistryDiff, TimerId, TimerKind, Tree,
+    TreeSnapshot, WatchFailure, quiescence_verdict,
 };
 use std::num::NonZeroU32;
 use std::path::Path;
@@ -2718,8 +2718,9 @@ impl Engine {
     }
 
     /// Emit Effects at a stable verdict. Routes per scope: `SubtreeRoot` Subs fire one Effect
-    /// anchored at the Profile's resource; `PerStableFile` Subs fire one Effect per matching diff
-    /// entry. The `Diff` is built at most once and shared across both helpers via `Arc`.
+    /// anchored at the Profile's resource; `PerStableFile` Subs fire one Effect per file
+    /// [`stable_file_targets`] yields. The `Diff` is built at most once and shared by every Effect
+    /// through one `Arc`.
     ///
     /// `mode` ([`EmitMode`]) selects the fire mode — Standard burst stable verdict vs Seed-drift
     /// fire — and carries the per-mode configuration (Standard's `forced`; SeedDrift's pre-narrowed
@@ -2786,8 +2787,8 @@ impl Engine {
         // Lazy-build the Diff Arc only if any Sub needs it AND both a baseline and a current
         // snapshot are present. With baseline pinned across coalesced bursts, `Effect.diff`
         // describes the *net* change since the last EffectComplete::Ok.
-        let mut diff_arc: Option<Arc<specter_core::Diff>> = None;
-        let ensure_diff = |diff_slot: &mut Option<Arc<specter_core::Diff>>| {
+        let mut diff_arc: Option<Arc<Diff>> = None;
+        let ensure_diff = |diff_slot: &mut Option<Arc<Diff>>| {
             if diff_slot.is_none()
                 && let (Some(b), Some(c)) = (baseline_snap.as_ref(), current_snap.as_ref())
             {
@@ -2813,18 +2814,13 @@ impl Engine {
         let sub_ids: SmallVec<[SubId; 2]> = self.subs.at(profile_id).into();
         let mut count: u32 = 0;
         for sub_id in sub_ids {
-            let (scope, needs_diff, already_fired, minted_by) = match self.subs.get(sub_id) {
+            let (name, spec, already_fired, minted_by) = match self.subs.get(sub_id) {
                 Some(s) => match s.reaction() {
                     Reaction::Spawn {
                         params: SubParams { spawn, .. },
                         minted_by,
                         history,
-                    } => (
-                        spawn.scope(),
-                        spawn.needs_diff(),
-                        history.has_fired,
-                        *minted_by,
-                    ),
+                    } => (&s.name, spawn, history.has_fired, *minted_by),
                     // A template never fires — discovery's "fire" is the reconcile's batch of
                     // attachments, and the verdict floor classifies its Profile to Reconcile before
                     // the fire fork. Reaching here is a routing breach; the skip is the
@@ -2841,7 +2837,7 @@ impl Engine {
                 },
                 None => continue,
             };
-            match fire_decision(mode, scope, sub_id, already_fired, nothing_changed) {
+            match fire_decision(mode, spec.scope(), sub_id, already_fired, nothing_changed) {
                 FireVerdict::SkipScope => continue,
                 FireVerdict::SuppressDedup => {
                     // Observational only: count the B1-dedup-suppressed verdict so the
@@ -2852,55 +2848,31 @@ impl Engine {
                 }
                 FireVerdict::Emit => {}
             }
-            match scope {
+            let effect_common = |correlation| EffectCommon {
+                sub: sub_id,
+                profile: profile_id,
+                anchor: resource,
+                correlation,
+                forced: effect_forced,
+                sub_name: name.clone(),
+                program: Arc::clone(spec.program()),
+                anchor_path: Arc::clone(&anchor_path),
+                anchor_kind,
+                exclude: Arc::clone(&exclude_strings),
+            };
+            let pushed: u32 = match spec.scope() {
                 EffectScope::SubtreeRoot => {
-                    let diff_for_effect = if needs_diff {
+                    let diff = if spec.needs_diff() {
                         ensure_diff(&mut diff_arc)
                     } else {
                         None
                     };
-                    let correlation = self.effect_correlations.next();
-                    let Some(sub) = self.subs.get(sub_id) else {
-                        continue;
-                    };
-                    // The funnel head classified this Sub as Spawn; a None here would mean the
-                    // reaction changed under a live borrow-free window, which rebind cannot do (it
-                    // replaces params, never the variant) — the silent skip mirrors the stale-id arm.
-                    let Some(spec) = sub.spawn_spec() else {
-                        continue;
-                    };
                     out.push_effect(Effect::subtree(
-                        EffectCommon {
-                            sub: sub_id,
-                            profile: profile_id,
-                            // `resource` was captured at the function head from `Profile.resource`;
-                            // frozen at emit so the sort survives post-emit churn without a
-                            // ProfileMap lookup.
-                            anchor: resource,
-                            correlation,
-                            forced: effect_forced,
-                            sub_name: sub.name.clone(),
-                            program: Arc::clone(spec.program()),
-                            anchor_path: Arc::clone(&anchor_path),
-                            anchor_kind,
-                            exclude: Arc::clone(&exclude_strings),
-                        },
-                        diff_for_effect,
+                        effect_common(self.effect_correlations.next()),
+                        diff,
                     ));
-                    count = count.saturating_add(1);
-
-                    // Record the per-Sub fire (the `sub` borrow above ended with `push_effect`;
-                    // `&mut self.subs` is free). `mark_fired` is the load-bearing B1-dedup edge;
-                    // `record_fired` is the observational counter pair that drives the
-                    // operator-facing `list` projection.
                     self.subs.mark_fired(sub_id);
-                    self.subs.record_fired(sub_id, 1, now);
-                    out.diagnostics.push(Diagnostic::SubFired {
-                        sub: sub_id,
-                        profile: profile_id,
-                        count: 1,
-                        minted_by,
-                    });
+                    1
                 }
                 EffectScope::PerStableFile => {
                     // PerStableFile implies `needs_diff` (`SpawnSpec::new`), so the diff is always
@@ -2908,132 +2880,33 @@ impl Engine {
                     let Some(diff) = ensure_diff(&mut diff_arc) else {
                         continue;
                     };
-                    let pushed = self.emit_effects_per_stable_file(
-                        sub_id,
-                        resource,
-                        effect_forced,
-                        &diff,
-                        &anchor_path,
-                        anchor_kind,
-                        &exclude_strings,
-                        out,
-                    );
-                    if pushed > 0 {
-                        // Aggregated: one `SubFired` + one `record_fired(pushed)` per pass,
-                        // regardless of how many leaf files matched. Keeps the wire stream linear
-                        // in Sub count, not in diff size — the per-leaf Effects themselves carry
-                        // the per-file granularity downstream.
-                        self.subs.record_fired(sub_id, pushed, now);
-                        out.diagnostics.push(Diagnostic::SubFired {
-                            sub: sub_id,
-                            profile: profile_id,
-                            count: pushed,
-                            minted_by,
-                        });
+                    let mut files: u32 = 0;
+                    for (target, segment) in stable_file_targets(&mut self.tree, resource, &diff) {
+                        out.push_effect(Effect::per_file(
+                            effect_common(self.effect_correlations.next()),
+                            target,
+                            segment.clone(),
+                            Arc::clone(&diff),
+                        ));
+                        files = files.saturating_add(1);
                     }
-                    count = count.saturating_add(pushed);
+                    files
                 }
-            }
-        }
-        EmitOutcome { count }
-    }
-
-    /// Per-Diff-entry Effect emission for a `PerStableFile` Sub. Walks `created`, `modified`, and
-    /// `renamed.to`; deleted entries do **not** fire (running a per-file command on a deleted file
-    /// makes no sense).
-    ///
-    /// Resource materialization: the diff entry's slot is resolved via `reconcile`'s
-    /// `lookup_descendant`-style walk; if the slot isn't yet in the Tree (defensive — reconcile
-    /// runs before this and materializes covered entries), a fresh Resource is created with no
-    /// `watch_demand` contribution.
-    ///
-    /// Returns the number of Effects appended to `out`. The caller (`emit_effects`) sums this into
-    /// the [`EmitOutcome`]'s `count` it returns.
-    #[must_use]
-    fn emit_effects_per_stable_file(
-        &mut self,
-        sub_id: SubId,
-        anchor: ResourceId,
-        forced: bool,
-        diff: &Arc<specter_core::Diff>,
-        anchor_path: &Arc<Path>,
-        anchor_kind: ResourceKind,
-        exclude_strings: &Arc<[CompactString]>,
-        out: &mut StepOutput,
-    ) -> u32 {
-        let profile_id = match self.subs.get(sub_id) {
-            Some(s) => s.profile(),
-            None => return 0,
-        };
-        let mut count: u32 = 0;
-
-        // Collect matching segments + kinds in a single pass, in the order expected — created, then
-        // modified, then renamed.to.
-        let entries = diff
-            .created
-            .iter()
-            .chain(diff.modified.iter())
-            .chain(diff.renamed.iter().map(|r| &r.to));
-
-        for entry in entries {
-            // PerStableFile is per-FILE: skip Dir and Other (devices / sockets / fifos) entirely —
-            // running a per-file command on a directory or device is never the user's intent.
-            // Symlinks pass through (they target files in practice).
-            if !matches!(
-                entry.kind,
-                specter_core::EntryKind::File | specter_core::EntryKind::Symlink
-            ) {
-                continue;
-            }
-            // `graft`'s `apply_diff_to_tree` runs before this and materialises every covered diff
-            // entry; lookup is the happy path. Fall back to `ensure_descendant` for defense —
-            // covers the rare case where reconcile filtered the entry (e.g., reconcile gates Watch
-            // on Dir, not on every leaf the Sub can fire against).
-            let resource = match lookup_descendant(&self.tree, anchor, entry.segment.as_str()) {
-                Some(r) => r,
-                None => match ensure_descendant(
-                    &mut self.tree,
-                    anchor,
-                    entry.segment.as_str(),
-                    entry.kind.into(),
-                ) {
-                    Some(r) => r,
-                    None => continue,
-                },
             };
-
-            let correlation = self.effect_correlations.next();
-            // The Sub may have been removed mid-burst; defensive lookup. The spawn-spec read shares
-            // the same silent-skip discipline — the funnel's PerStableFile dispatch already proved
-            // the variant.
-            let Some(sub) = self.subs.get(sub_id) else {
-                continue;
-            };
-            let Some(spec) = sub.spawn_spec() else {
-                continue;
-            };
-            out.push_effect(Effect::per_file(
-                EffectCommon {
+            if pushed > 0 {
+                // One `SubFired` per pass, however many files it ran: the wire stream stays linear
+                // in Subs, not in diff size; the per-file Effects carry the per-file granularity.
+                self.subs.record_fired(sub_id, pushed, now);
+                out.diagnostics.push(Diagnostic::SubFired {
                     sub: sub_id,
                     profile: profile_id,
-                    anchor,
-                    correlation,
-                    forced,
-                    sub_name: sub.name.clone(),
-                    program: Arc::clone(spec.program()),
-                    anchor_path: Arc::clone(anchor_path),
-                    anchor_kind,
-                    exclude: Arc::clone(exclude_strings),
-                },
-                resource,
-                entry.segment.clone(),
-                diff.clone(),
-            ));
-            count = count.saturating_add(1);
-            // PerFile records no fire history — the per-file dedup is diff membership itself, not a
-            // recorded key.
+                    count: pushed,
+                    minted_by,
+                });
+            }
+            count = count.saturating_add(pushed);
         }
-        count
+        EmitOutcome { count }
     }
 
     /// Single-pass classification of owners that carry a dispatch responsibility for an
@@ -3344,6 +3217,31 @@ fn fire_decision(
         (EffectScope::PerStableFile, EmitMode::SeedDrift { .. }) => FireVerdict::SkipScope,
         (EffectScope::PerStableFile, EmitMode::Standard { .. }) => FireVerdict::Emit,
     }
+}
+
+/// The files a per-stable-file fire runs on: each file or symlink `diff` created, modified or
+/// renamed into, as its slot under `anchor` and its segment. A deleted entry runs nothing, nor does
+/// a directory or a special file; a symlink does, as it targets a file in practice.
+///
+/// Each entry resolves to the slot `graft` materialized for it, or, where the Tree no longer holds
+/// one, to one [`ensure_descendant`] materializes under reconcile's own rules, so no file goes
+/// unrun for want of a slot.
+fn stable_file_targets<'a>(
+    tree: &'a mut Tree,
+    anchor: ResourceId,
+    diff: &'a Diff,
+) -> impl Iterator<Item = (ResourceId, &'a CompactString)> {
+    diff.created
+        .iter()
+        .chain(&diff.modified)
+        .chain(diff.renamed.iter().map(|r| &r.to))
+        .filter(|entry| matches!(entry.kind, EntryKind::File | EntryKind::Symlink))
+        .filter_map(move |entry| {
+            let segment = entry.segment.as_str();
+            lookup_descendant(tree, anchor, segment)
+                .or_else(|| ensure_descendant(tree, anchor, segment, entry.kind.into()))
+                .map(|resource| (resource, &entry.segment))
+        })
 }
 
 /// Certified outcome of a Verifying / Rebase probe response — the shared result of
