@@ -383,7 +383,7 @@ mod tests {
 
     use super::{Branch, Match, MatchSet};
     use crate::Engine;
-    use crate::testkit::{attach_discovery, discovery_subs_of, pre_place_dir};
+    use crate::testkit::{attach_discovery, minted_subs_of, pre_place_dir};
     use specter_core::testkit::{
         covered, covered_at, denied, dir_snap, dir_snap_nested, leaf, uncovered,
     };
@@ -559,7 +559,7 @@ mod tests {
             "no termini ⇒ no mints, no narration; got {:?}",
             out.diagnostics,
         );
-        assert!(discovery_subs_of(&e, sid).is_empty(), "nothing minted");
+        assert!(minted_subs_of(&e, sid).is_empty(), "nothing minted");
         assert_eq!(
             e.subs().get(sid).unwrap().mint_state().unwrap().miss(),
             MintEntry::Enumerated,

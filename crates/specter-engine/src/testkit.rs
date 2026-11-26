@@ -708,11 +708,11 @@ pub fn attach_discovery(
     (sid, pid)
 }
 
-/// The Subs discovery template `sid` minted, keyed by each one's anchor slot.
+/// The Subs `template` minted, keyed by each one's anchor slot.
 #[must_use]
-pub fn discovery_subs_of(e: &Engine, sid: SubId) -> BTreeMap<ResourceId, SubId> {
+pub fn minted_subs_of(e: &Engine, template: SubId) -> BTreeMap<ResourceId, SubId> {
     e.subs()
-        .minted(sid)
+        .minted(template)
         .map(|mid| {
             let anchor = e
                 .profiles()

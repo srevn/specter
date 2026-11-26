@@ -11,8 +11,8 @@ use specter_core::{
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{
-    DEFAULT_EVENTS, MAX_SETTLE, NO_EVENTS, SETTLE, attach_request, discovery_req,
-    discovery_subs_of, drain_due, pid_of, pre_place_dir, seed_to_idle, verify,
+    DEFAULT_EVENTS, MAX_SETTLE, NO_EVENTS, SETTLE, attach_request, discovery_req, drain_due,
+    minted_subs_of, pid_of, pre_place_dir, seed_to_idle, verify,
 };
 use std::num::NonZeroU32;
 use std::path::PathBuf;
@@ -620,7 +620,7 @@ fn config_diff_add_dynamic_attaches_and_first_reconcile_mints() {
         "first reconcile mints; got {:?}",
         minted.diagnostics,
     );
-    assert_eq!(discovery_subs_of(&e, sid).len(), 1);
+    assert_eq!(minted_subs_of(&e, sid).len(), 1);
     let _ = e.cancel_all_in_flight_probes();
 }
 
@@ -672,7 +672,7 @@ fn config_diff_modify_template_cascades_and_remints() {
         &dir_snap(&[("x", EntryKind::Dir, 1)]),
         now,
     );
-    let old_minted = *discovery_subs_of(&e, old_template)
+    let old_minted = *minted_subs_of(&e, old_template)
         .values()
         .next()
         .expect("minted");
@@ -717,7 +717,7 @@ fn config_diff_modify_template_cascades_and_remints() {
         &dir_snap(&[("x", EntryKind::Dir, 1)]),
         t1,
     );
-    let new_minted = *discovery_subs_of(&e, new_template)
+    let new_minted = *minted_subs_of(&e, new_template)
         .values()
         .next()
         .expect("re-minted");
@@ -744,7 +744,7 @@ fn config_diff_remove_dynamic_cascades() {
         &dir_snap(&[("x", EntryKind::Dir, 1), ("y", EntryKind::Dir, 2)]),
         now,
     );
-    let minted = discovery_subs_of(&e, sid);
+    let minted = minted_subs_of(&e, sid);
     assert_eq!(minted.len(), 2, "fixture minted per terminus");
     // Drive the minted cold Seeds to Idle so the cascade reaps synchronously — the mid-burst
     // cascade (reap deferred to burst end) is pinned by the modify gate above.
@@ -812,7 +812,7 @@ fn config_diff_modified_params_rebinds_a_template_and_the_set_it_minted() {
     let (template, discovery, _) = attach_request(&mut e, watch.clone(), now);
     let listing = [("a", EntryKind::Dir, 1), ("b", EntryKind::Dir, 2)];
     let _ = respond(&mut e, discovery, &dir_snap(&listing), now);
-    let minted = discovery_subs_of(&e, template);
+    let minted = minted_subs_of(&e, template);
     for &sub in minted.values() {
         let pid = pid_of(&e, sub);
         let _ = respond(&mut e, pid, &dir_snap(&[]), now);
@@ -833,7 +833,7 @@ fn config_diff_modified_params_rebinds_a_template_and_the_set_it_minted() {
     );
     assert!(out.watch_ops.is_empty(), "no watch op: {:?}", out.watch_ops);
     assert_eq!(
-        discovery_subs_of(&e, template),
+        minted_subs_of(&e, template),
         minted,
         "every minted Sub keeps its id"
     );
