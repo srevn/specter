@@ -463,12 +463,15 @@ impl<W: FsWatcher> EngineDriver<W> {
         outcome
     }
 
-    /// Operator-requested `absorb` window on a watch's Profile — the runtime fold-without-fire
-    /// signal. Arms a window so the next fireable burst (or an in-flight one, retro-latched)
-    /// advances the baseline silently instead of firing, folding an expected replication into the
-    /// settled reference rather than echoing it.
+    /// Operator-requested `absorb` — the runtime fold-without-fire signal. Arms a window on each
+    /// Profile the watch fires on, its own or each one its template minted onto, so the next fireable
+    /// burst there (or one in flight, retro-latched) advances the baseline silently instead of
+    /// firing, folding an expected replication into the settled reference rather than echoing it.
     ///
-    /// [`Self::admit_watch`] admits a watch, as for [`Self::handle_disable`].
+    /// [`Self::admit_watch`] admits a watch, as for [`Self::handle_disable`]. A dynamic watch that
+    /// holds no match arms nothing and is acked all the same: the verb reaches the matches the
+    /// watch holds when it is asked, and refusing would stop an `absorb && rsync` exactly where the
+    /// rsync is what creates them.
     ///
     /// On the apply path the operator's `duration_ms` is rebuilt into a [`Duration`] **and
     /// clamped** to [`MAX_ABSORB_WINDOW`] before the engine step — the lone overflow guard for the
@@ -484,19 +487,11 @@ impl<W: FsWatcher> EngineDriver<W> {
         duration_ms: Option<u64>,
         now: Instant,
     ) -> ControlFlow<()> {
-        let Some(sid) = self.admit_watch(token, name) else {
+        let Some(sub) = self.admit_watch(token, name) else {
             return ControlFlow::Continue(());
         };
-        let profile = self
-            .engine
-            .subs()
-            .get(sid)
-            .expect("a resolved watch is live")
-            .profile();
         let duration = duration_ms.map(|ms| Duration::from_millis(ms).min(MAX_ABSORB_WINDOW));
-        let out = self
-            .engine
-            .step(Input::ArmAbsorb { profile, duration }, now);
+        let out = self.engine.step(Input::ArmAbsorb { sub, duration }, now);
         let outcome = self.forward(out);
         self.respond(token, &ResponsePayload::Ok);
         outcome

@@ -129,21 +129,19 @@ pub enum Input {
     /// [`crate::BurstFinish::Reap`]). Stale [`SubId`] yields a
     /// [`crate::Diagnostic::DetachUnknownSub`].
     DetachSub(SubId),
-    /// Arm the operator `absorb` window on a Profile — the runtime fold-without-fire signal. The
-    /// next fireable burst (or the in-flight one, retro-latched) advances the baseline silently
-    /// instead of firing, folding an expected replication into the settled reference rather than
-    /// echoing it ([`crate::Diagnostic::AbsorbArmed`] on the arm,
-    /// [`crate::Diagnostic::QuiescenceAbsorbed`] on each fold).
+    /// Arm the operator `absorb` window on each Profile `sub`'s watch fires on
+    /// ([`crate::SubRegistry::firing_profiles`]): its next fireable burst, or the one in flight,
+    /// advances the baseline silently instead of firing — an expected replication folded into the
+    /// settled reference, not echoed ([`crate::Diagnostic::AbsorbArmed`] per window,
+    /// [`crate::Diagnostic::QuiescenceAbsorbed`] per fold). A window is per Profile: every Sub on
+    /// it folds together. A stale `sub` arms nothing.
     ///
-    /// `profile` is the honest identity: a window is per-Profile by construction (every Sub on a
-    /// Profile folds together), so the driver resolves the operator's Sub name to its Profile
-    /// before lifting this — minimal-input discipline shared with [`Self::DetachSub`]. `duration`
-    /// is the window length: `None` ⇒ the engine's default (one `settle` interval, consume-on-first
-    /// — a one-shot cover for a single replication); `Some(d)` ⇒ a time-boxed window persisting `d`
-    /// (covering a run of them). The engine derives `(expiry, mode)` from `duration` + the
-    /// Profile's `settle` in one place, so the wire carries only the raw duration.
+    /// `duration` is the window length: `None` ⇒ one `settle` interval of the Profile it arms,
+    /// consume-on-first (a one-shot cover for a single replication); `Some(d)` ⇒ a window
+    /// persisting `d` (a run of them). The engine derives each `(expiry, mode)`, so the wire
+    /// carries only the raw duration.
     ArmAbsorb {
-        profile: ProfileId,
+        sub: SubId,
         duration: Option<Duration>,
     },
 }

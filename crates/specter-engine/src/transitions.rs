@@ -1386,28 +1386,32 @@ impl Engine {
         }
     }
 
-    /// Arm (or re-arm) the operator `absorb` window on a Profile — the
-    /// [`specter_core::Input::ArmAbsorb`] handler. Deriving the window's `(expiry, mode)` from the
-    /// operator's `duration` is the one place this policy lives: `None` ⇒ a one-shot window one
-    /// `settle` interval wide ([`AbsorbMode::ConsumeOnFirst`], to cover a single expected
-    /// replication); `Some(d)` ⇒ a `d`-wide window ([`AbsorbMode::PersistUntil`], to cover a run of
-    /// them). A `--for 0s` yields `expiry == now`, which `absorb_window_live` reads inert — a
-    /// harmless operator-owned no-op, no validation.
+    /// Arm (or re-arm) the operator `absorb` window on each Profile `sub`'s watch fires on
+    /// ([`specter_core::SubRegistry::firing_profiles`]) — the [`specter_core::Input::ArmAbsorb`]
+    /// handler. Deriving a window's `(expiry, mode)` from the operator's `duration` is the one
+    /// place this policy lives: `None` ⇒ a one-shot window one `settle` interval of that Profile
+    /// wide ([`AbsorbMode::ConsumeOnFirst`], to cover a single expected replication); `Some(d)` ⇒ a
+    /// `d`-wide window ([`AbsorbMode::PersistUntil`], to cover a run of them). A `--for 0s` yields
+    /// `expiry == now`, which `absorb_window_live` reads inert — a harmless operator-owned no-op,
+    /// no validation.
     ///
     /// [`Profile::arm_absorb`] sets the window **and** retro-latches any in-flight pre-fire burst
     /// in one operation (the reverse race — the replication's events opened a burst before the
-    /// signal arrived — so a burst already batching folds too). A stale `profile` (reaped between
-    /// the driver's name resolution and this step) no-ops silently: there is no Profile for the
-    /// window to live on. Narrates via [`Diagnostic::AbsorbArmed`] so a `tail` sees the arm, not
-    /// only the eventual [`Diagnostic::QuiescenceAbsorbed`] fold.
+    /// signal arrived — so a burst already batching folds too). A stale `sub`, or a template that
+    /// holds no match, arms nothing. Each window narrates [`Diagnostic::AbsorbArmed`], in
+    /// `firing_profiles`' order, so a `tail` sees every arm, not only the eventual
+    /// [`Diagnostic::QuiescenceAbsorbed`] fold.
     pub(crate) fn on_arm_absorb(
         &mut self,
-        profile_id: ProfileId,
+        sub: SubId,
         duration: Option<Duration>,
         now: Instant,
         out: &mut StepOutput,
     ) {
-        if let Some(p) = self.profiles.get_mut(profile_id) {
+        for profile_id in self.subs.firing_profiles(sub) {
+            let Some(p) = self.profiles.get_mut(profile_id) else {
+                continue;
+            };
             let (expiry, mode) = match duration {
                 Some(d) => (now + d, AbsorbMode::PersistUntil),
                 None => (now + p.settle, AbsorbMode::ConsumeOnFirst),
@@ -1630,10 +1634,11 @@ impl Engine {
     /// `MatchChain`-shaped Profile classifies [`Consequence::Reconcile`] for *any* intent: cold
     /// Seed (first enumeration), triggered Seed, Standard, and post-recovery Seed all converge on
     /// the same idempotent reconcile (the registry dedup query makes a re-reconcile a no-op), so
-    /// the Seed-flag machinery below is never consulted for discovery. The early return also
-    /// bypasses the fold override *structurally* rather than by assertion: an operator `absorb`
-    /// window suppresses Effects, discovery emits none, so minting proceeds under absorb and the
-    /// latch stays unconsumed — disabling the template is the lever to stop minting.
+    /// the Seed-flag machinery below is never consulted for discovery. The early return also keeps
+    /// the fold override off a chain verdict, whatever its Profile holds: no input arms that
+    /// Profile's window (an absorb addressed to a template arms the Profiles it minted onto,
+    /// [`specter_core::SubRegistry::firing_profiles`]), and a window armed there would have no
+    /// Effect to suppress — minting proceeds and the latch stays unconsumed.
     ///
     /// A Standard burst always fires the Standard consequence. A Seed burst splits three disjoint
     /// ways: a fresh Profile that witnessed activity owes a *first* fire (the Standard consequence
@@ -1656,8 +1661,7 @@ impl Engine {
     /// designed to be.
     fn classify_consequence(&self, profile_id: ProfileId, intent: BurstIntent) -> Consequence {
         // Shape layer: a discovery Profile's stable verdict reconciles the match set, whatever the
-        // intent. Returning before the intent match keeps the fold override unreachable —
-        // absorb-inertness is structural, not asserted.
+        // intent, ahead of the fold override.
         if self
             .profiles
             .get(profile_id)

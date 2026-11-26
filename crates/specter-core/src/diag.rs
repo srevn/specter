@@ -610,8 +610,8 @@ pub enum Diagnostic {
     /// [`Self::QuiescenceCeilingForcedDespiteChange`] *alongside* this — both are truthful
     /// ("committed despite change" + "folded"), not contradictory.
     QuiescenceAbsorbed { profile: ProfileId },
-    /// An operator armed an `absorb` window on a Profile (the [`crate::Input::ArmAbsorb`] handler).
-    /// Emitted once per arm, so a `tail` sees the *arm*, not only the eventual
+    /// An operator `absorb` armed a window on a Profile ([`crate::Input::ArmAbsorb`]): one line per
+    /// Profile it reached, so a `tail` sees each arm, not only the eventual
     /// [`Self::QuiescenceAbsorbed`] fold. `mode` distinguishes a one-shot consume-on-first window
     /// from a time-boxed persist window; the expiry instant is **not** carried (an `Instant` has no
     /// clean wire wall-clock at this layer — `show` renders the expiry from live Profile state

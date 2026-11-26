@@ -313,13 +313,12 @@ mod tests {
             .subs()
             .find_by_name("watched")
             .expect("watched attached");
-        let profile = engine.subs().get(sid).expect("live sub").profile();
 
         let arm_now = Instant::now();
         let window = Duration::from_mins(1);
         let _ = engine.step(
             Input::ArmAbsorb {
-                profile,
+                sub: sid,
                 duration: Some(window),
             },
             arm_now,

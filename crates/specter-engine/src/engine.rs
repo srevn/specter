@@ -179,8 +179,8 @@ impl Engine {
                 // `detach_sub_inner` directly with their own reason.
                 self.detach_sub_inner(sub, DetachReason::IpcDisabled, &mut out);
             }
-            Input::ArmAbsorb { profile, duration } => {
-                self.on_arm_absorb(profile, duration, now, &mut out);
+            Input::ArmAbsorb { sub, duration } => {
+                self.on_arm_absorb(sub, duration, now, &mut out);
             }
         }
         out.sort_for_emission();

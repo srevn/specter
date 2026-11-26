@@ -69,10 +69,11 @@ pub(crate) enum WireRequest {
     Enable {
         name: CompactString,
     },
-    /// Arm an `absorb` window on the named watch's Profile — fold the next fireable burst into the
+    /// Arm an `absorb` window on each Profile the named watch fires on — its own, or each one a
+    /// dynamic watch's template minted onto — folding the next fireable burst there into the
     /// baseline instead of firing (the echo-suppression signal for an expected replication). `name`
-    /// resolves to a Profile driver-side; the wire carries no id, same name-only addressing as
-    /// every other verb. `duration_ms` is the window length: `None` ⇒ the engine's default (one
+    /// resolves to the watch's Sub driver-side; the wire carries no id, same name-only addressing
+    /// as every other verb. `duration_ms` is the window length: `None` ⇒ the engine's default (one
     /// `settle` interval, consume-on-first); `Some(ms)` ⇒ a time-boxed window. The wire has no
     /// `Duration` type, so the duration rides as a scalar millisecond count (matching
     /// [`WireTime`]'s hand-rolled-scalar discipline); the driver rebuilds the `Duration` — and

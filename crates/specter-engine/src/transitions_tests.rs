@@ -7408,7 +7408,7 @@ fn standard_burst_born_under_window_folds_without_firing() {
     // Arm the window BEFORE the FsEvent births the Standard burst, so the birth consult latches it.
     e.step(
         Input::ArmAbsorb {
-            profile: pid,
+            sub: sid,
             duration: None,
         },
         now,
@@ -7490,7 +7490,7 @@ fn arming_window_retro_latches_in_flight_batching_burst() {
     // Arm the window while the burst is in Batching — the retro-latch.
     e.step(
         Input::ArmAbsorb {
-            profile: pid,
+            sub: sid,
             duration: None,
         },
         now,
@@ -7549,7 +7549,7 @@ fn consume_on_first_folds_once_then_fires() {
 
     e.step(
         Input::ArmAbsorb {
-            profile: pid,
+            sub: sid,
             duration: None,
         },
         t0,
@@ -7597,7 +7597,7 @@ fn persist_until_folds_repeatedly_then_fires_after_expiry() {
 
     e.step(
         Input::ArmAbsorb {
-            profile: pid,
+            sub: sid,
             duration: Some(window),
         },
         t0,
@@ -7663,7 +7663,7 @@ fn cold_seed_under_window_stays_silent_pin_and_preserves_window() {
     // Arm a one-shot window on the now-Idle Profile.
     e.step(
         Input::ArmAbsorb {
-            profile: pid,
+            sub: sid,
             duration: None,
         },
         now,
@@ -7671,7 +7671,7 @@ fn cold_seed_under_window_stays_silent_pin_and_preserves_window() {
 
     // SensorOverflow reseeds the Idle Profile into a cold Verifying-first Seed burst, born
     // fold-latched (the window is live at its birth).
-    let overflow_out = e.step(
+    let _ = e.step(
         Input::SensorOverflow {
             scope: OverflowScope::Global,
         },
@@ -7681,7 +7681,6 @@ fn cold_seed_under_window_stays_silent_pin_and_preserves_window() {
         e.profiles.get(pid).unwrap().state().burst_fold_latched(),
         "the cold Seed is born fold-latched under the live window",
     );
-    let _ = overflow_out;
 
     // Answer the cold Seed's probe Authoritative — no driving event, so the base is SilentPin (not
     // firing) and the fold override is inert.
@@ -7777,7 +7776,7 @@ fn residual_restart_under_window_folds() {
     // but it stands for the next pre-fire birth, including the residual restart.
     e.step(
         Input::ArmAbsorb {
-            profile: pid,
+            sub: sid,
             duration: None,
         },
         rebasing_at,
@@ -7882,14 +7881,14 @@ fn residual_restart_under_window_folds() {
 /// diagnostic. `None` ⇒ `(now + settle, ConsumeOnFirst)`; `Some(d)` ⇒ `(now + d, PersistUntil)`.
 #[test]
 fn on_arm_absorb_derives_window_from_duration() {
-    let (mut e, pid, _sid, _root, _now) = engine_with_attached_sub();
+    let (mut e, pid, sid, _root, _now) = engine_with_attached_sub();
     complete_seed_burst(&mut e, pid);
     let now = Instant::now();
 
     // None ⇒ default one-shot, expiry = now + settle.
     let none_out = e.step(
         Input::ArmAbsorb {
-            profile: pid,
+            sub: sid,
             duration: None,
         },
         now,
@@ -7915,7 +7914,7 @@ fn on_arm_absorb_derives_window_from_duration() {
     let d = Duration::from_secs(30);
     let some_out = e.step(
         Input::ArmAbsorb {
-            profile: pid,
+            sub: sid,
             duration: Some(d),
         },
         now,
@@ -7936,6 +7935,57 @@ fn on_arm_absorb_derives_window_from_duration() {
         )),
         "Some(d) arm emits AbsorbArmed{{PersistUntil}}",
     );
+}
+
+/// A chain verdict reconciles whatever its Profile holds: the shape pre-check runs ahead of the
+/// fold override, so a burst born fold-latched on a chain Profile folds nothing and the pass mints.
+/// No input arms a chain Profile — an absorb addressed to a template arms its matches' Profiles —
+/// so the window is armed here through the core edge.
+#[test]
+fn absorb_window_is_inert_for_discovery() {
+    let mut e = Engine::new();
+    let data = crate::testkit::pre_place_dir(&mut e, &["data"]);
+    let now = Instant::now();
+    let (sid, pid) = crate::testkit::attach_discovery(&mut e, "disc", "/data/*", now);
+    let t1 = crate::testkit::seed_to_idle(&mut e, pid, &specter_core::testkit::dir_snap(&[]), now);
+    e.profiles.get_mut(pid).unwrap().arm_absorb(
+        t1 + Duration::from_mins(1),
+        specter_core::AbsorbMode::PersistUntil,
+    );
+
+    let _ = e.step(
+        Input::FsEvent {
+            resource: data,
+            event: FsEvent::StructureChanged,
+        },
+        t1,
+    );
+    assert!(
+        e.profiles.get(pid).unwrap().state().burst_fold_latched(),
+        "premise: the burst is born fold-latched under the window",
+    );
+    let verifying_at = t1 + specter_core::DISCOVERY_SETTLE;
+    crate::testkit::drain_due(&mut e, verifying_at);
+    let verified = crate::testkit::verify(
+        &mut e,
+        pid,
+        &specter_core::testkit::dir_snap(&[("x", EntryKind::Dir, 1)]),
+        verifying_at,
+    );
+    assert_eq!(
+        e.subs.minted(sid).len(),
+        1,
+        "the pass mints under the window"
+    );
+    assert!(
+        !verified
+            .out
+            .diagnostics
+            .iter()
+            .any(|d| matches!(d, Diagnostic::QuiescenceAbsorbed { .. })),
+        "a chain verdict folds nothing",
+    );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 // ---------- Property tests ----------

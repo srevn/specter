@@ -794,6 +794,17 @@ impl SubRegistry {
         })
     }
 
+    /// The Profiles `sub`'s watch fires on, in the minted Subs' id order: a firing Sub's own; for a
+    /// template, whose own Profile reconciles and never fires, the Profile each Sub it minted sits
+    /// on — one per Sub, by the mint dedup ([`Self::minted_at`]). Empty for a stale id.
+    pub fn firing_profiles(&self, sub: SubId) -> impl Iterator<Item = ProfileId> {
+        let own = self.subs.get(sub).filter(|s| !s.is_template());
+        let minted = self
+            .minted(sub)
+            .map(|minted| self.subs.get(minted).expect("a minted set holds live Subs"));
+        own.into_iter().chain(minted).map(Sub::profile)
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = (SubId, &Sub)> {
         self.subs.iter()
     }

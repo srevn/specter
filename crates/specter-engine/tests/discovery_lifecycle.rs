@@ -1809,46 +1809,68 @@ fn overflow_resource_scope_skips_profile_holding_descendant_fds_inside_scope() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// An armed operator `absorb` window is inert for discovery: the reconcile proceeds (mints land)
-/// and no `QuiescenceAbsorbed` is narrated — the early classify return precedes the fold override,
-/// so the latch is never consumed.
+/// An absorb addressed to a template arms a window on each Profile it minted onto, one per match in
+/// the minted Subs' order, and none on its own Profile, whose verdict reconciles; a match's next
+/// burst then folds where it would have fired.
 #[test]
-fn absorb_window_is_inert_for_discovery() {
+fn absorbing_a_template_arms_its_matches_and_never_its_own_profile() {
     let mut e = Engine::new();
     let data = pre_place_dir(&mut e, &["data"]);
     let now = Instant::now();
-    let (sid, pid) = attach_discovery(&mut e, "disc", "/data/*", now);
-    let _ = respond(&mut e, pid, &dir_snap(&[]), now);
+    let mut reliable = discovery_req("disc", "/data/*");
+    reliable.events = DEFAULT_EVENTS;
+    let (sid, pid, _) = attach_request(&mut e, reliable, now);
+    let three = dir_snap(&[
+        ("a", EntryKind::Dir, 1),
+        ("b", EntryKind::Dir, 2),
+        ("c", EntryKind::Dir, 3),
+    ]);
+    let _ = respond(&mut e, pid, &three, now);
+    settle_minted_seeds(&mut e, sid, now);
+    let matches: Vec<ProfileId> = e.subs().minted(sid).map(|mid| pid_of(&e, mid)).collect();
+    assert_eq!(matches.len(), 3, "premise: one Sub per match");
 
     let t1 = now + Duration::from_millis(10);
     let armed = e.step(
         Input::ArmAbsorb {
-            profile: pid,
+            sub: sid,
             duration: Some(Duration::from_mins(1)),
         },
         t1,
     );
+    let windows: Vec<ProfileId> = armed
+        .diagnostics
+        .iter()
+        .filter_map(|d| match d {
+            Diagnostic::AbsorbArmed { profile, .. } => Some(*profile),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(windows, matches, "one window per match's Profile");
     assert!(
-        armed
-            .diagnostics
-            .iter()
-            .any(|d| matches!(d, Diagnostic::AbsorbArmed { profile, .. } if *profile == pid)),
-        "window armed",
+        e.profiles().get(pid).unwrap().absorb_window().is_none(),
+        "the template's own Profile is never armed",
     );
-    let (out, _) = burst_and_respond(
+
+    let a = e.tree().lookup(Some(data), "a").expect("the match's slot");
+    let a_pid = pid_of(&e, minted_subs_of(&e, sid)[&a]);
+    let (folded, _) = burst_and_respond(
         &mut e,
-        pid,
-        data,
-        &dir_snap(&[("x", EntryKind::Dir, 1)]),
+        a_pid,
+        a,
+        &dir_snap(&[("f", EntryKind::File, 7)]),
         t1,
     );
-    assert_eq!(minted_paths(&out).len(), 1, "minting proceeds under absorb");
-    assert_eq!(minted_subs_of(&e, sid).len(), 1, "the mint registered");
     assert!(
-        !out.diagnostics
-            .iter()
-            .any(|d| matches!(d, Diagnostic::QuiescenceAbsorbed { .. })),
-        "Reconcile is non-firing — nothing for the window to fold",
+        folded.effects().is_empty(),
+        "the match's burst folds, not fires"
+    );
+    assert!(
+        folded
+            .diagnostics
+            .contains(&Diagnostic::QuiescenceAbsorbed { profile: a_pid }),
+        "the fold is the match's own; got {:?}",
+        folded.diagnostics,
     );
     let _ = e.cancel_all_in_flight_probes();
 }
