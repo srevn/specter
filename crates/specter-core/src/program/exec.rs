@@ -12,11 +12,11 @@ use std::time::Duration;
 /// One leaf-process specification: a frozen argv plus an optional per-step timeout.
 ///
 /// `timeout`: `None` ⇒ no deadline; `Some(d)` ⇒ SIGTERM at `now + d`, SIGKILL after the actuator's
-/// shutdown grace, reaped as `EffectOutcome::Failed { exit_code: None, signal: Some(15 | 9) }`. No
-/// cross-field invariant — an empty argv or a zero timeout is rejected at config validation, not
-/// here — so [`Self::new`] is `pub` for `specter-config` lowering; fields are private only to force
-/// the constructor (no struct-literal or half-built bypass) and keep the representation free behind
-/// the accessors.
+/// shutdown grace. A process the SIGTERM kills ends `Failed(Signal(15))`, one only the SIGKILL kills
+/// `Failed(Signal(9))` ([`crate::Termination::Signal`]). No cross-field invariant — an empty argv
+/// or a zero timeout is rejected at config validation, not here — so [`Self::new`] is `pub` for
+/// `specter-config` lowering; fields are private only to force the constructor (no struct-literal
+/// or half-built bypass) and keep the representation free behind the accessors.
 ///
 /// The struct literal is rejected — [`Self::new`] is the only path:
 ///
