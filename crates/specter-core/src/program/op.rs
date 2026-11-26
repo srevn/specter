@@ -139,10 +139,9 @@ impl MultiStage {
 
 /// Spawn shape — what the actuator actually launches.
 ///
-/// `Exec` is one process; `Pipe` is N processes wired stdout→stdin with pipefail-on aggregation (last
-/// non-zero exit, first observed signal). A `Pipe` always has ≥2 stages: [`MultiStage`] is its sole
-/// producer and rejects fewer, so a single-stage "pipe" is unrepresentable — one command lowers to
-/// a top-level `Exec`, not a `Pipe`.
+/// `Exec` is one process; `Pipe` is N processes wired stdout→stdin, failing as `set -o pipefail`
+/// does. A `Pipe` always has ≥2 stages: [`MultiStage`] is its sole producer and rejects fewer, so a
+/// single-stage "pipe" is unrepresentable — one command lowers to a top-level `Exec`, not a `Pipe`.
 ///
 /// `Pipe`'s [`MultiStage`] is a zero-cost wrapper over the shared `Arc<[ExecAction]>`, so coalesced
 /// Effects still share one stages allocation; the Arc travels from `lower_to_program` into every

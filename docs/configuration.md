@@ -167,9 +167,9 @@ each.
 
 ### Pipes
 
-A `pipe` action wires `N` processes stdout→stdin (shell `a | b | c`).
-Each stage is a `{ exec = [...] }` table with its own argv and optional
-per-stage `timeout`:
+A `pipe` action starts `N` processes together, wired stdout→stdin
+(shell `a | b | c`). Each stage is a `{ exec = [...] }` table with its
+own argv and optional per-stage `timeout`:
 
 ```toml
 [[watch.actions]]
@@ -179,15 +179,15 @@ pipe = [
 ]
 ```
 
-- Stages spawn in parallel; the kernel's SIGPIPE chain wires their I/O.
-- **Pipefail-on**: any stage's non-zero exit fails the whole pipe.
-  Aggregated outcome — `exit_code` is the **last** non-zero exit in
-  spawn order (matches `set -o pipefail`); `signal` is the **first**
-  signal observed (a per-stage timeout's SIGTERM dominates a later
-  natural exit).
-- A failing stage triggers SIGTERM cascade to every alive sibling, so
-  a hung downstream stage can't keep the pipe alive after upstream
-  failure.
+- **Pipefail**: the pipe fails when any stage exits non-zero or is
+  killed, and ends as its rightmost failed stage ended, as
+  `set -o pipefail` reports it.
+- When a stage fails, every stage before it that is still running is
+  sent SIGTERM: what it writes can no longer reach the pipe's end. The
+  stages after it finish on their own: the next one reads what the
+  failed stage wrote to the end, which comes once the failed stage, and
+  any process it started, has exited (see `exec` under
+  [Command output](#command-output)).
 - Pipes require **at least two stages** — `pipe = [{...}]` is rejected
   as `single-stage-pipe`; use top-level `exec` directly.
 - A stage's `timeout` stops that stage; a `timeout` on the pipe itself

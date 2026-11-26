@@ -1,13 +1,6 @@
-//! End-to-end pin: pipe drain must not deadlock when stage 0's child blocks indefinitely.
-//!
-//! The parallel `PipeWaiter` (one OS thread per stage) lets stage 1's prompt failure fire the cascade
-//! SIGTERM that unblocks stage 0. A sequential waiter would head-of-line block on stage 0 and hang
-//! indefinitely waiting for its `sleep 60` to return.
-//!
-//! Pairs with the in-crate unit test
-//! `pipe::tests::blocked_first_stage_unblocked_by_cascade_does_not_deadlock`, which pins the same
-//! property against synthetic `BlockingWaiter`s at the `PipeWaiter` abstraction layer. This test
-//! exercises the property end-to-end through `OsSpawner` + real children.
+//! A pipe end to end, through `OsSpawner` and real children: a failing stage stops the stages
+//! upstream of it, the stages after it read what it wrote, and the pipe ends as its rightmost failed
+//! stage did. `pipe::tests` pins the same rule over stub stages.
 
 mod common;
 
@@ -39,14 +32,9 @@ fn pipe_program(stages: Vec<Vec<String>>) -> Arc<ActionProgram> {
     Arc::new(b.build().unwrap())
 }
 
-/// Stage 0 blocks (`sleep 60`); stage 1 fails after ~2s. The parallel `PipeWaiter` must report
-/// `Failed` well under the 60-second sleep window, demonstrating that cascade SIGTERM from stage
-/// 1's report reaches stage 0's still-running child.
-///
-/// **Outcome aggregation pins.** Stage 0 (sleep, no stdout) ignores SIGPIPE — it exits only because
-/// the cascade SIGTERM lands on it, so its outcome is `Failed { signal: Some(15) }`. Stage 1 exits
-/// cleanly with `Failed { exit_code: Some(7) }`. Spawn-order aggregation (last non-zero exit / first
-/// observed signal) yields `exit_code = 7` and `signal = 15`.
+/// Stage 0 blocks without writing (`sleep 60`), so no SIGPIPE would ever end it; stage 1 fails after
+/// ~2s. Its failure stops stage 0, so the pipe ends well inside the sleep, and as stage 1 ended:
+/// `Exit(7)`, not the SIGTERM that stopped stage 0.
 #[test]
 fn pipe_drain_does_not_block_on_hung_stage_0() {
     let mut harness = Harness::new(nz(2));
@@ -65,9 +53,8 @@ fn pipe_drain_does_not_block_on_hung_stage_0() {
     ));
 
     let start = Instant::now();
-    // Generous upper bound — stage 1 exits at ~2s; the cascade SIGTERM should make stage 0 exit
-    // within scheduling slop. Anything anywhere near 60s indicates the sequential deadlock would
-    // have hit.
+    // Generous upper bound: stage 1 exits at ~2s and its failure stops stage 0 at once; anywhere
+    // near 60s, nothing stopped it.
     let inputs = harness.wait_for_effect_completes(1, Duration::from_secs(30));
     let elapsed = start.elapsed();
     assert!(
@@ -78,22 +65,15 @@ fn pipe_drain_does_not_block_on_hung_stage_0() {
     match &inputs[0] {
         Input::EffectComplete(c) => {
             assert_eq!(c.sub, unique_sub_id(sub_seed));
-            match &c.outcome {
-                EffectOutcome::Failed(Termination::PipeMixed { last_exit, first_signal }) => {
-                    assert_eq!(*last_exit, 7, "stage 1's exit dominates");
-                    assert_eq!(*first_signal, 15, "stage 0's cascade SIGTERM surfaces");
-                }
-                other => panic!("expected Failed(PipeMixed), got {other:?}"),
-            }
+            assert_eq!(c.outcome, EffectOutcome::Failed(Termination::Exit(7)));
         }
         other => panic!("expected EffectComplete, got {other:?}"),
     }
     harness.shutdown();
 }
 
-/// Happy-path baseline. A pipe of two cleanly-completing stages (`echo hi | cat`) reports `Ok` —
-/// pins that the parallel design doesn't break the no-failure case. The kernel's SIGPIPE chain on
-/// stage 0's natural exit propagates EOF to stage 1's stdin without the cascade firing.
+/// Two stages that both succeed (`echo hi | cat`): `cat` reads to the end of its input, which comes
+/// when `echo` exits, and the pipe is `Ok`.
 #[test]
 fn pipe_drain_all_ok_completes_ok() {
     let mut harness = Harness::new(nz(2));
@@ -112,6 +92,40 @@ fn pipe_drain_all_ok_completes_ok() {
     match &inputs[0] {
         Input::EffectComplete(c) => {
             assert_eq!(c.outcome, EffectOutcome::Ok);
+        }
+        other => panic!("expected EffectComplete, got {other:?}"),
+    }
+    harness.shutdown();
+}
+
+/// Stage 0 writes 500 lines, fewer bytes than any pipe buffer holds, and exits 3 at once; stage 1
+/// sleeps through that failure before it counts, and fails unless every line arrived. The pipe ends
+/// as stage 0 did: had the failure stopped its reader, or the reader read short, it would end as
+/// the reader did.
+#[test]
+fn pipe_drain_reader_reads_all_a_failed_stage_wrote() {
+    let mut harness = Harness::new(nz(2));
+    let program = pipe_program(vec![
+        vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            "i=0; while [ $i -lt 500 ]; do echo line-$i; i=$((i+1)); done; exit 3".into(),
+        ],
+        vec!["/bin/sh".into(), "-c".into(), "sleep 1; n=$(wc -l); [ $n -eq 500 ]".into()],
+    ]);
+    let sub_seed: u64 = 0xf1_0003;
+    harness.submit(perfile_effect_with_program(
+        sub_seed,
+        sub_seed,
+        sub_seed,
+        next_corr(),
+        program,
+        PathBuf::from("/tmp"),
+    ));
+    let inputs = harness.wait_for_effect_completes(1, Duration::from_secs(20));
+    match &inputs[0] {
+        Input::EffectComplete(c) => {
+            assert_eq!(c.outcome, EffectOutcome::Failed(Termination::Exit(3)));
         }
         other => panic!("expected EffectComplete, got {other:?}"),
     }

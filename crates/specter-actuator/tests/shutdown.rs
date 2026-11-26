@@ -1,7 +1,6 @@
 //! Integration: SIGTERM-then-SIGKILL within 5s grace; pending dropped.
 
 #![cfg(unix)]
-#![allow(clippy::match_wildcard_for_single_variants)]
 
 mod common;
 
@@ -29,9 +28,7 @@ fn shutdown_sigkills_term_resistant_child() {
     assert_eq!(completions.len(), 1);
     match &completions[0] {
         Input::EffectComplete(c) => match &c.outcome {
-            EffectOutcome::Failed(
-                Termination::Signal(signal) | Termination::PipeMixed { first_signal: signal, .. },
-            ) => {
+            EffectOutcome::Failed(Termination::Signal(signal)) => {
                 assert_eq!(*signal, 9, "SIGKILL delivered");
             }
             other => panic!("expected Failed{{signal=9}}; got {other:?}"),

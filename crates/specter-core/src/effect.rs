@@ -233,8 +233,7 @@ impl Default for DedupKey {
 /// Terminal outcome of an Effect's plan at the engine boundary.
 ///
 /// The engine's v1 policy is Ignore — it discriminates only `Ok` vs `Failed`. The [`Termination`]
-/// payload is diagnostic (logging) and drives the actuator's internal pipe re-aggregation; it is
-/// not a routing input.
+/// payload is diagnostic (logging); it is not a routing input.
 ///
 /// `Hash` is intentionally not derived — outcomes are consumed by name (`Ok` vs `Failed`) at the
 /// engine's effect-completion dispatcher; no caller keys a map by an outcome, so a `Hash` impl would
@@ -246,8 +245,8 @@ pub enum EffectOutcome {
     Failed(Termination),
 }
 
-/// Why a plan terminated unsuccessfully. The four variants are exactly the four reachable
-/// `(exit_code, signal)` shapes — a total, named encoding, not a state-space change.
+/// How a failed step ended: its process's non-zero exit or killing signal, or `Internal` where the
+/// actuator could not run or wait on it. A pipe ends as its rightmost failed stage ended.
 ///
 /// `Hash` is intentionally not derived — variants are consumed by name for diagnostic formatting;
 /// no caller keys a map by a termination payload, so a `Hash` impl would be dead surface.
@@ -256,13 +255,10 @@ pub enum Termination {
     /// Resolver/spawn failure, waiter panic, or a synthesised plan outcome — no exit code and no
     /// signal.
     Internal,
-    /// Clean non-zero exit: a single process, or a pipe with no signalled stage.
+    /// Exited with this non-zero status.
     Exit(i32),
-    /// Killed by signal: a single process, or a pipe with no non-zero exit.
+    /// Killed by this signal.
     Signal(i32),
-    /// A pipe where one stage exited non-zero and another was signalled (last non-zero exit, first
-    /// observed signal).
-    PipeMixed { last_exit: i32, first_signal: i32 },
 }
 
 /// Engine-facing envelope for one effect completion.

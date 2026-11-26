@@ -1862,8 +1862,6 @@ mod tests {
         assert_eq!(spawns.len(), 2);
         assert_eq!(spawns[0].argv, vec!["/bin/a".to_string()]);
         assert_eq!(spawns[1].argv, vec!["/bin/b".to_string()]);
-        // The mock's per-stage completion channels are independent; the aggregating waiter drains
-        // in spawn order, so completing stage 0 first matches the production sequence.
         h.spawner.complete(spawns[0].pid, EffectOutcome::Ok).unwrap();
         h.spawner.complete(spawns[1].pid, EffectOutcome::Ok).unwrap();
         let completions = h.wait_for_effect_completes(1, Duration::from_secs(1));
@@ -1872,59 +1870,6 @@ mod tests {
             &completions[0],
             Input::EffectComplete(c) if matches!(c.outcome, EffectOutcome::Ok)
         ));
-        h.shutdown();
-    }
-
-    /// Two-stage pipe with stage 0 Failed: aggregated outcome is Failed; the cascade SIGTERMs stage
-    /// 1 before its mock completion lands (so the test records the signal). After the cascade, the
-    /// test completes stage 1 with a Failed-by-signal outcome to unblock the aggregator.
-    #[test]
-    fn pipe_first_stage_failed_cascades_sigterm_to_siblings() {
-        let stages: Arc<[ExecAction]> = Arc::from(vec![
-            ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/a")])], None),
-            ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/b")])], None),
-        ]);
-        let program = pipe_program(stages);
-
-        let mut h = Harness::new(nz(4));
-        h.submit(make_effect_perfile_with_program(51, 51, 51, 1, program));
-        let spawns = h.wait_for_spawns(2, Duration::from_secs(1));
-        let stage0_pid = spawns[0].pid;
-        let stage1_pid = spawns[1].pid;
-
-        // Complete stage 0 Failed; the aggregating waiter will observe this and cascade SIGTERM to
-        // stage 1.
-        h.spawner.complete(stage0_pid, EffectOutcome::Failed(Termination::Exit(7))).unwrap();
-        // Wait for the cascade SIGTERM to land. The mock signaler records Term(pid) on `signal_term`.
-        // Poll briefly.
-        let deadline = Instant::now() + Duration::from_secs(2);
-        loop {
-            let signals = h.spawner.signals();
-            if signals.contains(&SignalRecord::Term(stage1_pid)) {
-                break;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "expected SIGTERM cascade to stage 1; signals={signals:?}",
-            );
-            thread::sleep(Duration::from_millis(5));
-        }
-        // Complete stage 1 (as if SIGTERM took effect) so the aggregator's wait finishes and the
-        // EffectComplete arrives.
-        h.spawner.complete(stage1_pid, EffectOutcome::Failed(Termination::Signal(15))).unwrap();
-        let completions = h.wait_for_effect_completes(1, Duration::from_secs(1));
-        match &completions[0] {
-            Input::EffectComplete(c) => {
-                assert!(matches!(
-                    c.outcome,
-                    EffectOutcome::Failed(Termination::PipeMixed {
-                        last_exit: 7,
-                        first_signal: 15,
-                    })
-                ));
-            }
-            other => panic!("expected EffectComplete::Failed; got {other:?}"),
-        }
         h.shutdown();
     }
 
@@ -2056,20 +2001,17 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(5));
         }
-        // Stage 0 has no timeout — must not receive a SIGTERM from the per-stage timer. The
-        // cascade-on-failure path also doesn't reach stage 0 (idx 0 → siblings idx+1..n, which
-        // doesn't include stage 0 itself).
+        // Stage 0 has no timeout, so nothing has signalled it yet. This runs before stage 1
+        // completes: once stage 1 has failed, stage 0 is upstream of a failure and is stopped.
         let signals = h.spawner.signals();
         assert!(
             !signals.contains(&SignalRecord::Term(stage0_pid)),
             "stage 0 (no timeout) must not receive timer-driven SIGTERM",
         );
 
-        // Complete both stages so the aggregator finishes. Stage 1 reports as Failed-by-signal (the
-        // timeout took effect).
+        // Complete both stages so the pipe's wait ends: stage 1 as its timeout's SIGTERM ends it,
+        // then stage 0, which the mock leaves running after the SIGTERM stage 1's failure sends it.
         h.spawner.complete(stage1_pid, EffectOutcome::Failed(Termination::Signal(15))).unwrap();
-        // The aggregator on stage 1's failure cascades SIGTERM to *later* siblings (none here), then
-        // continues draining. Stage 0 hasn't completed yet — drain it so the wait finishes.
         h.spawner.complete(stage0_pid, EffectOutcome::Ok).unwrap();
         h.wait_for_effect_completes(1, Duration::from_secs(2));
         h.shutdown();
