@@ -371,11 +371,13 @@ impl<W: FsWatcher> EngineDriver<W> {
 
     /// Operator-requested runtime disable of a watch by name.
     ///
-    /// Two precondition gates ahead of the apply:
+    /// Two precondition gates ahead of the apply, in this order:
     ///
-    /// 1. [`Self::admit_watch`] admits a watch.
-    /// 2. A name already in `disabled_runtime` is refused with [`WireErrorCode::NotDisabled`] — the
-    ///    verb's precondition (sub is runtime-enabled) is violated.
+    /// 1. A name already in `disabled_runtime` is refused with [`WireErrorCode::NotDisabled`] — the
+    ///    verb's precondition (the watch is runtime-enabled) is violated. It goes first: a
+    ///    runtime-disabled watch is detached, so the engine holds no Sub by its name, and the
+    ///    admission would answer that no watch holds it.
+    /// 2. [`Self::admit_watch`] admits a watch.
     ///
     /// On the apply path, the override-set insert runs BEFORE the engine's [`Input::DetachSub`]
     /// step. The ordering binds the `disabled_runtime ↔ engine` invariant across the engine step:
@@ -393,9 +395,6 @@ impl<W: FsWatcher> EngineDriver<W> {
         name: CompactString,
         now: Instant,
     ) -> ControlFlow<()> {
-        let Some(sid) = self.admit_watch(token, &name) else {
-            return ControlFlow::Continue(());
-        };
         if self.disabled_runtime.contains(name.as_str()) {
             self.respond(
                 token,
@@ -406,6 +405,9 @@ impl<W: FsWatcher> EngineDriver<W> {
             );
             return ControlFlow::Continue(());
         }
+        let Some(sid) = self.admit_watch(token, &name) else {
+            return ControlFlow::Continue(());
+        };
         self.disabled_runtime.insert(name);
         let out = self.engine.step(Input::DetachSub(sid), now);
         let outcome = self.forward(out);

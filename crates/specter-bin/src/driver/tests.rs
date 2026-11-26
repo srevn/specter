@@ -3075,6 +3075,8 @@ fn ipc_disable_and_enable_discovery_template_round_trip() {
     let _ = rig.driver.begin_shutdown();
 }
 
+/// A second `disable` of a watch is refused as already disabled, though the first detached it and
+/// the engine no longer holds its name.
 #[test]
 fn ipc_disable_already_disabled_returns_err() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -3082,24 +3084,19 @@ fn ipc_disable_already_disabled_returns_err() {
     let config = config_with_one_watch(tmp.path());
     let mut rig = rig_for(config, cfg_path);
     let _ = rig.driver.run_initial_attach();
+    let disable = WireRequest::Disable {
+        name: CompactString::const_new("build"),
+    };
 
-    rig.driver
-        .disabled_runtime
-        .insert(CompactString::const_new("build"));
+    let mut first = ipc_connect(&rig);
+    let reply = ipc_round_trip(&mut rig, &mut first, &disable);
+    assert!(matches!(reply, ResponsePayload::Ok), "got {reply:?}");
 
-    let mut client = ipc_connect(&rig);
-    let reply = ipc_round_trip(
-        &mut rig,
-        &mut client,
-        &WireRequest::Disable {
-            name: CompactString::const_new("build"),
-        },
-    );
-    match reply {
+    let mut second = ipc_connect(&rig);
+    match ipc_round_trip(&mut rig, &mut second, &disable) {
         ResponsePayload::Err { code, .. } => assert_eq!(code, WireErrorCode::NotDisabled),
-        other => panic!("expected Err, got {other:?}"),
+        other => panic!("expected Err(NotDisabled), got {other:?}"),
     }
-    assert!(rig.driver.engine.subs().find_by_name("build").is_some());
 
     let _ = rig.driver.begin_shutdown();
 }
