@@ -181,9 +181,11 @@ fn kevent_change(kq: &OwnedFd, ev: &libc::kevent) -> io::Result<()> {
 }
 
 /// Open `path` with the kqueue-friendly flag set for the current target. macOS uses `O_EVTONLY`
-/// (Darwin-private flag for "open for event monitoring only" — won't pin the file against `unlink`);
-/// FreeBSD falls back to `O_RDONLY`. Both unconditionally apply `O_NOFOLLOW` — symlinks at the anchor
-/// path fail with `ELOOP` rather than silently traversing. v1 has no follow-symlinks opt-in.
+/// (Darwin-private flag for "open for event monitoring only" — won't pin the file against
+/// `unlink`); FreeBSD falls back to `O_RDONLY`. Both unconditionally apply `O_NOFOLLOW` — symlinks
+/// at the anchor path fail with `ELOOP` rather than silently traversing. v1 has no follow-symlinks
+/// opt-in. Both close on exec: every command the daemon spawns would otherwise inherit one
+/// descriptor per watched entry.
 ///
 /// Errors propagate verbatim (`EMFILE` / `ENFILE` / `ENOENT` / `EACCES` / `ELOOP` are the
 /// FD-pressure / pending-path / symlink cases the engine surfaces via `WatchOpRejected`).
@@ -192,10 +194,10 @@ pub(super) fn open_for_watch(path: &Path) -> io::Result<OwnedFd> {
         .map_err(|_| io::Error::other("path contains NUL byte"))?;
 
     #[cfg(target_os = "macos")]
-    let flags = libc::O_EVTONLY | libc::O_NOFOLLOW;
+    let flags = libc::O_EVTONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
 
     #[cfg(target_os = "freebsd")]
-    let flags = libc::O_RDONLY | libc::O_NOFOLLOW;
+    let flags = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
 
     // SAFETY: `cstr` is a valid NUL-terminated C string for the duration of the call; `flags` is a
     // valid `O_*` bit set. `open` returns a non-negative fd or -1 on error.
@@ -228,8 +230,20 @@ pub(super) fn stat_kind(fd: &OwnedFd) -> io::Result<ResourceKind> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Kevent, kevent_drain, kqueue_new};
+    use super::{Kevent, kevent_drain, kqueue_new, open_for_watch};
+    use nix::fcntl::{FcntlArg, FdFlag, fcntl};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn open_for_watch_closes_on_exec() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fd = open_for_watch(dir.path()).expect("open the watched directory");
+        let flags = FdFlag::from_bits_truncate(fcntl(&fd, FcntlArg::F_GETFD).expect("F_GETFD"));
+        assert!(
+            flags.contains(FdFlag::FD_CLOEXEC),
+            "a command would inherit it"
+        );
+    }
 
     #[test]
     fn kevent_zeroed_is_default_state() {

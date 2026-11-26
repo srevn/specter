@@ -691,13 +691,12 @@ mod tests {
             return;
         }
 
-        // Open `FDS_TO_OPEN` directory fds with `O_EVTONLY`, the same flag the kqueue watcher uses.
+        // Open `FDS_TO_OPEN` directory fds as the kqueue watcher does: event-only, closed on exec.
         // We stat any always-present path; the fd count is what matters, not what's behind it.
         let cstr = std::ffi::CString::new("/").unwrap();
         let mut fds: Vec<OwnedFd> = Vec::with_capacity(FDS_TO_OPEN);
-        let o_evtonly: i32 = 0x8000;
         for _ in 0..FDS_TO_OPEN {
-            let raw = unsafe { libc::open(cstr.as_ptr(), o_evtonly) };
+            let raw = unsafe { libc::open(cstr.as_ptr(), libc::O_EVTONLY | libc::O_CLOEXEC) };
             if raw < 0 {
                 // If we couldn't open enough fds (RLIMIT_NOFILE, EMFILE), skip — the test's premise
                 // (cross OPEN_MAX) hasn't been met.
