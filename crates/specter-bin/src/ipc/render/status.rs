@@ -23,8 +23,8 @@
 //! `Styler::Plain` the output is byte-identical to the pre-color view.
 
 use crate::ipc::protocol::{StatusResponse, WireLastReload};
-use crate::ipc::render::label_cell;
 use crate::ipc::render::style::{self, Rule, Styler};
+use crate::ipc::render::{counted, label_cell};
 use std::fmt::Write as _;
 
 /// Render the status response as one operator-readable block.
@@ -74,9 +74,9 @@ pub(crate) fn render(out: &mut String, resp: &StatusResponse, _wide: bool, sty: 
     );
     let _ = writeln!(
         out,
-        "{}{} templates",
+        "{}{}",
         label_cell(sty, "discovery", LABEL_WIDTH),
-        resp.discovery_active,
+        counted(resp.discovery_active, "template", "templates"),
     );
     // `WirePath: Display` writes its inner UTF-8 / lossy-projected string verbatim — zero-alloc
     // into `out`, no intermediate.
@@ -167,6 +167,17 @@ mod tests {
         }
         assert!(s.contains("/tmp/specter-test.sock"), "socket path appears");
         assert!(s.contains("/etc/specter.toml"), "config path appears");
+
+        let one = StatusResponse {
+            discovery_active: 1,
+            ..fresh_status()
+        };
+        let mut s = String::new();
+        render(&mut s, &one, false, Styler::Plain);
+        assert!(
+            s.lines().any(|l| l == "discovery           1 template"),
+            "one template is counted as one:\n{s}",
+        );
     }
 
     /// Uptime under 24h drops the days segment; ≥1 day shows it. The format is operator-friendly

@@ -86,7 +86,7 @@ const LABEL_WIDTH: usize = 16;
 /// sub_id          1234
 /// profile_id      4321
 ///
-/// minted program (1 ops):
+/// minted program (1 op):
 ///   [0] exec /bin/rotate  ok→escape fail→terminate
 /// ```
 fn render_active(out: &mut String, d: &SubDetails, sty: Styler) {
@@ -232,7 +232,10 @@ fn render_active(out: &mut String, d: &SubDetails, sty: Styler) {
         "{}",
         sty.paint(
             style::LABEL,
-            format_args!("{program_header} ({} ops):", program.len())
+            format_args!(
+                "{program_header} ({}):",
+                counted(program.len(), "op", "ops")
+            )
         ),
     );
     for line in program {
@@ -417,7 +420,7 @@ mod tests {
             "minted scope renders hyphenated like the spawn arm's: {out}",
         );
         assert!(
-            out.contains("minted program (1 ops):"),
+            out.contains("minted program (1 op):"),
             "program header attributes the minted program: {out}",
         );
         assert!(
