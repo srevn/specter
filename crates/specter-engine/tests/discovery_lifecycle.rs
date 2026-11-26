@@ -1342,6 +1342,52 @@ fn terminus_replace_keeps_minted_sub_and_re_fires() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
+/// A minted Sub's per-file fire, and a completion of its Effect the engine no longer awaits, each
+/// name the template that minted it.
+#[test]
+fn a_minted_subs_per_file_fire_and_late_completion_name_its_template() {
+    let mut e = Engine::new();
+    let data = pre_place_dir(&mut e, &["data"]);
+    let now = Instant::now();
+    let mut per_file = discovery_req("disc", "/data/*");
+    per_file.events = DEFAULT_EVENTS;
+    per_file.params.spawn = SpawnSpec::new(empty_program(), EffectScope::PerStableFile, false);
+    let (sid, pid, _) = attach_request(&mut e, per_file, now);
+    let _ = respond(&mut e, pid, &dir_snap(&[("x", EntryKind::Dir, 1)]), now);
+    settle_minted_seeds(&mut e, sid, now);
+    let mid = *discovery_subs_of(&e, sid).values().next().expect("minted");
+    let minted_pid = pid_of(&e, mid);
+    let x = e.tree().lookup(Some(data), "x").expect("the match's slot");
+
+    let t1 = now + Duration::from_millis(10);
+    let grown = dir_snap(&[("f", EntryKind::File, 7)]);
+    let (fired, t2) = burst_and_respond(&mut e, minted_pid, x, &grown, t1);
+    assert!(
+        fired.diagnostics.contains(&Diagnostic::SubFired {
+            sub: mid,
+            profile: minted_pid,
+            count: 1,
+            minted_by: Some(sid),
+        }),
+        "the per-file fire names its template; got {:?}",
+        fired.diagnostics,
+    );
+    let key = fired.effects()[0].key();
+    let _ = complete_effect_to_rebasing(&mut e, mid, key, t2);
+    let late = complete_effect_to_rebasing(&mut e, mid, key, t2);
+    assert!(
+        late.diagnostics
+            .contains(&Diagnostic::EffectCompleteOutsideAwaiting {
+                sub: mid,
+                profile: minted_pid,
+                minted_by: Some(sid),
+            }),
+        "a late completion names its template; got {:?}",
+        late.diagnostics,
+    );
+    let _ = e.cancel_all_in_flight_probes();
+}
+
 /// Detaching the discovery template cascades: the template detaches under the caller's reason,
 /// every minted Sub under `TemplateDetached`, and every Profile reaps.
 #[test]
