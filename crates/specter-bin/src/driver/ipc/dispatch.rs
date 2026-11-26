@@ -41,7 +41,7 @@ use crate::ipc::framing::{InfallibleSerialize, parse_strict};
 use crate::ipc::protocol::{ResponsePayload, WireErrorCode, WireId, WireRequest};
 use compact_str::CompactString;
 use mio::Token;
-use specter_core::Input;
+use specter_core::{Input, SubId};
 use specter_sensor::FsWatcher;
 use std::ops::ControlFlow;
 use std::time::{Duration, Instant};
@@ -337,16 +337,44 @@ impl<W: FsWatcher> EngineDriver<W> {
         ControlFlow::Continue(())
     }
 
-    /// Operator-requested runtime disable of a static Sub by name.
+    /// The Sub a mutating verb addresses by `name` — a declared watch, or a dynamic watch's
+    /// template — or `None` once the refusal is answered on `token`: [`WireErrorCode::UnknownSub`]
+    /// for a name no Sub holds, [`WireErrorCode::MintedSubNoOp`] naming the dynamic watch for a Sub
+    /// its template minted.
+    fn admit_watch(&mut self, token: Token, name: &str) -> Option<SubId> {
+        let subs = self.engine.subs();
+        let (code, error) = match subs.find_by_name(name) {
+            None => (WireErrorCode::UnknownSub, format!("no watch named {name}")),
+            Some(sid) => {
+                let sub = subs
+                    .get(sid)
+                    .expect("by_name resolves to live SubId — registry lockstep invariant");
+                let Some(template) = sub.minted_by() else {
+                    return Some(sid);
+                };
+                let watch = &subs
+                    .get(template)
+                    .expect("a minted Sub's template is registered — it leaves with what it minted")
+                    .name;
+                (
+                    WireErrorCode::MintedSubNoOp,
+                    format!(
+                        "{name} is a match of the dynamic watch {watch}; \
+                         address the watch by its own name"
+                    ),
+                )
+            }
+        };
+        self.respond(token, &ResponsePayload::Err { code, error });
+        None
+    }
+
+    /// Operator-requested runtime disable of a watch by name.
     ///
-    /// Three precondition gates ahead of the apply:
+    /// Two precondition gates ahead of the apply:
     ///
-    /// 1. A name absent from the engine's `by_name` index is refused with
-    ///    [`WireErrorCode::UnknownSub`].
-    /// 2. A discovery-minted Sub (`is_dynamic()`) is refused with [`WireErrorCode::DynamicSubNoOp`]
-    ///    — the discovery Profile's next reconcile would simply re-mint it; disabling the
-    ///    *template* is the lever (its cascade reaps the minted set).
-    /// 3. A name already in `disabled_runtime` is refused with [`WireErrorCode::NotDisabled`] — the
+    /// 1. [`Self::admit_watch`] admits a watch.
+    /// 2. A name already in `disabled_runtime` is refused with [`WireErrorCode::NotDisabled`] — the
     ///    verb's precondition (sub is runtime-enabled) is violated.
     ///
     /// On the apply path, the override-set insert runs BEFORE the engine's [`Input::DetachSub`]
@@ -365,33 +393,9 @@ impl<W: FsWatcher> EngineDriver<W> {
         name: CompactString,
         now: Instant,
     ) -> ControlFlow<()> {
-        let Some(sid) = self.engine.subs().find_by_name(name.as_str()) else {
-            self.respond(
-                token,
-                &ResponsePayload::Err {
-                    code: WireErrorCode::UnknownSub,
-                    error: format!("no watch named {name}"),
-                },
-            );
+        let Some(sid) = self.admit_watch(token, &name) else {
             return ControlFlow::Continue(());
         };
-        let sub = self
-            .engine
-            .subs()
-            .get(sid)
-            .expect("by_name resolves to live SubId — registry lockstep invariant");
-        if sub.is_dynamic() {
-            self.respond(
-                token,
-                &ResponsePayload::Err {
-                    code: WireErrorCode::DynamicSubNoOp,
-                    error: "cannot disable a discovery-minted sub (the next \
-                            reconcile would re-mint it; disable the template instead)"
-                        .into(),
-                },
-            );
-            return ControlFlow::Continue(());
-        }
         if self.disabled_runtime.contains(name.as_str()) {
             self.respond(
                 token,
@@ -459,18 +463,12 @@ impl<W: FsWatcher> EngineDriver<W> {
         outcome
     }
 
-    /// Operator-requested `absorb` window on a static Sub's Profile — the runtime fold-without-fire
+    /// Operator-requested `absorb` window on a watch's Profile — the runtime fold-without-fire
     /// signal. Arms a window so the next fireable burst (or an in-flight one, retro-latched)
     /// advances the baseline silently instead of firing, folding an expected replication into the
     /// settled reference rather than echoing it.
     ///
-    /// Mirrors [`Self::handle_disable`]'s resolution + gate shape, minus the `disabled_runtime`
-    /// interaction (absorb does not detach):
-    ///
-    /// 1. A name absent from the engine's `by_name` index is refused with
-    ///    [`WireErrorCode::UnknownSub`].
-    /// 2. A discovery-minted Sub (`is_dynamic()`) is refused with [`WireErrorCode::DynamicSubNoOp`] —
-    ///    minted Subs vanish and re-mint with the match set, the same reason `disable` refuses them.
+    /// [`Self::admit_watch`] admits a watch, as for [`Self::handle_disable`].
     ///
     /// On the apply path the operator's `duration_ms` is rebuilt into a [`Duration`] **and
     /// clamped** to [`MAX_ABSORB_WINDOW`] before the engine step — the lone overflow guard for the
@@ -486,37 +484,15 @@ impl<W: FsWatcher> EngineDriver<W> {
         duration_ms: Option<u64>,
         now: Instant,
     ) -> ControlFlow<()> {
-        let Some(sid) = self.engine.subs().find_by_name(name) else {
-            self.respond(
-                token,
-                &ResponsePayload::Err {
-                    code: WireErrorCode::UnknownSub,
-                    error: format!("no watch named {name}"),
-                },
-            );
+        let Some(sid) = self.admit_watch(token, name) else {
             return ControlFlow::Continue(());
         };
-        let sub = self
+        let profile = self
             .engine
             .subs()
             .get(sid)
-            .expect("by_name resolves to live SubId — registry lockstep invariant");
-        if sub.is_dynamic() {
-            self.respond(
-                token,
-                &ResponsePayload::Err {
-                    code: WireErrorCode::DynamicSubNoOp,
-                    error: "cannot absorb on a discovery-minted sub (minted Subs \
-                            vanish and re-mint with the match set; target an \
-                            operator-declared sub)"
-                        .into(),
-                },
-            );
-            return ControlFlow::Continue(());
-        }
-        // `ProfileId` is `Copy`; capturing it ends the `&self.engine` borrow before the `&mut
-        // self.engine` step below.
-        let profile = sub.profile();
+            .expect("a resolved watch is live")
+            .profile();
         let duration = duration_ms.map(|ms| Duration::from_millis(ms).min(MAX_ABSORB_WINDOW));
         let out = self
             .engine

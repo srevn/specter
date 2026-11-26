@@ -597,17 +597,6 @@ impl Sub {
         }
     }
 
-    /// Whether this Sub was minted by a discovery reconcile rather than declared by the operator.
-    /// Lifecycle is uniform across the split — anchor loss re-enters descent for every Profile, and a
-    /// minted Sub's removal authority is its source's reconcile, not its anchor — so the predicate is
-    /// purely operator-facing: the IPC enable/disable dispatcher refuses to detach a minted Sub by
-    /// name (the next reconcile would just re-mint it; disable the template instead), and the `show`
-    /// projection renders the origin. A discovery *template* is operator-declared (`false`).
-    #[must_use]
-    pub const fn is_dynamic(&self) -> bool {
-        self.minted_by().is_some()
-    }
-
     /// The discovery template that minted this Sub — `None` for operator-declared Subs, discovery
     /// templates included. Written once, at [`Self::minted`]: the registry files the Sub under it,
     /// in its template's minted set ([`SubRegistry::minted`]).
@@ -686,10 +675,9 @@ impl Sub {
 /// - `by_name` resolves an operator-facing or synthesised name to its `SubId`. Indexes **every**
 ///   Sub regardless of provenance: the config validator reserves the `@` byte, so a
 ///   `[[watch]].name` never carries one and a minted `<template_name>@<matched_path>` always does —
-///   the two populations are disjoint by construction and their union is unique. Callers that need
-///   the static-vs-dynamic discrimination read [`Sub::is_dynamic`] on the resolved Sub. The index
-///   is load-bearing — hot-reload resolves every `removed`/`modified` name to an id through
-///   [`Self::find_by_name`] (O(log N)).
+///   the two populations are disjoint by construction and their union is unique. Callers that tell
+///   them apart read [`Sub::minted_by`] on the resolved Sub. The index is load-bearing — hot-reload
+///   resolves every `removed`/`modified` name to an id through [`Self::find_by_name`] (O(log N)).
 /// - `by_template` holds each template's minted set ([`Self::minted`]), keyed on the `minted_by`
 ///   every minted Sub carries. An entry leaves with its last member, or with its template, whose
 ///   removal hands the members back ([`Removed::orphans`]).
@@ -823,10 +811,10 @@ impl SubRegistry {
     /// Resolve a user-facing `name` to its [`SubId`] in O(log N) via `by_name`. `None` if no Sub
     /// holds `name`.
     ///
-    /// Returns hits for both static and dynamic Subs — callers that need the discrimination read
-    /// [`Sub::is_dynamic`] on the resolved Sub. The config validator reserves the `@` byte, so a
-    /// static name and a minted `<template_name>@<matched_path>` cannot collide; uniqueness across
-    /// the union is structural.
+    /// A declared Sub's name and a minted one resolve alike — callers that tell them apart read
+    /// [`Sub::minted_by`] on the resolved Sub. The config validator reserves the `@` byte, so a
+    /// declared name and a minted `<template_name>@<matched_path>` cannot collide; uniqueness
+    /// across the union is structural.
     ///
     /// Load-bearing: the engine's hot-reload shim resolves every `removed`/`modified` name through
     /// here.

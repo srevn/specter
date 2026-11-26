@@ -4,7 +4,7 @@
 //!
 //! Exit-code discipline matches the other unit-ack verbs (`enable` / `reload`): `0` on `Ok`, `1` on
 //! any structured failure (connect / send / receive / daemon-side `Err`). The structured `code:`
-//! prefix on stderr (e.g. `unknown_sub`, `dynamic_sub_no_op`, `not_disabled`) lets operator scripts
+//! prefix on stderr (e.g. `unknown_sub`, `minted_sub_no_op`, `not_disabled`) lets operator scripts
 //! distinguish failure modes without a per-mode exit code — the wire-stable codes carry the
 //! categorisation.
 

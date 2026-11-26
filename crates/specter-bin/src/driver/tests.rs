@@ -2973,9 +2973,10 @@ fn ipc_disable_unknown_dynamic_shape_name_returns_unknown_sub() {
     assert!(rig.driver.disabled_runtime.is_empty());
 }
 
-/// Disable against a discovery-minted Sub returns [`WireErrorCode::DynamicSubNoOp`].
+/// Disable against a minted Sub refuses with [`WireErrorCode::MintedSubNoOp`], naming the dynamic
+/// watch it is a match of.
 #[test]
-fn ipc_disable_dynamic_sub_returns_dynamic_no_op() {
+fn ipc_disable_minted_sub_returns_minted_sub_no_op() {
     let tmp = tempfile::TempDir::new().unwrap();
     let cfg_path = tmp.path().join("specter.toml");
     let config = Config::from_str("").expect("empty config parses");
@@ -2997,7 +2998,13 @@ fn ipc_disable_dynamic_sub_returns_dynamic_no_op() {
         &WireRequest::Disable { name: name.clone() },
     );
     match reply {
-        ResponsePayload::Err { code, .. } => assert_eq!(code, WireErrorCode::DynamicSubNoOp),
+        ResponsePayload::Err { code, error } => {
+            assert_eq!(code, WireErrorCode::MintedSubNoOp);
+            assert!(
+                error.contains("a match of the dynamic watch disc"),
+                "the refusal names the watch: {error:?}",
+            );
+        }
         other => panic!("expected Err, got {other:?}"),
     }
     assert!(rig.driver.disabled_runtime.is_empty());
@@ -3025,7 +3032,7 @@ fn ipc_disable_and_enable_discovery_template_round_trip() {
         .expect("template attached");
     let sub = rig.driver.engine.subs().get(sid).expect("live sub");
     assert!(sub.is_template(), "fixture lowered to a template");
-    assert!(!sub.is_dynamic(), "a template is operator-declared");
+    assert_eq!(sub.minted_by(), None, "a template is operator-declared");
 
     let mut client_a = ipc_connect(&rig);
     let reply = ipc_round_trip(
@@ -3213,10 +3220,10 @@ fn ipc_absorb_unknown_name_returns_unknown_sub() {
     }
 }
 
-/// `absorb` against a discovery-minted Sub refuses with [`WireErrorCode::DynamicSubNoOp`] — minted
-/// Subs vanish and re-mint with the match set, the same reason `disable` refuses them.
+/// `absorb` against a minted Sub refuses with [`WireErrorCode::MintedSubNoOp`] — minted Subs vanish
+/// and re-mint with the match set, the same reason `disable` refuses them.
 #[test]
-fn ipc_absorb_dynamic_sub_returns_dynamic_no_op() {
+fn ipc_absorb_minted_sub_returns_minted_sub_no_op() {
     let tmp = tempfile::TempDir::new().unwrap();
     let cfg_path = tmp.path().join("specter.toml");
     let config = Config::from_str("").expect("empty config parses");
@@ -3241,8 +3248,8 @@ fn ipc_absorb_dynamic_sub_returns_dynamic_no_op() {
         },
     );
     match reply {
-        ResponsePayload::Err { code, .. } => assert_eq!(code, WireErrorCode::DynamicSubNoOp),
-        other => panic!("expected Err(DynamicSubNoOp), got {other:?}"),
+        ResponsePayload::Err { code, .. } => assert_eq!(code, WireErrorCode::MintedSubNoOp),
+        other => panic!("expected Err(MintedSubNoOp), got {other:?}"),
     }
 
     let _ = rig.driver.begin_shutdown();

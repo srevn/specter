@@ -26,8 +26,8 @@ use super::{program, project_wall, settle_ms};
 /// Resolve `name` and emit the matching [`ShowResponse`] arm.
 ///
 /// Resolution is total:
-/// 1. `engine.subs().find_by_name(name)` resolves to a Sub. If it is operator-declared
-///    (`!is_dynamic()`, discovery templates included) → `Active`; if minted → `Unknown` (the verb's
+/// 1. `engine.subs().find_by_name(name)` resolves to a Sub. If a request declared it (no
+///    `minted_by`, templates included) → `Active`; if a template minted it → `Unknown` (the verb's
 ///    contract: minted Subs are reached through `list`, not `show`). A minted-Sub hit
 ///    short-circuits to `Unknown` rather than falling through, because by the `@`-byte reservation
 ///    a synthesised name never appears in `disabled_runtime` or `config.watches`.
@@ -47,7 +47,7 @@ pub(crate) fn show(
             .subs()
             .get(sid)
             .expect("by_name resolves to live SubId — registry lockstep invariant");
-        if !sub.is_dynamic() {
+        if sub.minted_by().is_none() {
             return ShowResponse::Active(project_details(sid, sub, engine, ds, now));
         }
         return ShowResponse::Unknown {
@@ -430,7 +430,7 @@ mod tests {
     }
 
     /// A minted Sub's synthesised name resolves through `SubRegistry::find_by_name` to a live id,
-    /// but the verb's local guard maps `is_dynamic()` back to `Unknown` — preserving the operator
+    /// but the verb's local guard maps its `minted_by` back to `Unknown` — preserving the operator
     /// contract that minted Subs are addressed through `list`, not `show`.
     #[test]
     fn show_dynamic_sub_name_resolves_unknown() {
@@ -453,7 +453,7 @@ mod tests {
         }
     }
 
-    /// A discovery **template** is operator-declared (`!is_dynamic()`), so `show` resolves it
+    /// A discovery **template** is operator-declared (no `minted_by`), so `show` resolves it
     /// `Active` like any static watch — only the minted set maps to `Unknown`. The fixture goes
     /// through the real config lowering: a glob-bearing path lowers to a template-bearing Sub.
     #[test]

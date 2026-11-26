@@ -539,9 +539,8 @@ fn validate_name(idx: usize, raw_name: &str) -> Result<(), ValidationIssue> {
             "name",
             IssueKind::InvalidName,
             format!(
-                "name `{raw_name}` must not contain `@` (reserved for \
-                 minted dynamic Sub names of the form \
-                 `<template_name>@<matched_path>`)",
+                "name `{raw_name}` must not contain `@` (reserved for the \
+                 Subs a dynamic watch mints, named `<watch>@<matched_path>`)",
             ),
         ));
     }

@@ -148,12 +148,10 @@ pub(crate) enum ResponsePayload {
 pub(crate) enum WireErrorCode {
     /// Sub name not in the engine registry, the operator-runtime disable set, or the TOML watches.
     UnknownSub,
-    /// Operator targeted a dynamic (discovery-minted) Sub with an op the bin refuses to apply: the
-    /// discovery Profile's next reconcile would simply re-mint it. Disabling the *template* is the
-    /// lever — its detach cascade reaps the whole minted set.
-    ///
-    /// Consumed by the `disable` / `enable` IPC handlers in [`crate::driver`].
-    DynamicSubNoOp,
+    /// `disable` or `absorb` named a Sub a dynamic watch minted, which neither verb addresses: its
+    /// template's next pass would mint it again. The verbs take the dynamic watch's own name.
+    /// `enable` never returns it — a minted name is never disabled.
+    MintedSubNoOp,
     /// `enable` / `disable` precondition: the targeted Sub is not in the state the verb expects
     /// (`enable` against a Sub that is not runtime-disabled, or `disable` against one already
     /// disabled).
@@ -204,7 +202,7 @@ impl WireErrorCode {
     /// `tests::wire_error_code_round_trips_every_variant` can never silently skip a code.
     const ALL: [Self; 9] = [
         Self::UnknownSub,
-        Self::DynamicSubNoOp,
+        Self::MintedSubNoOp,
         Self::NotDisabled,
         Self::TomlDisabled,
         Self::Busy,
@@ -226,7 +224,7 @@ impl WireErrorCode {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::UnknownSub => "unknown_sub",
-            Self::DynamicSubNoOp => "dynamic_sub_no_op",
+            Self::MintedSubNoOp => "minted_sub_no_op",
             Self::NotDisabled => "not_disabled",
             Self::TomlDisabled => "toml_disabled",
             Self::Busy => "busy",
@@ -244,7 +242,7 @@ const _: () = {
     const fn all_complete(v: WireErrorCode) -> WireErrorCode {
         match v {
             WireErrorCode::UnknownSub => WireErrorCode::ALL[0],
-            WireErrorCode::DynamicSubNoOp => WireErrorCode::ALL[1],
+            WireErrorCode::MintedSubNoOp => WireErrorCode::ALL[1],
             WireErrorCode::NotDisabled => WireErrorCode::ALL[2],
             WireErrorCode::TomlDisabled => WireErrorCode::ALL[3],
             WireErrorCode::Busy => WireErrorCode::ALL[4],

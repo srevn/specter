@@ -4,7 +4,7 @@
 //!
 //! Exit-code discipline matches the other unit-ack verbs (`disable` / `enable` / `reload`): `0` on
 //! `Ok`, `1` on any structured failure (connect / send / receive / daemon-side `Err`). The
-//! structured `code:` prefix on stderr (e.g. `unknown_sub`, `dynamic_sub_no_op`, `shutting_down`)
+//! structured `code:` prefix on stderr (e.g. `unknown_sub`, `minted_sub_no_op`, `shutting_down`)
 //! lets operator scripts distinguish failure modes without a per-mode exit code.
 
 use compact_str::CompactString;
