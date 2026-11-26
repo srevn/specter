@@ -738,7 +738,7 @@ impl SubRegistry {
 
     /// The Subs `template` minted, in id order; empty for a Sub that minted nothing.
     pub fn minted(&self, template: SubId) -> impl ExactSizeIterator<Item = SubId> {
-        self.by_template.get(&template).map(BTreeSet::iter).unwrap_or_default().copied()
+        self.by_template.get(&template).map_or_default(BTreeSet::iter).copied()
     }
 
     /// The Sub `template` minted on `profile`, read off the one or two Subs the Profile holds — the

@@ -36,7 +36,6 @@ use std::process::ExitCode;
 ///
 /// The match is exhaustive without a catch-all — adding a new [`Command`] variant is a compile error
 /// here, surfacing the missing handler at compile time rather than at runtime.
-#[must_use]
 pub fn run(cli: Cli) -> ExitCode {
     match cli.command {
         Command::Run(args) => app::run(args),

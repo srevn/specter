@@ -582,7 +582,7 @@ mod tests {
         let over_long = format!("/{}", "x".repeat(SUN_MAX));
         for unusable in [None, Some(""), Some("relative/dir"), Some(over_long.as_str())] {
             let pairs: Vec<(&str, &str)> =
-                unusable.map(|v| vec![("XDG_RUNTIME_DIR", v)]).unwrap_or_default();
+                unusable.map_or_default(|v| vec![("XDG_RUNTIME_DIR", v)]);
             let env = env_of(&pairs);
             let Resolution::Cascade(cascade) = resolve(None, &env).unwrap() else {
                 panic!("convention must resolve to a cascade for {unusable:?}");

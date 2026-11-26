@@ -3,9 +3,9 @@ resolver = "3"
 members  = ["crates/*"]
 
 [workspace.package]
-version      = "0.4.3"
+version      = "0.4.4"
 edition      = "2024"
-rust-version = "1.99"
+rust-version = "1.100"
 license      = "MIT OR Apache-2.0"
 
 [profile.release]
@@ -26,7 +26,7 @@ smallvec    = "1"
 siphasher   = "1"
 
 # sensor / actuator
-nix       = { version = "0.31", features = ["fs", "process", "resource", "signal"] }
+nix       = { version = "0.32", features = ["fs", "process", "resource", "signal"] }
 mio       = { version = "1", features = ["net", "os-ext", "os-poll"] }
 libc      = "0.2"
 crossbeam = "0.8"

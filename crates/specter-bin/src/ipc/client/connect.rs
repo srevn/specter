@@ -209,7 +209,6 @@ pub(crate) fn emit_hint(client: &ClientArgs, msg: fmt::Arguments<'_>) {
 /// from the surrounding [`style::ERR`] amplification the operator scripts against; the three painted
 /// spans are siblings, never nested. Under a plain Styler the line is byte-identical to the pre-color
 /// form.
-#[must_use]
 pub(crate) fn fail_response(
     client: &ClientArgs, verb: &'static str, resp: ResponsePayload,
 ) -> ExitCode {
@@ -364,7 +363,6 @@ pub(crate) fn emit_human_or_json<T: Serialize>(
 /// `show` does not use this wrapper: its exit code derives from the response arm (`Unknown → 1`),
 /// so it calls [`emit_human_or_json`] directly and falls through to the arm match after a delivered
 /// (or pipe-closed) render. Mirrors [`one_shot_unit`]'s relationship to [`round_trip`].
-#[must_use]
 pub(crate) fn render_response<T: Serialize>(
     client: &ClientArgs, verb: &'static str, output: OutputFormat, value: &T,
     render: impl FnOnce(&mut String, &T, Styler),
