@@ -470,7 +470,7 @@ pub fn run(args: DaemonArgs) -> ExitCode {
     // explicit `shutdown` returns the per-worker join `Vec` so this site fans out the
     // operator-narration log at the right teardown phase. The `Drop` impl on `WorkerProber` is the
     // safety net (boot-fail unwind, panic recovery, leaked-Arc late drop); on the happy path here
-    // it fires against an already- drained pool and is a structural no-op.
+    // it fires against an already-drained pool and is a structural no-op.
     match Arc::try_unwrap(prober) {
         Ok(mut p) => {
             for (worker, r) in p.shutdown() {
@@ -525,7 +525,7 @@ impl ProberResponseSender for WakingProberResponseSender {
 /// Bin's [`EffectCompleteSender`] impl — content-lift over a single [`WakingSink`].
 ///
 /// Mirror-shape of [`WakingProberResponseSender`] for the actuator's [`EffectCompletion`] envelope:
-/// lifts into `Input::EffectComplete(_)` before crossing the sink's send-then- wake protocol. The
+/// lifts into `Input::EffectComplete(_)` before crossing the sink's send-then-wake protocol. The
 /// two adapters share the same [`WakingSink`] shape — a third wake-bearing sink drops in as a
 /// one-line content lift with the same structural guarantees.
 ///

@@ -2571,7 +2571,7 @@ mod tests {
     /// → deserialize → re-serialize → same bytes.
     ///
     /// Identity check is via re-serialization because [`WireDiagnostic`] is intentionally not
-    /// `PartialEq` — adding the derive would propagate the bound to every transitively- reached
+    /// `PartialEq` — adding the derive would propagate the bound to every transitively-reached
     /// enum and the canonical wire bytes already are the identity. A serde derive macro regression
     /// on either half of the round-trip fails this test.
     #[test]

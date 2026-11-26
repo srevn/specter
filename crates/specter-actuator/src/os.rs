@@ -9,7 +9,7 @@
 //!
 //! The PID-reuse race during shutdown signaling is *narrowed* — not eliminated — by two layers.
 //! [`OsChildWaiter::wait`] marks a shared [`crate::lifecycle::DeadFlag`] immediately after
-//! `child.wait()` returns; a controller signal observing `is_dead == true` short- circuits and
+//! `child.wait()` returns; a controller signal observing `is_dead == true` short-circuits and
 //! never issues a `kill(2)`. The kernel reaps the zombie inside `child.wait()`, so the pid is
 //! eligible for reuse the moment `wait()` returns; a small window remains before the flag store is
 //! visible to the controller. In that window ESRCH-collapse does *not* save us: the (reused) pid
@@ -224,7 +224,7 @@ fn disqualify_posix_spawn(cmd: &mut Command) {
 const fn disqualify_posix_spawn(_cmd: &mut Command) {}
 
 /// Construct an `OsChildWaiter` + `OsChildSignaler` pair from a freshly-spawned [`Child`]. They share
-/// a [`DeadFlag`] so a controller- side signal observing `is_dead == true` short-circuits the syscall
+/// a [`DeadFlag`] so a controller-side signal observing `is_dead == true` short-circuits the syscall
 /// (closes the PID-reuse race at the protocol layer; ESRCH-collapse is the syscall fallback).
 ///
 /// Returns concrete types — the caller wraps in `Box<dyn>` for the waiter (single-consumer at wait

@@ -203,7 +203,7 @@ impl Engine {
         false
     }
 
-    /// Start a Seed burst. The `trigger` discriminator is **load- bearing for phase choice**: the
+    /// Start a Seed burst. The `trigger` discriminator is **load-bearing for phase choice**: the
     /// cold-attach path (`trigger = None`) emits a probe immediately (`Verifying`-at-construction);
     /// the triggered path (`trigger = Some(_)`) opens in `Batching` exactly like
     /// [`Self::start_standard_burst`]. The emission choke stamps `ProofObligation::WholeSubtree`
@@ -246,7 +246,7 @@ impl Engine {
     /// Some(now)`, notes the event into `dirty`, and re-enters `Batching`. No new code path:
     /// `Verifying → Batching` is already supported; the only novelty is that the *initial* phase
     /// was `Verifying` without a prior `Batching`. One walk is wasted on intercept — sub-ms on
-    /// quiet trees (the common cold- attach case), bounded by the response-vs-event race window.
+    /// quiet trees (the common cold-attach case), bounded by the response-vs-event race window.
     /// The savings on the no-intercept path (cold attach over a quiet subtree drops from 2·settle
     /// to 0·settle, 2 walks to 1) make this the right trade.
     ///
@@ -1037,7 +1037,7 @@ impl Engine {
     /// prior phase is `Settling` or `Awaiting`, neither of which holds a probe slot (`Settling`'s
     /// correlation token is its `settle_timer`; `Awaiting`'s is its `gate_deadline`). The probe the
     /// loop's previous Rebasing entry emitted was disarmed at its response's
-    /// `on_profile_probe_response`, before the loop- back routed through `transition_to_settling`.
+    /// `on_profile_probe_response`, before the loop-back routed through `transition_to_settling`.
     /// `emit_owner_probe` resolves the target (the anchor — the post-fire side carries no probe
     /// target on its variant) and reads the correlation back off the slot.
     ///
@@ -1282,7 +1282,7 @@ impl Engine {
         // after the swap, so the reap decision is locked in at burst-end entry; the consumed burst
         // (whose `ProbeSlot` the cancel-first precondition guarantees disarmed) drops as the
         // closure's `_` discards it. The Idle / Pending arm reinstalls the prior unchanged in the
-        // same single reconcile — no Idle-swap-then- restore — yielding `None`; the outer `None` is
+        // same single reconcile — no Idle-swap-then-restore — yielding `None`; the outer `None` is
         // a stale id. Either flattens to "nothing to drain or reap" → return.
         let Some(finish) = self
             .profiles

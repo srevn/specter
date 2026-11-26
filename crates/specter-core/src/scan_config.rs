@@ -436,7 +436,7 @@ pub enum ConfigError {
     InvalidGlob { source: String, message: String },
     /// The glob is syntactically valid per `globset` but cannot match any non-empty relative path
     /// in the walker's semantics. Surfaced at the [`GlobPattern::compile`] floor so a typo
-    /// (`target/` vs `target/**`) or a misunderstanding (leading `/` in a relative- path glob)
+    /// (`target/` vs `target/**`) or a misunderstanding (leading `/` in a relative-path glob)
     /// fails fast rather than silently doing nothing. `reason` is an operator-facing explanation of
     /// the specific shape that's unreachable.
     UnreachableGlob { source: String, reason: String },

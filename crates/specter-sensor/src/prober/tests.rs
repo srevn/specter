@@ -818,7 +818,7 @@ fn chains_with_unrelated_path_does_not_affect_skip() {
 fn chains_propagate_through_recursion_to_descendant() {
     // Chains = {target/dir_a/dir_b}: target enumerates → dir_a enumerates → dir_b enumerates.
     // sibling dir_c (mtime-stable) is mtime-skipped during the recursion, since no chain path is
-    // at-or- under dir_c.
+    // at-or-under dir_c.
     let tmp = TempDir::new().unwrap();
     std::fs::create_dir_all(tmp.path().join("dir_a/dir_b")).unwrap();
     std::fs::create_dir(tmp.path().join("dir_c")).unwrap();

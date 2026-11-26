@@ -330,7 +330,7 @@ impl ActuatorState {
     ///    either becoming live would respawn work the engine doesn't track.
     /// 2. Clear `in_ready_queue` — paired with the `ready_queue` `retain` below; together they
     ///    preserve the "in queue ⇔ flag set" invariant the pump's blocked-scratch drain pins.
-    /// 3. SIGTERM the running child if any. The signaler short- circuits on `is_dead`, so a race
+    /// 3. SIGTERM the running child if any. The signaler short-circuits on `is_dead`, so a race
     ///    with a natural reap is benign (SIGTERM on a reaped pid is a documented no-op).
     /// 4. Leave `slot.running` in place. The wait thread will deliver `Reaped` through the existing
     ///    pipeline; [`Self::handle_reap`] will run [`Self::terminate_plan`] and emit one completion
@@ -616,7 +616,7 @@ impl ActuatorState {
     ///    after a real Reaped or a synth Failed).
     /// 2. [`Self::handle_reap_drop`] shutdown-drain teardown when [`Self::take_running`] returns a
     ///    live job.
-    /// 3. [`Self::start_plan`] / [`Self::spawn_continuation`] spawn- failure paths route through
+    /// 3. [`Self::start_plan`] / [`Self::spawn_continuation`] spawn-failure paths route through
     ///    [`Self::advance_or_terminate`] (which hits #1 above).
     ///
     /// **Tmp-file cleanup is NOT this function's responsibility.** The plan's `Arc<DiffTmpFile>`
@@ -1301,7 +1301,7 @@ impl ActuatorState {
         )?;
 
         // Per-stage timers: arm AFTER the wait thread is alive so the wait thread's per-stage
-        // `dead` flags are the natural- completion signal each timer short-circuits on. The wait-
+        // `dead` flags are the natural-completion signal each timer short-circuits on. The wait-
         // thread `?` above also ensures we don't arm timers for a pipe with no waiter (would leave
         // undrained orphans).
         //
@@ -1554,7 +1554,7 @@ mod tests {
     }
 
     /// Construct an [`ActuatorState`] with an empty env snapshot and the shared `SHUTDOWN_GRACE`.
-    /// The tests in this module exercise state- machine transitions, not env resolution or timeout
+    /// The tests in this module exercise state-machine transitions, not env resolution or timeout
     /// enforcement, so a single empty snapshot covers every call site. Env-aware tests live in the
     /// higher-level pool harness and inject snapshots explicitly via
     /// [`super::SubprocessActuator::new_with_grace_and_env`].

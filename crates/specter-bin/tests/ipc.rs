@@ -1079,7 +1079,7 @@ fn tail_json_output_round_trips_via_serde() {
 ///
 /// **Fence, not fuzzer.** The invariant holds structurally — the fan-out's `Reqs`-skip gate is the
 /// proof — but this test bounds it against any future refactor that reorders the ack push and the
-/// role flip, or that lets the fan-out path observe a partially- transitioned conn.
+/// role flip, or that lets the fan-out path observe a partially-transitioned conn.
 ///
 /// Per-Sub Subscribe (`name = "orderwatch"`) so the post-ack wire carries only events naming that
 /// Sub: ambient Profile-keyed diagnostics (e.g. teardown `ProfileReaped`) cannot pollute the
@@ -1463,7 +1463,7 @@ fn poll_list_until<F: Fn(&[ListRowSnap]) -> bool>(
 
 // ---------- disable + enable cycle -----------------------------------
 
-/// `disable foo` flips `status.sub_disabled_runtime` 0→1; a follow- up `enable foo` flips it back
+/// `disable foo` flips `status.sub_disabled_runtime` 0→1; a follow-up `enable foo` flips it back
 /// to 0. The engine attaches foo initially (status.sub_total=1), the disable detaches it
 /// (sub_total=0), the enable re-attaches it (sub_total=1).
 #[test]

@@ -397,7 +397,7 @@ mod tests {
     fn sub_watch_then_try_reap_role_only_slot_emits_unwatch_and_reaps() {
         // Production parallel to `release_watch_root_parent_claim` and the
         // `release_*_descent_prefix_claim` family: the role tag is metadata, so a slot whose only
-        // retention claim was the just- dropped contribution reaps in the same step. `sub_watch`
+        // retention claim was the just-dropped contribution reaps in the same step. `sub_watch`
         // emits `Unwatch` on the empty edge; `try_reap` returns `true` and the slot is gone.
         let mut tree = Tree::new();
         let r = tree.ensure_root("parent", ResourceRole::WatchRootParent);

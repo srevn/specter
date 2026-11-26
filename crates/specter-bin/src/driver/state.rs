@@ -138,7 +138,7 @@ pub(crate) enum ReloadTrigger {
     /// (config-watcher pulse → settle window → lstat diff → `dispatch_reload`).
     AutoReload,
     /// IPC `Reload` request arrived through the driver's IPC drain (per-conn `WireRequest::Reload`
-    /// line → driver). Single- source attribution: constructed at the IPC drain's `Reload` arm, not
+    /// line → driver). Single-source attribution: constructed at the IPC drain's `Reload` arm, not
     /// inferred from a peer pulse — operators reading `status.last_reload_via` after a `specter
     /// reload` round-trip see the exact trigger that drove the reload they observed.
     Ipc,

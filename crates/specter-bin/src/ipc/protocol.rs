@@ -503,7 +503,7 @@ impl InfallibleSerialize for WireRequest {}
 /// [`ResponsePayload`] is structurally infallible to serialize: the variant payloads are plain-data
 /// structs ([`StatusResponse`], [`ListResponse`], [`ShowResponse`], [`SubDetails`]) whose fields
 /// are primitives, [`String`], [`Option`], [`Vec`], [`WireId`], [`WireTime`] (manual
-/// `serialize_str` over an invariant-by- construction RFC-3339 token), [`WirePath`] (transparent
+/// `serialize_str` over an invariant-by-construction RFC-3339 token), [`WirePath`] (transparent
 /// `String`), or other `Wire*` enums and structs built from them (closed-set derives).
 /// [`SubDetails`]'s flattened [`WireReaction`] keeps the property: internally-tagged serialization
 /// can fail only for variant payloads that cannot carry an inline tag (newtype/tuple variants), and

@@ -2087,7 +2087,7 @@ fn timer_expired_stale_id_emits_diagnostic() {
 fn effect_complete_ok_in_idle_diagnoses_outside_awaiting() {
     // No path leaves Idle with an outstanding EffectComplete: the burst stays Active(Awaiting)
     // until completions arrive. A completion landing in Idle is therefore unexpected (gate-deadline
-    // force- transition or anchor-loss) — emit `EffectCompleteOutsideAwaiting` and drop without
+    // force-transition or anchor-loss) — emit `EffectCompleteOutsideAwaiting` and drop without
     // state change.
     let (mut e, pid, sid, _root, _now) = engine_with_attached_sub();
     complete_seed_burst(&mut e, pid);

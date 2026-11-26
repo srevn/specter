@@ -19,7 +19,7 @@
 //!
 //! Probe **correctness** is the engine's response gate, not this stream's. A stale or superseded
 //! response folds to `StaleProbeResponse` regardless of op order; the per-owner shape mirrors the
-//! sensor's `expected` map only to spare the missed- syscall stall an unstructured stream could
+//! sensor's `expected` map only to spare the missed-syscall stall an unstructured stream could
 //! induce.
 //!
 //! Residual discipline: every `StepOutput`-returning entry point calls

@@ -32,7 +32,7 @@ pub const MAX_SETTLE: Duration = Duration::from_secs(6);
 ///
 /// Events-incomplete — `events_witness_quiescence == false`, so fire-bearing bursts owe the verdict
 /// floor's N=2 hash-equality channel. Tests that drive a single Authoritative sample to Stable must
-/// opt into a CONTENT- containing mask (e.g. [`DEFAULT_EVENTS`]) instead.
+/// opt into a CONTENT-containing mask (e.g. [`DEFAULT_EVENTS`]) instead.
 pub const NO_EVENTS: ClassSet = ClassSet::EMPTY;
 /// Production-realistic `EffectScope::SubtreeRoot` events mask.
 ///
@@ -319,7 +319,7 @@ pub fn drive_standard_n2_until_stable(
 
 /// Assert `pid` is in cold-arm `Active(PreFire(Verifying))` and read its in-flight probe correlation.
 ///
-/// Post-`start_seed_burst(None)` shape under the cold-arm Verifying- first contract: the probe is
+/// Post-`start_seed_burst(None)` shape under the cold-arm Verifying-first contract: the probe is
 /// in flight at burst construction (no Batching settle to drain on the way in), so the helper is a
 /// state projection — it asserts the phase and returns the correlation plus `at` unchanged so call
 /// sites stay symmetric with helpers that do advance time.

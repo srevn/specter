@@ -307,7 +307,7 @@ impl<W: FsWatcher> Reactor<W> {
     /// non-blockingly; any positive duration is the upper wait bound.
     ///
     /// Every static-source drain helper is internally drain-to-empty. The mio reactor's
-    /// edge-triggered convention REQUIRES drain-to- empty on every ready fd: a partial drain leaves
+    /// edge-triggered convention REQUIRES drain-to-empty on every ready fd: a partial drain leaves
     /// kernel-side state non-empty, the next arrival can't transition empty→ non-empty, and the
     /// edge silently misses. Each `drain_*` helper loops internally until the underlying source
     /// reports `WouldBlock` / `EAGAIN`.

@@ -61,10 +61,10 @@ pub(in crate::driver) const RESPONSE_TOO_BIG_RESERVE: usize = 1024;
 
 /// Soft cap every legitimate write path honours. Bytes above this drop into the structured-Err path
 /// ([`ConnState::push_response`]'s Refused arm via the upstream
-/// [`super::hub::Hub::enqueue_response`] Refused arm) or the missed- marker accumulator
+/// [`super::hub::Hub::enqueue_response`] Refused arm) or the missed-marker accumulator
 /// ([`ConnState::try_dispatch_diag`]'s Dropped arm). Computed as [`WRITE_QUEUE_HIGH_WATER`] −
 /// [`RESPONSE_TOO_BIG_RESERVE`] so the arithmetic relationship between the two cap surfaces is
-/// single- source: bumping either constant moves `ACCEPT_CAP` with it.
+/// single-source: bumping either constant moves `ACCEPT_CAP` with it.
 pub(in crate::driver) const ACCEPT_CAP: usize = WRITE_QUEUE_HIGH_WATER - RESPONSE_TOO_BIG_RESERVE;
 
 /// What a line is about, as a filtered stream reads it: a Sub, and the template that minted it.
@@ -454,7 +454,7 @@ mod tests {
     }
 
     /// Synthesize a deterministic [`SubId`] for filter-axis tests. The raw u64 is arbitrary — the
-    /// only requirement is that it round- trips through [`slotmap::KeyData::from_ffi`] to the same
+    /// only requirement is that it round-trips through [`slotmap::KeyData::from_ffi`] to the same
     /// id across calls in one test.
     fn make_sid(raw: u64) -> SubId {
         SubId::from(KeyData::from_ffi(raw))
@@ -844,7 +844,7 @@ mod tests {
 
     /// An already-armed conn (close_after_flush=true) still accepts further `push_response` calls
     /// within capacity — the arm only gates the conn's future termination, not the in-flight queue
-    /// extension. Pins that a single arming path doesn't race- disable subsequent legitimate
+    /// extension. Pins that a single arming path doesn't race-disable subsequent legitimate
     /// responses.
     #[test]
     fn push_response_within_capacity_after_arm_still_succeeds() {

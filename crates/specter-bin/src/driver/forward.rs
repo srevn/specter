@@ -40,7 +40,7 @@ impl<W: FsWatcher> EngineDriver<W> {
     ///
     /// **`effects_tx` is `try_send` with advisory drop on `Full`.** The engine's `gate_deadline`
     /// recovery contract covers a missed Submit identically to "actuator wedged" — both produce a
-    /// `EffectComplete` that never arrives, so the burst force- transitions `Awaiting → Rebasing`
+    /// `EffectComplete` that never arrives, so the burst force-transitions `Awaiting → Rebasing`
     /// on the same timer. Advisory drop on `Full` is therefore safe; the cost is a single missed
     /// effect, recovered through the same path operators already observe under actuator pressure.
     /// `Disconnected` remains terminal (actuator thread is gone — no recovery possible).
@@ -145,7 +145,7 @@ impl<W: FsWatcher> EngineDriver<W> {
     ///
     /// **Subscriber-empty short-circuit.** When no operator is subscribed
     /// ([`crate::driver::Hub::has_any_subscriber`] → `false`), only [`log_diagnostic`] runs per
-    /// diag — the per- emission [`SystemTime::now`] / [`WireTime::from`] / [`diag_sub`] /
+    /// diag — the per-emission [`SystemTime::now`] / [`WireTime::from`] / [`diag_sub`] /
     /// `dispatch_to_subscribers` work is skipped entirely. For a `StepOutput` carrying N diags on a
     /// quiet daemon this collapses to N tracing emits plus one conn-map walk, rather than N times
     /// the same walk inside the dispatch path's defensive inner gate.

@@ -363,7 +363,7 @@ pub(crate) fn graft(
         None => Diff::all_created(&response_arc),
     };
 
-    // Splice — pure, no Tree mutation. `CrossedUncovered` short- circuits before any
+    // Splice — pure, no Tree mutation. `CrossedUncovered` short-circuits before any
     // `apply_diff_to_tree` work, so `Profile.current` and `Tree` stay coherent across the breach.
     // Even when (a future regression makes) `CrossedUncovered` reachable, the engine cannot
     // diverge: the splice-then-apply ordering keeps `Profile.current` and `Tree` from drifting

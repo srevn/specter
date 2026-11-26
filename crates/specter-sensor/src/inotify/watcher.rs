@@ -84,7 +84,7 @@ pub struct InotifyWatcher {
     /// Per-drain dedup horizon. Cleared at the start of every [`FsWatcher::drain_ready`] call so the
     /// kernel's `IN_MODIFY` + `IN_CLOSE_WRITE` pair (both normalising to [`FsEvent::ContentChanged`]
     /// for the same resource) collapses to one emitted event — including when the kernel splits the
-    /// pair across separate `read_inotify` calls within the same drain-to- empty loop (the dedup
+    /// pair across separate `read_inotify` calls within the same drain-to-empty loop (the dedup
     /// horizon spans every batch in one `drain_ready` invocation, not per batch).
     ///
     /// `Vec` rather than `BTreeSet`: a typical burst yields ~20–50 distinct `(ResourceId, FsEvent)`

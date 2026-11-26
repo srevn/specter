@@ -64,7 +64,7 @@ impl LogConfig {
     ///
     /// Returns the bare [`ValidationIssue`] rather than wrapping it in [`ConfigError::Validate`]:
     /// this entry point is the CLI-merge flow, not a TOML parse; wrapping would mislabel the
-    /// operator- visible source as `<inline>` (the [`ConfigError::Validate`] fallback when no file
+    /// operator-visible source as `<inline>` (the [`ConfigError::Validate`] fallback when no file
     /// path is associated). The bin caller owns the CLI-source context in the format string instead
     /// — see `specter-bin`'s `App::run` and `EngineDriver::apply_log_reload`.
     pub fn merge_cli(

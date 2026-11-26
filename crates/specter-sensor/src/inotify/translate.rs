@@ -62,7 +62,7 @@ use specter_core::{ClassSet, ResourceKind};
 /// events into the appropriate class for per-Profile filtering (CONTENT for files, STRUCTURE for
 /// dirs); see `engine::transitions::fs_event_to_class`.
 ///
-/// `IN_IGNORED` is *not* in this floor: it is not part of the user- visible class surface. The
+/// `IN_IGNORED` is *not* in this floor: it is not part of the user-visible class surface. The
 /// kernel emits it unconditionally as a cleanup signal when a watch descriptor is reaped; the
 /// watcher consumes it before normalization.
 pub(super) const IDENTITY_FLOOR: u32 = IN_DELETE_SELF | IN_MOVE_SELF | IN_UNMOUNT;
@@ -134,7 +134,7 @@ mod tests {
     }
 
     /// `ADD_WATCH_DEFENCE` membership is the kqueue-parity invariant (`IN_EXCL_UNLINK` mirrors
-    /// kqueue's auto-detach on unlink-then-fd- close). Symlink defense lives at the file-open seam
+    /// kqueue's auto-detach on unlink-then-fd-close). Symlink defense lives at the file-open seam
     /// (`open_o_path`'s `O_NOFOLLOW`), not in the install mask — see module docs.
     #[test]
     fn add_watch_defence_pins_excl_unlink() {
@@ -255,7 +255,7 @@ mod tests {
     #[test]
     fn metadata_on_file_adds_attrib() {
         // No NOTE_LINK analogue under inotify — IN_ATTRIB covers hardlink count changes on its own
-        // (per inotify(7)). The kind- aware branch the kqueue translator carries is collapsed here.
+        // (per inotify(7)). The kind-aware branch the kqueue translator carries is collapsed here.
         let m = class_set_to_mask(ClassSet::METADATA, ResourceKind::File);
         assert_eq!(m, IDENTITY_FLOOR | ADD_WATCH_DEFENCE | IN_ATTRIB);
     }

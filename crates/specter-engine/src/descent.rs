@@ -117,7 +117,7 @@ impl MaterializeResult {
 impl crate::Engine {
     /// Walk a validated [`TreePath`] into the Tree. The leaf is created with `ResourceRole::User`;
     /// non-leaf components are `ResourceRole::DescentScaffold` if freshly created (the existing
-    /// `ensure_root` / `ensure_child` preserve existing roles, so an already- User parent stays
+    /// `ensure_root` / `ensure_child` preserve existing roles, so an already-User parent stays
     /// User).
     ///
     /// Returns `Materialized` iff every segment is **disk-observed** (the whole path is live on

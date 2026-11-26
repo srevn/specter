@@ -13,7 +13,7 @@
 //!
 //! `inotify_init1(IN_NONBLOCK)` arms the inotify fd as non-blocking so [`read_inotify`] returns
 //! `Ok(0)` on `EAGAIN` (empty queue) and never wedges the calling thread. The trait surface
-//! ([`crate::FsWatcher::drain_ready`]) wraps this in a drain-to- empty loop that terminates on
+//! ([`crate::FsWatcher::drain_ready`]) wraps this in a drain-to-empty loop that terminates on
 //! `Ok(0)`; callers block at the reactor level on [`std::os::fd::AsFd::as_fd`] of the watcher,
 //! never inside the FFI.
 
@@ -304,7 +304,7 @@ mod tests {
     /// [`read_inotify`] on an empty queue must return promptly: the `IN_NONBLOCK` flag armed at
     /// [`inotify_init`] makes `read(2)` return `EAGAIN` immediately, which the helper folds into
     /// `Ok(0)`. Pins the non-blocking contract the trait surface
-    /// ([`crate::FsWatcher::drain_ready`]) relies on for the drain- to-empty loop's termination — a
+    /// ([`crate::FsWatcher::drain_ready`]) relies on for the drain-to-empty loop's termination — a
     /// regression that dropped `IN_NONBLOCK` would deadlock here on a fresh inotify fd.
     #[test]
     fn read_inotify_empty_queue_returns_promptly() {

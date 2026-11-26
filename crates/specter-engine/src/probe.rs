@@ -428,7 +428,7 @@ impl Engine {
     ///
     /// 1. **Classify + read back.** Match the owner's state; read the correlation *off the armed
     ///    slot* (`?` ⇒ an empty slot returns `None` and nothing is emitted — the structural
-    ///    armed-iff- emitted property), and resolve `(target, forced)` from the same match.
+    ///    armed-iff-emitted property), and resolve `(target, forced)` from the same match.
     /// 2. **Render the wire** via `&self.tree`. Descent carries the prefix path plus the awaited
     ///    head segment; Verify / Rebase kind-dispatch — `Some(File)` ⇒ `AnchorFile`, else ⇒
     ///    `Subtree` with the Profile's `(config, config_hash)`, `baseline_subtree`, and the

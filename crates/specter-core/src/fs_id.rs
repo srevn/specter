@@ -1,5 +1,5 @@
 //! Kernel-side filesystem identity — the `(inode, device)` pair the workspace uses to detect
-//! delete-and-recreate-at-same-path, cross- filesystem boundaries, and rename targets across
+//! delete-and-recreate-at-same-path, cross-filesystem boundaries, and rename targets across
 //! snapshots.
 //!
 //! ## Semantics

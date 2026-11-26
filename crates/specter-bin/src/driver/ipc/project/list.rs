@@ -1,4 +1,4 @@
-//! `specter list` projection — union three populations (engine- attached, runtime-disabled,
+//! `specter list` projection — union three populations (engine-attached, runtime-disabled,
 //! TOML-disabled) into one alphabetically-sorted row set.
 //!
 //! [`BTreeMap`]-keyed by owned `String`: insertion-time conflict-resolution (engine wins) AND

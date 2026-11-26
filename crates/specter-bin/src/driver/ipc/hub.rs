@@ -206,7 +206,7 @@ impl Hub {
     ///
     /// # Cap-hit re-arm (mio EPOLLET / EV_CLEAR contract)
     ///
-    /// Returning from the loop short of `WouldBlock` leaves the kernel- side accept queue
+    /// Returning from the loop short of `WouldBlock` leaves the kernel-side accept queue
     /// non-empty. Under edge-triggered mio (EPOLLET on Linux, EV_CLEAR on kqueue — see `mio` 1.2.0
     /// `sys/unix/selector/{epoll,kqueue}.rs`), no future `TOKEN_LISTENER` edge fires until the
     /// queue transitions empty→non-empty; subsequent SYNs into a non-empty queue do NOT re-fire. To
@@ -502,7 +502,7 @@ impl Hub {
     ///
     /// The cap-class signal vocabulary now matches the accept-cap's `Err { code: Busy }` shape
     /// ([`Self::drain_accept`]'s cap arm): both cap surfaces emit a closed-vocabulary structured
-    /// token before close. Operator scripts decode either with one wire- stable `code` field.
+    /// token before close. Operator scripts decode either with one wire-stable `code` field.
     ///
     /// The `T: InfallibleSerialize` bound is the structural floor for the serializer-cannot-fail
     /// claim — every call site passes a type whose marker impl carries an audit of its serialize
@@ -596,7 +596,7 @@ impl Hub {
     /// **Queue-empty bookkeeping.** When the queue empties:
     /// 1. If `close_after_flush` is set (oversize line, over-water response, etc.), return
     ///    [`DrainWritableOutcome::Terminate`] so the caller runs `terminate_conn` — the
-    ///    reregister-to- READABLE is short-circuited (the conn is about to be deregistered
+    ///    reregister-to-READABLE is short-circuited (the conn is about to be deregistered
     ///    entirely). The arm-for-close → drain → close sequence guarantees the last queued bytes
     ///    reach the wire before teardown.
     /// 2. Otherwise re-register the conn with `READABLE` only — the WRITABLE interest was a

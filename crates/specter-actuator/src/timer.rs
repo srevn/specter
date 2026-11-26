@@ -15,7 +15,7 @@
 //! completion is observed via the same `dead` flag the wait thread sets before sending `Reaped`;
 //! that flag is the single seam between the two threads. Worst case (child runs exactly to its
 //! deadline, then dies of natural causes between the `is_dead` check and the syscall) the kernel
-//! SIGTERMs an already- reaped pid — the production signaler short-circuits via the same flag, plus
+//! SIGTERMs an already-reaped pid — the production signaler short-circuits via the same flag, plus
 //! the syscall layer ESRCH-collapses. Either path makes the signal a no-op.
 //!
 //! # Why one thread per step
@@ -29,7 +29,7 @@
 //! `thread::Builder::spawn` can fail (OOM, EAGAIN, ulimit) — extremely rare. [`arm_timer`] treats
 //! this as **best-effort**: logs at `tracing::error!` and proceeds without timer enforcement for
 //! that single step. The alternative (kill the child to fail the plan) would race the wait thread
-//! that's already alive, risking a double- `EffectComplete` for the same Effect. The user-visible
+//! that's already alive, risking a double-`EffectComplete` for the same Effect. The user-visible
 //! regression is "this one step ran without its deadline"; the plan otherwise completes normally.
 //! The policy lives at one site (this module) — callers don't choose it per call.
 //!

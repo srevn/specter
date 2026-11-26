@@ -44,7 +44,7 @@ impl CombinedSignaler {
 
 /// Fan a single signal call out to every stage, log every error, and return the first non-`Ok` (if
 /// any) as the aggregated result. Used by [`CombinedSignaler`]'s three methods — the only thing
-/// that varies is the per-stage method invoked, so the fan-out + log-then- retain-first shape lives
+/// that varies is the per-stage method invoked, so the fan-out + log-then-retain-first shape lives
 /// in one place.
 fn fan_out<F>(
     stages: &[Arc<dyn ChildSignaler>],
@@ -111,7 +111,7 @@ impl ChildSignaler for CombinedSignaler {
 /// chain handles the happy case, but a stage that's not reading from stdin (or that's blocked on
 /// something else) needs an explicit signal.
 ///
-/// **Why parallel.** A sequential drain of N stage waiters head-of- lines on stage 0: if stage 0
+/// **Why parallel.** A sequential drain of N stage waiters head-of-lines on stage 0: if stage 0
 /// blocks indefinitely (infinite sleep, blocked read), the cascade can't fire until stage 0
 /// returns, and a downstream stage's per-step timeout can never propagate back. The parallel shape
 /// eliminates that hazard at the cost of one OS thread per stage; the per-stage timer threads (one
@@ -131,7 +131,7 @@ impl ChildSignaler for CombinedSignaler {
 ///
 /// `signalers` is parallel-indexed with `waiters`. The cascade iterates every signaler whose index
 /// differs from the first-Failed stage and whose paired waiter hasn't reported yet (`is_dead`
-/// short- circuits already-reaped stages — their waiter set the shared flag before returning).
+/// short-circuits already-reaped stages — their waiter set the shared flag before returning).
 pub(crate) struct PipeWaiter {
     waiters: Vec<Box<dyn ChildWaiter>>,
     signalers: Arc<[Arc<dyn ChildSignaler>]>,
@@ -768,7 +768,7 @@ mod tests {
         }
     }
 
-    /// Cascade skips already-dead siblings — `is_dead` short- circuits the SIGTERM syscall.
+    /// Cascade skips already-dead siblings — `is_dead` short-circuits the SIGTERM syscall.
     #[test]
     fn cascade_skips_already_dead_siblings() {
         let p0 = Arc::new(Probe::new());

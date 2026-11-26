@@ -446,7 +446,7 @@ mod tests {
         );
     }
 
-    /// The separator row spans each column's width with the box- drawing dash. The separator is at
+    /// The separator row spans each column's width with the box-drawing dash. The separator is at
     /// least as wide as the
     /// corresponding header — never empty (`"─".repeat(0)` would
     /// regress this).

@@ -125,7 +125,7 @@ pub enum IssueKind {
     /// `MAX_CONDITIONAL_DEPTH` in `config.rs`). Surfaces before any further descent at the offending
     /// level — keeps adversarial inputs from blowing the validator's stack without constraining
     /// sensible operator workflows (real configs rarely exceed five levels). Independent of the
-    /// underlying TOML parser's own recursion limit (a separate, parser-version- dependent concern).
+    /// underlying TOML parser's own recursion limit (a separate, parser-version-dependent concern).
     ConditionalNestedTooDeep,
     /// Internal lowering invariant violation — an unpatched edge, a backward branch, or an
     /// out-of-bounds target leaked from the lowering pass. Unreachable from a correct lowering,

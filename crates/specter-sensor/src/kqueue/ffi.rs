@@ -19,7 +19,7 @@
 //!
 //! [`kevent_drain`] passes a zero `timespec` so `kevent(2)` returns immediately whether or not
 //! events are queued. The trait surface ([`crate::FsWatcher::drain_ready`]) wraps this in a
-//! drain-to- empty loop; callers block at the reactor level on [`std::os::fd::AsFd::as_fd`] of the
+//! drain-to-empty loop; callers block at the reactor level on [`std::os::fd::AsFd::as_fd`] of the
 //! watcher, never inside the FFI.
 
 #![allow(unsafe_code)]
@@ -121,7 +121,7 @@ fn vnode_change(
 /// Non-blocking: passes a zero `timespec` (NOT a NULL pointer — that would block indefinitely, the
 /// opposite of what the trait contract needs) so `kevent(2)` returns immediately whether or not
 /// events are queued. The trait surface ([`crate::FsWatcher::drain_ready`]) wraps this in a
-/// drain-to- empty loop that terminates when this returns `0`; callers block at the reactor level
+/// drain-to-empty loop that terminates when this returns `0`; callers block at the reactor level
 /// on the kqueue's [`std::os::fd::AsFd`] surface, never inside this helper.
 ///
 /// Returns the number of slots in `out` populated by the kernel.

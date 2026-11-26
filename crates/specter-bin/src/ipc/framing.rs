@@ -122,7 +122,7 @@ pub(crate) fn encode_line<T: InfallibleSerialize>(value: &T) -> Vec<u8> {
 ///
 /// # Mechanism
 ///
-/// 1. Parse `bytes` to a [`serde_json::Value`] (admits any well- formed JSON).
+/// 1. Parse `bytes` to a [`serde_json::Value`] (admits any well-formed JSON).
 /// 2. Parse the same value to `T` via [`serde_json::from_value`] — surfaces missing required
 ///    fields, type mismatches, and unknown variant tags through `T`'s normal deserialize gate.
 /// 3. Re-serialize the parsed `T` back to a `serde_json::Value`. The derived [`serde::Serialize`]
@@ -130,7 +130,7 @@ pub(crate) fn encode_line<T: InfallibleSerialize>(value: &T) -> Vec<u8> {
 /// 4. Recursively walk the original value against the round-trip: every key in the original must also
 ///    exist in the round-trip. A key in the round-trip but missing from the original is benign (an
 ///    `Option<_>::None` field that serialized to `null` versus an omitted field both deserialize
-///    identically), so the asymmetric walk admits the abbreviated form without false- flagging it.
+///    identically), so the asymmetric walk admits the abbreviated form without false-flagging it.
 ///
 /// # Why a round-trip helper rather than `#[serde(deny_unknown_fields)]`
 ///

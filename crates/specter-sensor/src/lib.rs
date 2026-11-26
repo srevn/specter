@@ -203,7 +203,7 @@ pub trait FsWatcher: Send + AsFd {
     /// Remove a watch. Idempotent on stale ids. The sensor releases its kernel-level registration
     /// (kqueue: closes the watched fd; inotify: `inotify_rm_watch(wd)`) and clears every internal
     /// map keyed by `r`. Pending kernel-level events for the resource (kqueue: queued events on the
-    /// closed fd; inotify: events queued on the soon-to-be- reaped wd before `IN_IGNORED`) are
+    /// closed fd; inotify: events queued on the soon-to-be-reaped wd before `IN_IGNORED`) are
     /// sensor-internal and never cross the trait boundary.
     fn unwatch(&mut self, r: ResourceId);
 
@@ -250,7 +250,7 @@ pub trait FsWatcher: Send + AsFd {
 
 /// Single-threaded watcher for the daemon's own config file.
 ///
-/// Distinct from [`FsWatcher`]: that trait is the engine's per- Resource surface, with `watch` /
+/// Distinct from [`FsWatcher`]: that trait is the engine's per-Resource surface, with `watch` /
 /// `unwatch` mutators and a vector drain. The config watcher has exactly one watch target (the
 /// running process's config path) and no engine vocabulary at the boundary — just "kernel said
 /// something happened (substantively)" or "nothing yet."
@@ -268,7 +268,7 @@ pub trait FsWatcher: Send + AsFd {
 ///
 /// **Why no engine vocabulary?** The kqueue parent-dir filter cannot see basename, so every
 /// dir-contents change in the config's parent becomes a pulse — the watcher cannot pre-classify
-/// "this was about the config file" without a syscall. The driver's lstat-vs- `FileMeta` filter is
+/// "this was about the config file" without a syscall. The driver's lstat-vs-`FileMeta` filter is
 /// the natural place to suppress noise *and* the place that owns the prior-meta-known state, so the
 /// watcher stays a minimal kernel-event pump.
 ///

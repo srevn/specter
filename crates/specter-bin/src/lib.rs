@@ -27,7 +27,7 @@ use std::process::ExitCode;
 /// Top-level dispatcher.
 ///
 /// Routes every parsed top-level subcommand to its implementation: `Run` drives the daemon; the
-/// remaining variants are operator- client one-shots that connect to the running daemon over the
+/// remaining variants are operator-client one-shots that connect to the running daemon over the
 /// IPC socket.
 ///
 /// `Cli` is taken by value because `app::run` consumes `DaemonArgs` (config moves into the driver;

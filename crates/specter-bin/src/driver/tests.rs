@@ -572,7 +572,7 @@ fn arm_writable_interests_signature_returns_unit_not_io_result() {
 #[test]
 fn arm_writable_interests_per_conn_failure_terminates_only_failing_conn() {
     // Linux-only: relies on `EPOLL_CTL_MOD` returning ENOENT for an unregistered fd. macOS's kqueue
-    // `EV_ADD | EV_CLEAR` is add-or- modify (silently succeeds), so the failure path is unreachable
+    // `EV_ADD | EV_CLEAR` is add-or-modify (silently succeeds), so the failure path is unreachable
     // there via deregister-then-rearm. The cross-platform contract is enforced by the signature
     // change pinned by `arm_writable_interests_signature_returns_unit_not_io_result`.
     let tmp = tempfile::TempDir::new().unwrap();

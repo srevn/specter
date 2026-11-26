@@ -67,7 +67,7 @@ pub struct StageSpec<'a> {
 ///
 /// See [`Spawner::spawn_pipe`] for the contract. The `combined_signaler` is `Arc<dyn>` because it's
 /// shared between the controller's shutdown path and (in the aggregating waiter) the
-/// SIGTERM-cascade-on-first- failure path; `stage_signalers` are `Arc<dyn>` so the per-stage timer
+/// SIGTERM-cascade-on-first-failure path; `stage_signalers` are `Arc<dyn>` so the per-stage timer
 /// threads can co-own with the waiter without ceremony.
 ///
 /// The slice container itself is `Arc<[_]>` (not `Box<[_]>`) so a single heap allocation backs all
@@ -140,7 +140,7 @@ pub trait ChildWaiter: Send {
 /// `Send + Sync` lets the controller move signaler boxes between thread-local maps without
 /// ceremony. Implementations short-circuit when their paired waiter has already returned
 /// (production and the test mock both use the shared `crate::lifecycle::DeadFlag`); ESRCH from the
-/// actual `kill(2)` is collapsed to `Ok(())` as a defense-in- depth layer.
+/// actual `kill(2)` is collapsed to `Ok(())` as a defense-in-depth layer.
 ///
 /// The lifecycle ratchet — [`Self::is_dead`] (read) paired with [`Self::mark_dead`] (write) — is the
 /// protocol-level surface. The `ChildWaiter` impl is the canonical early publisher (the crate-private
@@ -177,7 +177,7 @@ pub trait ChildSignaler: Send + Sync {
     /// provides on the normal path.
     fn reap_blocking(&self) -> io::Result<()>;
     /// `true` once the paired waiter has reported completion (or [`Self::reap_blocking`] /
-    /// [`Self::mark_dead`] has run). Lets co- owning threads short-circuit on natural completion —
+    /// [`Self::mark_dead`] has run). Lets co-owning threads short-circuit on natural completion —
     /// used by the per-step timer thread to skip SIGTERM/SIGKILL when a child finishes within its
     /// deadline. Reads the same shared dead-flag the `signal_term` / `signal_kill` short-circuits
     /// consult; exposed as its own method so callers don't have to issue a no-op signal to probe

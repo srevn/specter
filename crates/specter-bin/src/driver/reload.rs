@@ -107,7 +107,7 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// after a successful parse — covering both the empty-diff and apply-diff branches (the
     /// operator's pulse is honoured either way; only the engine-side work differs). A parse-fail
     /// short-circuits *before* this site, so the counters never advance on a failed reload. The
-    /// `trigger` argument carries per-caller attribution (SIGHUP vs auto- reload settle expiry).
+    /// `trigger` argument carries per-caller attribution (SIGHUP vs auto-reload settle expiry).
     ///
     /// Returns the [`ControlFlow`] from the apply-branch `forward` so a shutdown observed mid-apply
     /// (`forward`'s outbound `effects_tx` disconnect) propagates back to the caller. On `Break` the

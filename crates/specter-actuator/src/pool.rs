@@ -2136,7 +2136,7 @@ mod tests {
             &completions[0],
             Input::EffectComplete(c) if matches!(c.outcome, EffectOutcome::Failed(Termination::Internal))
         ));
-        // No stages recorded — the inject_spawn_error path short- circuits MockSpawner::spawn_pipe
+        // No stages recorded — the inject_spawn_error path short-circuits MockSpawner::spawn_pipe
         // before allocate_spawn.
         assert_eq!(
             h.spawner.spawns().len(),

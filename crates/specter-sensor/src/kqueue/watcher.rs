@@ -270,7 +270,7 @@ impl FsWatcher for KqueueWatcher {
                 ffi::kevent_drain(&self.kq, &mut events).map_err(|e| WatchFailure::from_io(&e))?;
             if n == 0 {
                 // Kernel queue drained; edge-triggered contract satisfied. One log per drain_ready
-                // call — per- iteration logging would explode on bursts.
+                // call — per-iteration logging would explode on bursts.
                 tracing::trace!(total = total_emitted, "kqueue drain complete");
                 return Ok(total_emitted);
             }

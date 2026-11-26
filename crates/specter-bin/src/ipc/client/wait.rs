@@ -16,7 +16,7 @@
 //!   coming, an indefinite wait would hang for an event that will never arrive.
 //! - `124` — deadline elapsed (POSIX `timeout(1)` convention).
 //! - other non-zero ([`ExitCode::FAILURE`]) — stream ended without a match (daemon shutdown closed
-//!   the conn, peer terminated mid- stream, etc.).
+//!   the conn, peer terminated mid-stream, etc.).
 //!
 //! # Deadline mechanics
 //!

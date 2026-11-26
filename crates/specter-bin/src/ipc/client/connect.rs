@@ -69,7 +69,7 @@ pub(crate) fn write_request(stream: &mut UnixStream, req: &WireRequest) -> io::R
 /// tolerated (the daemon always emits one; future framing tweaks shouldn't break clients).
 ///
 /// Strict parse via [`parse_strict`]: a daemon-bug response carrying a stale field name surfaces as
-/// [`io::ErrorKind::InvalidData`] (the boundary's uniform parse- failure shape) rather than
+/// [`io::ErrorKind::InvalidData`] (the boundary's uniform parse-failure shape) rather than
 /// silently dropping the unknown key. Symmetric with the daemon-side request gate so an unknown
 /// field is a deterministic, debuggable failure in either direction.
 pub(crate) fn read_response(stream: &mut UnixStream) -> io::Result<ResponsePayload> {

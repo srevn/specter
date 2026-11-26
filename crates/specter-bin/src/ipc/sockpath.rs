@@ -182,7 +182,7 @@ impl std::error::Error for BindFailure {}
 ///
 /// TOCTOU is **error-quality only**: a parent that vanishes between this check and the bind still
 /// fails safely at `bind`, only without the tailored advice. Any stat error other than `NotFound`
-/// (e.g. `EACCES` on an ancestor) is left for the real `bind` to surface — pre- classifying every
+/// (e.g. `EACCES` on an ancestor) is left for the real `bind` to surface — pre-classifying every
 /// errno here would duplicate the kernel's reporting. A path with no parent component (the
 /// filesystem root) has nothing to pre-check and passes through.
 pub(crate) fn precheck_bind_parent(candidate: &SocketCandidate) -> Result<(), BindFailure> {

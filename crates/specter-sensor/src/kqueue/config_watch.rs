@@ -2,7 +2,7 @@
 //!
 //! Single-threaded: one thread owns the watcher value and drives
 //! [`drain_ready`](ConfigWatcher::drain_ready). The kqueue fd is exposed via [`AsFd`] so a reactor
-//! can register it for edge- triggered readiness; `drain_ready` is non-blocking and drains the
+//! can register it for edge-triggered readiness; `drain_ready` is non-blocking and drains the
 //! kqueue to empty on every call.
 //!
 //! # Watch shape

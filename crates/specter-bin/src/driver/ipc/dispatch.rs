@@ -133,7 +133,7 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// Every verb handler outside the Subscribe ack flow discards the outcome benignly:
     ///
     /// - [`EnqueueOutcome::Accepted`] is the happy path.
-    /// - [`EnqueueOutcome::Refused`] is already on the close-after- flush teardown path — the
+    /// - [`EnqueueOutcome::Refused`] is already on the close-after-flush teardown path — the
     ///   over-water response armed the close, and the Hub either inline-terminated via
     ///   `try_terminate_if_idle` (queue-empty arm) or queued bytes for the next flush edge to
     ///   drain-and-terminate. Re-acking would be a no-op against a conn the next pass tears down.
@@ -156,7 +156,7 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// schema and round-trip-validates the input against it. Either kind of parse failure (malformed
     /// JSON or unknown field) enqueues a [`ResponsePayload::Err`] with `code =
     /// WireErrorCode::Malformed` and continues; the client gets one structured error frame and the
-    /// conn stays open for the next line. (A repeat-offender peer trips the read- accumulator-size
+    /// conn stays open for the next line. (A repeat-offender peer trips the read-accumulator-size
     /// guard in [`super::Hub::read_conn_into_lines`] and the conn terminates on the next drain pass.)
     ///
     /// The trailing `\n` is stripped before serde sees the bytes — mirror of the standard
@@ -267,7 +267,7 @@ impl<W: FsWatcher> EngineDriver<W> {
         }
     }
 
-    /// Subscribe arm — three precondition gates, then ack-before- fanout ordering.
+    /// Subscribe arm — three precondition gates, then ack-before-fanout ordering.
     ///
     /// 1. **Already-subscribed gate.** A repeat Subscribe on a conn that already flipped to
     ///    [`ConnRole::Sub`] is a client-side bug; left ungated it silently overwrites the prior
@@ -415,7 +415,7 @@ impl<W: FsWatcher> EngineDriver<W> {
         outcome
     }
 
-    /// Operator-requested clear of a runtime disable, with best- effort re-attach.
+    /// Operator-requested clear of a runtime disable, with best-effort re-attach.
     ///
     /// Two-step semantics:
     ///

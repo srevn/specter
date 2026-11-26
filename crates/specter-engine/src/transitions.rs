@@ -568,7 +568,7 @@ impl Engine {
     /// (Contract B — "fire when the tree settles") rather than mere baseline establishment
     /// (Contract A — the cold-Seed `SilentPin` path, which records a reference freely).
     ///
-    /// Returns `false` only for the cold-Seed quiet case: a `Seed`- intent `PreFire` burst with
+    /// Returns `false` only for the cold-Seed quiet case: a `Seed`-intent `PreFire` burst with
     /// `dirty.is_empty()` AND no prior fires on the Profile. Every other reachable shape — Standard
     /// (any), Seed with witnessed activity, recovery Seed (`any_fired`), any `PostFire` (Rebase) —
     /// owes a quiescence proof.

@@ -1175,7 +1175,7 @@ impl ActiveBurst {
 
     /// Delegate to whichever burst variant is live — both pre-fire and post-fire own a
     /// `last_certified_hash` carrier (a separate sample sequence each, across the fire boundary).
-    /// Wildcard- free dispatch, same layered shape as [`Self::timer_token`] and
+    /// Wildcard-free dispatch, same layered shape as [`Self::timer_token`] and
     /// [`Self::note_effect_completion`], distinguished only by the fact that **both** variants
     /// advance (no `NotAwaiting`-style fold on this delegate: the carrier exists on both sides).
     #[must_use]
@@ -1531,7 +1531,7 @@ impl ProfileState {
 
     /// Drive the fold latch onto an in-flight pre-fire burst — the state layer of the retro-latch
     /// cascade, the entry [`Profile::arm_absorb`] calls. `Active ⇒` delegate to
-    /// [`ActiveBurst::latch_fold`] (itself a PreFire-set / PostFire- no-op); `Idle | Parked |
+    /// [`ActiveBurst::latch_fold`] (itself a PreFire-set / PostFire-no-op); `Idle | Parked |
     /// Pending ⇒` no-op — there is no burst whose terminal consequence the window could override,
     /// so an arm in those states only sets the window for the *next* burst's birth consult.
     /// Wildcard-free, same layered shape as [`Self::advance_certified_sample`].
@@ -2166,7 +2166,7 @@ pub enum BurstIntent {
 /// `Engine::handle_post_fire_settle_expired` decides whether to reschedule (events arrived since
 /// the timer was scheduled) or drive `Settling → Rebasing` for the next sample — the post-fire
 /// analogue of pre-fire's `on_settle_expired`. Carried on [`PostFireBurst`]; structurally `None` on
-/// pre-fire (the post- fire analogue of how `Settle` is `None` on `Verifying`/`Draining`).
+/// pre-fire (the post-fire analogue of how `Settle` is `None` on `Verifying`/`Draining`).
 /// `RebaseCeiling` — the post-fire mirror of `BurstDeadline`: the rebase loop's max bound, armed
 /// once at the natural `Awaiting → Settling` entry and tracked on the `rebase_ceiling` lifecycle.
 /// Expiry latches the loop's terminal, applied with the verdict in hand at the next `Rebasing`

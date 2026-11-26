@@ -347,7 +347,7 @@ fn substitute_argv(
 
 /// Render one [`ArgTemplate`] into zero or more argv slots, appending to `out`. Returns `Err` on
 /// the first [`ArgPart::EnvVar`] that resolves to neither a snapshot entry nor a `:-` default
-/// literal — short- circuits to the caller, which fails the plan with `EffectOutcome::Failed`.
+/// literal — short-circuits to the caller, which fails the plan with `EffectOutcome::Failed`.
 ///
 /// `scratch` is a caller-owned [`String`] reused across calls. Cleared at the top; built up via
 /// `push_str`; cloned (not moved) into `out` at slot emission so the buffer's allocation survives
@@ -381,7 +381,7 @@ fn substitute_one(
                 | Placeholder::RenamedTo
                 | Placeholder::Excluded => {
                     // Exact-size allocation per emitted entry. The scratch prefix is the accumulated
-                    // literal+single- value content up to this point; `v` is the per-entry suffix.
+                    // literal+single-value content up to this point; `v` is the per-entry suffix.
                     // Sizing precisely here is one alloc per emitted slot, no growth.
                     for_each_multivalue(*p, effect, diff, |v| {
                         let mut slot = String::with_capacity(scratch.len() + v.len());
