@@ -2793,9 +2793,9 @@ impl Engine {
         };
 
         // Per-Profile structural component of B1 dedup. The full Subtree suppress decision combines
-        // `nothing_changed` with the per-Sub `has_fired` flag (read once below, alongside scope /
-        // needs_diff / log_output, in the loop's single `subs.get`): a Sub that has never fired
-        // suppresses nothing — it is its own "first emission" — even when the tree happens to match.
+        // `nothing_changed` with the per-Sub `has_fired` flag (read with each Sub's other facts at
+        // the loop head): a Sub that has never fired suppresses nothing — it is its own "first
+        // emission" — even when the tree happens to match.
         let nothing_changed = p
             .baseline_hash()
             .zip(p.current_hash())
