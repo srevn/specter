@@ -68,13 +68,8 @@ pub(crate) enum CoverageClass {
 /// unprobed-slot collapse to File-shape ([`Resource::kind_or_file`]) is applied inline.
 #[must_use]
 pub fn covers(profile: &Profile, target: ResourceId, tree: &Tree, scratch: &mut PathBuf) -> bool {
-    let target_kind = tree
-        .get(target)
-        .map_or(ResourceKind::File, Resource::kind_or_file);
-    !matches!(
-        classify(profile, target, target_kind, tree, scratch),
-        CoverageClass::Outside
-    )
+    let target_kind = tree.get(target).map_or(ResourceKind::File, Resource::kind_or_file);
+    !matches!(classify(profile, target, target_kind, tree, scratch), CoverageClass::Outside)
 }
 
 /// Classify `target` against `profile`'s proof object **as** `target_kind` — see [`CoverageClass`]
@@ -119,10 +114,7 @@ pub fn covers(profile: &Profile, target: ResourceId, tree: &Tree, scratch: &mut 
 /// stale (its `ResourceId` no longer names a live slot).
 #[must_use]
 pub(crate) fn classify(
-    profile: &Profile,
-    target: ResourceId,
-    target_kind: ResourceKind,
-    tree: &Tree,
+    profile: &Profile, target: ResourceId, target_kind: ResourceKind, tree: &Tree,
     scratch: &mut PathBuf,
 ) -> CoverageClass {
     let anchor = profile.resource();
@@ -168,10 +160,7 @@ pub(crate) fn classify(
 /// Intermediate prefixes test as [`ResourceKind::Dir`] (the Tree invariant: a non-Dir parent has no
 /// children); the final prefix — the deepest segment, `chain_rev[0]` — tests as `target_kind`.
 fn classify_chain(
-    config: &ScanConfig,
-    chain_rev: &[&str],
-    target_kind: ResourceKind,
-    scratch: &mut PathBuf,
+    config: &ScanConfig, chain_rev: &[&str], target_kind: ResourceKind, scratch: &mut PathBuf,
 ) -> CoverageClass {
     debug_assert!(
         !chain_rev.is_empty(),
@@ -187,11 +176,7 @@ fn classify_chain(
     for (i, seg) in chain_rev.iter().rev().enumerate() {
         scratch.push(seg);
         let depth = u32::try_from(i + 1).unwrap_or(u32::MAX);
-        let kind = if i + 1 == total {
-            target_kind
-        } else {
-            ResourceKind::Dir
-        };
+        let kind = if i + 1 == total { target_kind } else { ResourceKind::Dir };
         if !config.accepts(scratch.as_path(), kind, depth) {
             return CoverageClass::Outside;
         }
@@ -243,17 +228,12 @@ fn classify_chain(
 /// assertion needed.
 #[must_use]
 pub(crate) fn nearest_covering_ancestor(
-    tree: &Tree,
-    profiles: &ProfileMap,
-    child: ProfileId,
-    scratch: &mut PathBuf,
+    tree: &Tree, profiles: &ProfileMap, child: ProfileId, scratch: &mut PathBuf,
 ) -> Option<ProfileId> {
     let child_resource = profiles.get(child)?.resource();
     // Live observation is the only kind authority on this path — the same `kind_or_file` collapse
     // `covers` applies (see `classify`'s kind-authority contract).
-    let target_kind = tree
-        .get(child_resource)
-        .map_or(ResourceKind::File, Resource::kind_or_file);
+    let target_kind = tree.get(child_resource).map_or(ResourceKind::File, Resource::kind_or_file);
     let mut segs: SmallVec<[&str; 8]> = SmallVec::new();
     let mut cur = child_resource;
     loop {
@@ -299,17 +279,12 @@ pub(crate) fn nearest_covering_ancestor(
 /// dispatch (Standard burst, anchor terminal event) only sees Profiles with a materialized anchor.
 #[must_use]
 pub(crate) fn covering_profiles(
-    tree: &Tree,
-    profiles: &ProfileMap,
-    resource: ResourceId,
-    scratch: &mut PathBuf,
+    tree: &Tree, profiles: &ProfileMap, resource: ResourceId, scratch: &mut PathBuf,
 ) -> SmallVec<[(ProfileId, CoverageClass); 2]> {
     // One live kind read hoisted out of the per-Profile loop — routing classifies the slot as it is
     // now (the same `kind_or_file` value the caller's head capture reads, so the routing guard's
     // kind arm and the classification cannot diverge within the step).
-    let target_kind = tree
-        .get(resource)
-        .map_or(ResourceKind::File, Resource::kind_or_file);
+    let target_kind = tree.get(resource).map_or(ResourceKind::File, Resource::kind_or_file);
     let mut out: SmallVec<[(ProfileId, CoverageClass); 2]> = SmallVec::new();
 
     // One upward pass: the ascent collects the segment chain once (target-to-root, the order
@@ -391,10 +366,7 @@ pub(crate) fn covering_profiles(
 /// mid-burst **minted** Standard descendant still holds the outer ancestor, resolving its chain
 /// *through* the discovery Profile.
 pub(crate) fn has_active_standard_descendant(
-    tree: &Tree,
-    profiles: &ProfileMap,
-    ancestor: ProfileId,
-    scratch: &mut PathBuf,
+    tree: &Tree, profiles: &ProfileMap, ancestor: ProfileId, scratch: &mut PathBuf,
 ) -> bool {
     let Some(root) = profiles.get(ancestor).map(Profile::resource) else {
         return false;
@@ -424,10 +396,7 @@ pub(crate) fn has_active_standard_descendant(
 /// cannot form. A `descendant == ancestor` call (not produced by [`has_active_standard_descendant`]'s
 /// strict walk, but well-defined) returns `false`: the chain is strictly above `descendant`.
 fn chain_reaches(
-    tree: &Tree,
-    profiles: &ProfileMap,
-    descendant: ProfileId,
-    ancestor: ProfileId,
+    tree: &Tree, profiles: &ProfileMap, descendant: ProfileId, ancestor: ProfileId,
     scratch: &mut PathBuf,
 ) -> bool {
     let mut cur = descendant;
@@ -466,12 +435,7 @@ mod tests {
     /// config)`; the other identity axes are held constant so every test reads as a config-shape
     /// variation.
     fn profile_with(r: ResourceId, scan: SubtreeScan, max_settle: Duration) -> Profile {
-        Profile::new(
-            r,
-            ProfileIdentity::new(scan, max_settle, NO_EVENTS),
-            SETTLE,
-            None,
-        )
+        Profile::new(r, ProfileIdentity::new(scan, max_settle, NO_EVENTS), SETTLE, None)
     }
 
     /// [`profile_with`] at the canonical `MAX_SETTLE` — the dominant shape. Tests that need two
@@ -483,9 +447,7 @@ mod tests {
     /// Anchor a Profile with the supplied `SubtreeScan`. Caller still owns the `Tree` (and any
     /// descendant Resources they attach).
     fn anchor(
-        tree: &mut Tree,
-        segment: &str,
-        builder: SubtreeScanBuilder,
+        tree: &mut Tree, segment: &str, builder: SubtreeScanBuilder,
     ) -> (ResourceId, Profile) {
         let r = tree.ensure_root(segment, ResourceRole::User);
         mark(tree, r, ResourceKind::Dir);
@@ -508,10 +470,7 @@ mod tests {
         let mut tree = Tree::new();
         let r = tree.ensure_root("log.txt", ResourceRole::User);
         mark(&mut tree, r, ResourceKind::File);
-        let p = profile_at(
-            r,
-            SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build(),
-        );
+        let p = profile_at(r, SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build());
         assert!(covers(&p, r, &tree, &mut PathBuf::new()));
     }
 
@@ -524,10 +483,7 @@ mod tests {
         mark(&mut tree, r, ResourceKind::File);
         let p = profile_at(
             r,
-            SubtreeScan::builder()
-                .pattern(glob("*.rs"))
-                .max_depth(NonZeroU32::new(1))
-                .build(),
+            SubtreeScan::builder().pattern(glob("*.rs")).max_depth(NonZeroU32::new(1)).build(),
         );
         assert!(covers(&p, r, &tree, &mut PathBuf::new()));
     }
@@ -548,9 +504,8 @@ mod tests {
         let mut tree = Tree::new();
         let parent = tree.ensure_root("parent", ResourceRole::User);
         mark(&mut tree, parent, ResourceKind::Dir);
-        let anchor_id = tree
-            .ensure_child(parent, "anchor", ResourceRole::User)
-            .expect("test live parent");
+        let anchor_id =
+            tree.ensure_child(parent, "anchor", ResourceRole::User).expect("test live parent");
         mark(&mut tree, anchor_id, ResourceKind::Dir);
         let profile = profile_at(anchor_id, SubtreeScan::builder().build());
         assert!(!covers(&profile, parent, &tree, &mut PathBuf::new()));
@@ -560,17 +515,11 @@ mod tests {
     fn recursive_true_covers_deep_descendants() {
         let mut tree = Tree::new();
         let (root, profile) = anchor(&mut tree, "root", SubtreeScan::builder());
-        let a = tree
-            .ensure_child(root, "a", ResourceRole::User)
-            .expect("test live parent");
+        let a = tree.ensure_child(root, "a", ResourceRole::User).expect("test live parent");
         mark(&mut tree, a, ResourceKind::Dir);
-        let b = tree
-            .ensure_child(a, "b", ResourceRole::User)
-            .expect("test live parent");
+        let b = tree.ensure_child(a, "b", ResourceRole::User).expect("test live parent");
         mark(&mut tree, b, ResourceKind::Dir);
-        let c = tree
-            .ensure_child(b, "c.rs", ResourceRole::User)
-            .expect("test live parent");
+        let c = tree.ensure_child(b, "c.rs", ResourceRole::User).expect("test live parent");
         mark(&mut tree, c, ResourceKind::File);
         assert!(covers(&profile, a, &tree, &mut PathBuf::new()));
         assert!(covers(&profile, b, &tree, &mut PathBuf::new()));
@@ -580,18 +529,11 @@ mod tests {
     #[test]
     fn recursive_false_covers_depth_one_only() {
         let mut tree = Tree::new();
-        let (root, profile) = anchor(
-            &mut tree,
-            "root",
-            SubtreeScan::builder().max_depth(NonZeroU32::new(1)),
-        );
-        let a = tree
-            .ensure_child(root, "a", ResourceRole::User)
-            .expect("test live parent");
+        let (root, profile) =
+            anchor(&mut tree, "root", SubtreeScan::builder().max_depth(NonZeroU32::new(1)));
+        let a = tree.ensure_child(root, "a", ResourceRole::User).expect("test live parent");
         mark(&mut tree, a, ResourceKind::Dir);
-        let b = tree
-            .ensure_child(a, "b.rs", ResourceRole::User)
-            .expect("test live parent");
+        let b = tree.ensure_child(a, "b.rs", ResourceRole::User).expect("test live parent");
         mark(&mut tree, b, ResourceKind::File);
         assert!(covers(&profile, a, &tree, &mut PathBuf::new()));
         assert!(!covers(&profile, b, &tree, &mut PathBuf::new()));
@@ -600,20 +542,11 @@ mod tests {
     #[test]
     fn max_depth_caps_descent() {
         let mut tree = Tree::new();
-        let (root, profile) = anchor(
-            &mut tree,
-            "root",
-            SubtreeScan::builder().max_depth(NonZeroU32::new(2)),
-        );
-        let a = tree
-            .ensure_child(root, "a", ResourceRole::User)
-            .expect("test live parent");
-        let b = tree
-            .ensure_child(a, "b", ResourceRole::User)
-            .expect("test live parent");
-        let c = tree
-            .ensure_child(b, "c", ResourceRole::User)
-            .expect("test live parent");
+        let (root, profile) =
+            anchor(&mut tree, "root", SubtreeScan::builder().max_depth(NonZeroU32::new(2)));
+        let a = tree.ensure_child(root, "a", ResourceRole::User).expect("test live parent");
+        let b = tree.ensure_child(a, "b", ResourceRole::User).expect("test live parent");
+        let c = tree.ensure_child(b, "c", ResourceRole::User).expect("test live parent");
         for r in [a, b, c] {
             mark(&mut tree, r, ResourceKind::Dir);
         }
@@ -626,18 +559,12 @@ mod tests {
     fn exclude_segment_pattern_drops_at_depth_one() {
         // "target" excludes the `target` directory at depth 1.
         let mut tree = Tree::new();
-        let (root, profile) = anchor(
-            &mut tree,
-            "root",
-            SubtreeScan::builder().exclude(glob("target")),
-        );
-        let target = tree
-            .ensure_child(root, "target", ResourceRole::User)
-            .expect("test live parent");
+        let (root, profile) =
+            anchor(&mut tree, "root", SubtreeScan::builder().exclude(glob("target")));
+        let target =
+            tree.ensure_child(root, "target", ResourceRole::User).expect("test live parent");
         mark(&mut tree, target, ResourceKind::Dir);
-        let other = tree
-            .ensure_child(root, "src", ResourceRole::User)
-            .expect("test live parent");
+        let other = tree.ensure_child(root, "src", ResourceRole::User).expect("test live parent");
         mark(&mut tree, other, ResourceKind::Dir);
         assert!(!covers(&profile, target, &tree, &mut PathBuf::new()));
         assert!(covers(&profile, other, &tree, &mut PathBuf::new()));
@@ -647,18 +574,12 @@ mod tests {
     fn exclude_recursive_pattern_drops_at_depth_two() {
         // "target/**" excludes target/foo at depth 2.
         let mut tree = Tree::new();
-        let (root, profile) = anchor(
-            &mut tree,
-            "root",
-            SubtreeScan::builder().exclude(glob("target/**")),
-        );
-        let target = tree
-            .ensure_child(root, "target", ResourceRole::User)
-            .expect("test live parent");
+        let (root, profile) =
+            anchor(&mut tree, "root", SubtreeScan::builder().exclude(glob("target/**")));
+        let target =
+            tree.ensure_child(root, "target", ResourceRole::User).expect("test live parent");
         mark(&mut tree, target, ResourceKind::Dir);
-        let foo = tree
-            .ensure_child(target, "foo", ResourceRole::User)
-            .expect("test live parent");
+        let foo = tree.ensure_child(target, "foo", ResourceRole::User).expect("test live parent");
         mark(&mut tree, foo, ResourceKind::Dir);
         assert!(!covers(&profile, foo, &tree, &mut PathBuf::new()));
     }
@@ -666,18 +587,11 @@ mod tests {
     #[test]
     fn pattern_matches_file_extension() {
         let mut tree = Tree::new();
-        let (root, profile) = anchor(
-            &mut tree,
-            "root",
-            SubtreeScan::builder().pattern(glob("*.rs")),
-        );
-        let rs = tree
-            .ensure_child(root, "lib.rs", ResourceRole::User)
-            .expect("test live parent");
+        let (root, profile) =
+            anchor(&mut tree, "root", SubtreeScan::builder().pattern(glob("*.rs")));
+        let rs = tree.ensure_child(root, "lib.rs", ResourceRole::User).expect("test live parent");
         mark(&mut tree, rs, ResourceKind::File);
-        let c = tree
-            .ensure_child(root, "lib.c", ResourceRole::User)
-            .expect("test live parent");
+        let c = tree.ensure_child(root, "lib.c", ResourceRole::User).expect("test live parent");
         mark(&mut tree, c, ResourceKind::File);
         assert!(covers(&profile, rs, &tree, &mut PathBuf::new()));
         assert!(!covers(&profile, c, &tree, &mut PathBuf::new()));
@@ -687,14 +601,9 @@ mod tests {
     fn pattern_bypasses_directories() {
         // dirs are always covered (we descend through them) regardless of the file pattern.
         let mut tree = Tree::new();
-        let (root, profile) = anchor(
-            &mut tree,
-            "root",
-            SubtreeScan::builder().pattern(glob("*.rs")),
-        );
-        let src = tree
-            .ensure_child(root, "src", ResourceRole::User)
-            .expect("test live parent");
+        let (root, profile) =
+            anchor(&mut tree, "root", SubtreeScan::builder().pattern(glob("*.rs")));
+        let src = tree.ensure_child(root, "src", ResourceRole::User).expect("test live parent");
         mark(&mut tree, src, ResourceKind::Dir);
         assert!(covers(&profile, src, &tree, &mut PathBuf::new()));
     }
@@ -702,22 +611,14 @@ mod tests {
     #[test]
     fn pattern_matches_full_relative_path_for_files() {
         let mut tree = Tree::new();
-        let (root, profile) = anchor(
-            &mut tree,
-            "root",
-            SubtreeScan::builder().pattern(glob("src/**/*.rs")),
-        );
-        let src = tree
-            .ensure_child(root, "src", ResourceRole::User)
-            .expect("test live parent");
+        let (root, profile) =
+            anchor(&mut tree, "root", SubtreeScan::builder().pattern(glob("src/**/*.rs")));
+        let src = tree.ensure_child(root, "src", ResourceRole::User).expect("test live parent");
         mark(&mut tree, src, ResourceKind::Dir);
-        let lib = tree
-            .ensure_child(src, "lib.rs", ResourceRole::User)
-            .expect("test live parent");
+        let lib = tree.ensure_child(src, "lib.rs", ResourceRole::User).expect("test live parent");
         mark(&mut tree, lib, ResourceKind::File);
-        let other_src = tree
-            .ensure_child(root, "other.rs", ResourceRole::User)
-            .expect("test live parent");
+        let other_src =
+            tree.ensure_child(root, "other.rs", ResourceRole::User).expect("test live parent");
         mark(&mut tree, other_src, ResourceKind::File);
         assert!(covers(&profile, lib, &tree, &mut PathBuf::new()));
         // `other.rs` lives directly under root and doesn't match `src/**/*.rs`.
@@ -746,13 +647,9 @@ mod tests {
         // Path's glob matcher is checked progressively).
         let mut tree = Tree::new();
         let (root, profile) = anchor(&mut tree, "root", SubtreeScan::builder().exclude(glob("a")));
-        let a = tree
-            .ensure_child(root, "a", ResourceRole::User)
-            .expect("test live parent");
+        let a = tree.ensure_child(root, "a", ResourceRole::User).expect("test live parent");
         mark(&mut tree, a, ResourceKind::Dir);
-        let b = tree
-            .ensure_child(a, "b.rs", ResourceRole::User)
-            .expect("test live parent");
+        let b = tree.ensure_child(a, "b.rs", ResourceRole::User).expect("test live parent");
         mark(&mut tree, b, ResourceKind::File);
         assert!(!covers(&profile, a, &tree, &mut PathBuf::new()));
         assert!(!covers(&profile, b, &tree, &mut PathBuf::new()));
@@ -764,28 +661,18 @@ mod tests {
         // basename-only. Pin the semantic so a future glob-engine swap surfaces the deviation as a
         // test failure rather than a silent change in user-visible coverage.
         let mut tree = Tree::new();
-        let (root, profile) = anchor(
-            &mut tree,
-            "root",
-            SubtreeScan::builder().pattern(glob("*.rs")),
-        );
+        let (root, profile) =
+            anchor(&mut tree, "root", SubtreeScan::builder().pattern(glob("*.rs")));
         // Top-level .rs file matches.
-        let lib = tree
-            .ensure_child(root, "lib.rs", ResourceRole::User)
-            .expect("test live parent");
+        let lib = tree.ensure_child(root, "lib.rs", ResourceRole::User).expect("test live parent");
         mark(&mut tree, lib, ResourceKind::File);
         // Deep .rs file also matches — `*` is path-blind.
-        let src = tree
-            .ensure_child(root, "src", ResourceRole::User)
-            .expect("test live parent");
+        let src = tree.ensure_child(root, "src", ResourceRole::User).expect("test live parent");
         mark(&mut tree, src, ResourceKind::Dir);
-        let deep = tree
-            .ensure_child(src, "deep.rs", ResourceRole::User)
-            .expect("test live parent");
+        let deep = tree.ensure_child(src, "deep.rs", ResourceRole::User).expect("test live parent");
         mark(&mut tree, deep, ResourceKind::File);
-        let deeper_dir = tree
-            .ensure_child(src, "foo", ResourceRole::User)
-            .expect("test live parent");
+        let deeper_dir =
+            tree.ensure_child(src, "foo", ResourceRole::User).expect("test live parent");
         mark(&mut tree, deeper_dir, ResourceKind::Dir);
         let deepest = tree
             .ensure_child(deeper_dir, "deeper.rs", ResourceRole::User)
@@ -803,14 +690,10 @@ mod tests {
         // Unknown-kind slots bypass the pattern entirely. The new `kind_or_file()` accessor collapses
         // unprobed to File-shape, matching the convention shared by `fs_event_to_class`.
         let mut tree = Tree::new();
-        let (root, profile) = anchor(
-            &mut tree,
-            "root",
-            SubtreeScan::builder().pattern(glob("*.rs")),
-        );
-        let unprobed = tree
-            .ensure_child(root, "lib.c", ResourceRole::User)
-            .expect("test live parent");
+        let (root, profile) =
+            anchor(&mut tree, "root", SubtreeScan::builder().pattern(glob("*.rs")));
+        let unprobed =
+            tree.ensure_child(root, "lib.c", ResourceRole::User).expect("test live parent");
         // Deliberately do NOT call `mark` — kind stays at the default `ResourceKind::Unknown`
         // placeholder.
         assert!(tree.get(unprobed).unwrap().kind().is_none());
@@ -824,18 +707,13 @@ mod tests {
         // covered; only its contents are excluded. Surprises users coming from gitignore (where
         // `target/` excludes the directory and contents); pinned here so the contrast is explicit.
         let mut tree = Tree::new();
-        let (root, profile) = anchor(
-            &mut tree,
-            "root",
-            SubtreeScan::builder().exclude(glob("target/**")),
-        );
-        let target = tree
-            .ensure_child(root, "target", ResourceRole::User)
-            .expect("test live parent");
+        let (root, profile) =
+            anchor(&mut tree, "root", SubtreeScan::builder().exclude(glob("target/**")));
+        let target =
+            tree.ensure_child(root, "target", ResourceRole::User).expect("test live parent");
         mark(&mut tree, target, ResourceKind::Dir);
-        let inside = tree
-            .ensure_child(target, "foo", ResourceRole::User)
-            .expect("test live parent");
+        let inside =
+            tree.ensure_child(target, "foo", ResourceRole::User).expect("test live parent");
         mark(&mut tree, inside, ResourceKind::Dir);
         assert!(
             covers(&profile, target, &tree, &mut PathBuf::new()),
@@ -864,21 +742,16 @@ mod tests {
     fn covers_rejects_hidden_segments_when_hidden_false() {
         let mut tree = Tree::new();
         let (root, profile) = anchor(&mut tree, "root", SubtreeScan::builder());
-        let hidden_dir = tree
-            .ensure_child(root, ".hidden", ResourceRole::User)
-            .expect("test live parent");
+        let hidden_dir =
+            tree.ensure_child(root, ".hidden", ResourceRole::User).expect("test live parent");
         mark(&mut tree, hidden_dir, ResourceKind::Dir);
-        let inside_hidden = tree
-            .ensure_child(hidden_dir, "leaf.rs", ResourceRole::User)
-            .expect("test live parent");
+        let inside_hidden =
+            tree.ensure_child(hidden_dir, "leaf.rs", ResourceRole::User).expect("test live parent");
         mark(&mut tree, inside_hidden, ResourceKind::File);
-        let sub = tree
-            .ensure_child(root, "src", ResourceRole::User)
-            .expect("test live parent");
+        let sub = tree.ensure_child(root, "src", ResourceRole::User).expect("test live parent");
         mark(&mut tree, sub, ResourceKind::Dir);
-        let hidden_under_sub = tree
-            .ensure_child(sub, ".secret", ResourceRole::User)
-            .expect("test live parent");
+        let hidden_under_sub =
+            tree.ensure_child(sub, ".secret", ResourceRole::User).expect("test live parent");
         mark(&mut tree, hidden_under_sub, ResourceKind::Dir);
 
         assert!(
@@ -913,22 +786,13 @@ mod tests {
     #[test]
     fn classify_recursive_false_forks_boundary_dir_from_interior_leaf_at_depth_one() {
         let mut tree = Tree::new();
-        let (root, profile) = anchor(
-            &mut tree,
-            "root",
-            SubtreeScan::builder().max_depth(NonZeroU32::new(1)),
-        );
-        let dir = tree
-            .ensure_child(root, "sub", ResourceRole::User)
-            .expect("test live parent");
+        let (root, profile) =
+            anchor(&mut tree, "root", SubtreeScan::builder().max_depth(NonZeroU32::new(1)));
+        let dir = tree.ensure_child(root, "sub", ResourceRole::User).expect("test live parent");
         mark(&mut tree, dir, ResourceKind::Dir);
-        let file = tree
-            .ensure_child(root, "f.rs", ResourceRole::User)
-            .expect("test live parent");
+        let file = tree.ensure_child(root, "f.rs", ResourceRole::User).expect("test live parent");
         mark(&mut tree, file, ResourceKind::File);
-        let deep = tree
-            .ensure_child(dir, "deep", ResourceRole::User)
-            .expect("test live parent");
+        let deep = tree.ensure_child(dir, "deep", ResourceRole::User).expect("test live parent");
         mark(&mut tree, deep, ResourceKind::Dir);
 
         let mut scratch = PathBuf::new();
@@ -952,23 +816,14 @@ mod tests {
     #[test]
     fn classify_max_depth_rim_dir_is_boundary_interior_above() {
         let mut tree = Tree::new();
-        let (root, profile) = anchor(
-            &mut tree,
-            "root",
-            SubtreeScan::builder().max_depth(NonZeroU32::new(2)),
-        );
-        let d1 = tree
-            .ensure_child(root, "d1", ResourceRole::User)
-            .expect("test live parent");
-        let d2 = tree
-            .ensure_child(d1, "d2", ResourceRole::User)
-            .expect("test live parent");
+        let (root, profile) =
+            anchor(&mut tree, "root", SubtreeScan::builder().max_depth(NonZeroU32::new(2)));
+        let d1 = tree.ensure_child(root, "d1", ResourceRole::User).expect("test live parent");
+        let d2 = tree.ensure_child(d1, "d2", ResourceRole::User).expect("test live parent");
         for r in [d1, d2] {
             mark(&mut tree, r, ResourceKind::Dir);
         }
-        let f2 = tree
-            .ensure_child(d1, "f.rs", ResourceRole::User)
-            .expect("test live parent");
+        let f2 = tree.ensure_child(d1, "f.rs", ResourceRole::User).expect("test live parent");
         mark(&mut tree, f2, ResourceKind::File);
 
         let mut scratch = PathBuf::new();
@@ -994,27 +849,15 @@ mod tests {
         // recursive=false would make any non-anchor Dir at this position a Boundary; depth 0 bypasses
         // the recursion edge entirely. Same for a File anchor.
         let mut tree = Tree::new();
-        let (root, profile) = anchor(
-            &mut tree,
-            "root",
-            SubtreeScan::builder().max_depth(NonZeroU32::new(1)),
-        );
+        let (root, profile) =
+            anchor(&mut tree, "root", SubtreeScan::builder().max_depth(NonZeroU32::new(1)));
         assert_eq!(
-            classify(
-                &profile,
-                root,
-                ResourceKind::Dir,
-                &tree,
-                &mut PathBuf::new()
-            ),
+            classify(&profile, root, ResourceKind::Dir, &tree, &mut PathBuf::new()),
             CoverageClass::Interior,
         );
         let f = tree.ensure_root("log.txt", ResourceRole::User);
         mark(&mut tree, f, ResourceKind::File);
-        let fp = profile_at(
-            f,
-            SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build(),
-        );
+        let fp = profile_at(f, SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build());
         assert_eq!(
             classify(&fp, f, ResourceKind::File, &tree, &mut PathBuf::new()),
             CoverageClass::Interior,
@@ -1033,14 +876,10 @@ mod tests {
         mark(&mut tree, root, ResourceKind::Dir);
         let pid = profiles.attach(
             &mut tree,
-            profile_at(
-                root,
-                SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build(),
-            ),
+            profile_at(root, SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build()),
         );
-        let unprobed = tree
-            .ensure_child(root, "sub", ResourceRole::User)
-            .expect("test live parent");
+        let unprobed =
+            tree.ensure_child(root, "sub", ResourceRole::User).expect("test live parent");
         assert!(tree.get(unprobed).unwrap().kind().is_none());
         let got = covering_profiles(&tree, &profiles, unprobed, &mut PathBuf::new());
         assert_eq!(got.as_slice(), &[(pid, CoverageClass::Interior)]);
@@ -1063,16 +902,11 @@ mod tests {
         let r = tree.ensure_root(segment, ResourceRole::User);
         mark(tree, r, ResourceKind::Dir);
         let pattern = Arc::new(PatternSpec::parse(pattern).expect("test pattern parses"));
-        (
-            r,
-            Profile::new(r, ProfileIdentity::discovery(pattern), SETTLE, None),
-        )
+        (r, Profile::new(r, ProfileIdentity::discovery(pattern), SETTLE, None))
     }
 
     fn child(tree: &mut Tree, parent: ResourceId, segment: &str, kind: ResourceKind) -> ResourceId {
-        let r = tree
-            .ensure_child(parent, segment, ResourceRole::User)
-            .expect("test live parent");
+        let r = tree.ensure_child(parent, segment, ResourceRole::User).expect("test live parent");
         mark(tree, r, kind);
         r
     }
@@ -1096,10 +930,7 @@ mod tests {
         assert!(covers(&profile, app1, &tree, &mut scratch));
         assert!(covers(&profile, data, &tree, &mut scratch));
         assert!(covers(&profile, box1, &tree, &mut scratch));
-        assert!(
-            covers(&profile, log, &tree, &mut scratch),
-            "a Dir terminus is covered",
-        );
+        assert!(covers(&profile, log, &tree, &mut scratch), "a Dir terminus is covered");
         assert!(
             !covers(&profile, below, &tree, &mut scratch),
             "discovery never covers below a terminus",
@@ -1125,13 +956,7 @@ mod tests {
             CoverageClass::Interior,
         );
         assert_eq!(
-            classify(
-                &profile,
-                dir_terminus,
-                ResourceKind::Dir,
-                &tree,
-                &mut scratch
-            ),
+            classify(&profile, dir_terminus, ResourceKind::Dir, &tree, &mut scratch),
             CoverageClass::Boundary,
         );
 
@@ -1139,13 +964,7 @@ mod tests {
         let mid2 = child(&mut tree, root2, "app", ResourceKind::Dir);
         let file_terminus = child(&mut tree, mid2, "x.log", ResourceKind::File);
         assert_eq!(
-            classify(
-                &glob_profile,
-                file_terminus,
-                ResourceKind::File,
-                &tree,
-                &mut scratch
-            ),
+            classify(&glob_profile, file_terminus, ResourceKind::File, &tree, &mut scratch),
             CoverageClass::Interior,
         );
     }
@@ -1173,9 +992,8 @@ mod tests {
         let mut tree = Tree::new();
         let (root, profile) = anchor_chain(&mut tree, "srv", "/srv/*/log");
         let as_file = child(&mut tree, root, "app1", ResourceKind::File);
-        let unclassified = tree
-            .ensure_child(root, "app2", ResourceRole::User)
-            .expect("test live parent");
+        let unclassified =
+            tree.ensure_child(root, "app2", ResourceRole::User).expect("test live parent");
         assert!(tree.get(unclassified).unwrap().kind().is_none());
         let as_dir = child(&mut tree, root, "app3", ResourceKind::Dir);
 
@@ -1222,12 +1040,8 @@ mod tests {
         let mut tree = Tree::new();
         let mut profiles = ProfileMap::new();
         let root = tree.ensure_root("root", ResourceRole::User);
-        let a = tree
-            .ensure_child(root, "a", ResourceRole::User)
-            .expect("test live parent");
-        let b = tree
-            .ensure_child(a, "b", ResourceRole::User)
-            .expect("test live parent");
+        let a = tree.ensure_child(root, "a", ResourceRole::User).expect("test live parent");
+        let b = tree.ensure_child(a, "b", ResourceRole::User).expect("test live parent");
         for r in [root, a, b] {
             mark_dir(&mut tree, r);
         }
@@ -1243,10 +1057,7 @@ mod tests {
             nearest_covering_ancestor(&tree, &profiles, p_a, &mut PathBuf::new()),
             Some(p_root)
         );
-        assert_eq!(
-            nearest_covering_ancestor(&tree, &profiles, p_root, &mut PathBuf::new()),
-            None
-        );
+        assert_eq!(nearest_covering_ancestor(&tree, &profiles, p_root, &mut PathBuf::new()), None);
     }
 
     #[test]
@@ -1256,27 +1067,17 @@ mod tests {
         let mut tree = Tree::new();
         let mut profiles = ProfileMap::new();
         let root = tree.ensure_root("root", ResourceRole::User);
-        let a = tree
-            .ensure_child(root, "a", ResourceRole::User)
-            .expect("test live parent");
-        let b = tree
-            .ensure_child(a, "b", ResourceRole::User)
-            .expect("test live parent");
+        let a = tree.ensure_child(root, "a", ResourceRole::User).expect("test live parent");
+        let b = tree.ensure_child(a, "b", ResourceRole::User).expect("test live parent");
         for r in [root, a, b] {
             mark_dir(&mut tree, r);
         }
         let _p_root = profiles.attach(
             &mut tree,
-            profile_at(
-                root,
-                SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build(),
-            ),
+            profile_at(root, SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build()),
         );
         let p_b = profiles.attach(&mut tree, profile_at(b, cfg_recursive()));
-        assert_eq!(
-            nearest_covering_ancestor(&tree, &profiles, p_b, &mut PathBuf::new()),
-            None
-        );
+        assert_eq!(nearest_covering_ancestor(&tree, &profiles, p_b, &mut PathBuf::new()), None);
     }
 
     #[test]
@@ -1286,14 +1087,10 @@ mod tests {
         let mut profiles = ProfileMap::new();
         let r = tree.ensure_root("root", ResourceRole::User);
         mark_dir(&mut tree, r);
-        let p_a = profiles.attach(
-            &mut tree,
-            profile_with(r, cfg_recursive(), Duration::from_secs(6)),
-        );
-        let p_b = profiles.attach(
-            &mut tree,
-            profile_with(r, cfg_recursive(), Duration::from_secs(12)),
-        );
+        let p_a =
+            profiles.attach(&mut tree, profile_with(r, cfg_recursive(), Duration::from_secs(6)));
+        let p_b =
+            profiles.attach(&mut tree, profile_with(r, cfg_recursive(), Duration::from_secs(12)));
         // Both at root; root has no Profile ancestor; resolution walks ancestors of root.resource
         // (none — root is a Tree root).
         assert!(nearest_covering_ancestor(&tree, &profiles, p_a, &mut PathBuf::new()).is_none());
@@ -1307,21 +1104,15 @@ mod tests {
         let mut tree = Tree::new();
         let mut profiles = ProfileMap::new();
         let root = tree.ensure_root("root", ResourceRole::User);
-        let leaf = tree
-            .ensure_child(root, "leaf", ResourceRole::User)
-            .expect("test live parent");
+        let leaf = tree.ensure_child(root, "leaf", ResourceRole::User).expect("test live parent");
         mark_dir(&mut tree, root);
         mark_dir(&mut tree, leaf);
         // Two distinct Profiles at root, distinct config_hashes via differing max_settle (makes them
         // separate Profiles).
-        let p_root_a = profiles.attach(
-            &mut tree,
-            profile_with(root, cfg_recursive(), Duration::from_secs(6)),
-        );
-        let p_root_b = profiles.attach(
-            &mut tree,
-            profile_with(root, cfg_recursive(), Duration::from_secs(12)),
-        );
+        let p_root_a =
+            profiles.attach(&mut tree, profile_with(root, cfg_recursive(), Duration::from_secs(6)));
+        let p_root_b = profiles
+            .attach(&mut tree, profile_with(root, cfg_recursive(), Duration::from_secs(12)));
         let p_leaf = profiles.attach(&mut tree, profile_at(leaf, cfg_recursive()));
 
         let smaller = std::cmp::min(p_root_a, p_root_b);
@@ -1341,12 +1132,8 @@ mod tests {
         let mut tree = Tree::new();
         let mut profiles = ProfileMap::new();
         let root = tree.ensure_root("root", ResourceRole::User);
-        let a = tree
-            .ensure_child(root, "a", ResourceRole::User)
-            .expect("test live parent");
-        let b = tree
-            .ensure_child(a, "b", ResourceRole::User)
-            .expect("test live parent");
+        let a = tree.ensure_child(root, "a", ResourceRole::User).expect("test live parent");
+        let b = tree.ensure_child(a, "b", ResourceRole::User).expect("test live parent");
         for r in [root, a, b] {
             mark_dir(&mut tree, r);
         }
@@ -1358,10 +1145,7 @@ mod tests {
             Some(p_root),
             "Profile-less Resource ancestor is skipped; walk continues",
         );
-        assert_eq!(
-            nearest_covering_ancestor(&tree, &profiles, p_root, &mut PathBuf::new()),
-            None
-        );
+        assert_eq!(nearest_covering_ancestor(&tree, &profiles, p_root, &mut PathBuf::new()), None);
     }
 
     // ===== has_active_standard_descendant =====
@@ -1378,10 +1162,7 @@ mod tests {
 
     /// A Profile at `r` with `builder`'s config, left `Idle`.
     fn attach_idle(
-        tree: &mut Tree,
-        profiles: &mut ProfileMap,
-        r: ResourceId,
-        builder: SubtreeScanBuilder,
+        tree: &mut Tree, profiles: &mut ProfileMap, r: ResourceId, builder: SubtreeScanBuilder,
     ) -> ProfileId {
         profiles.attach(tree, profile_at(r, builder.build()))
     }
@@ -1392,19 +1173,14 @@ mod tests {
     /// the phase is immaterial; the synthetic timer ids are never inspected (these Profiles are never
     /// stepped).
     fn attach_active(
-        tree: &mut Tree,
-        profiles: &mut ProfileMap,
-        r: ResourceId,
-        builder: SubtreeScanBuilder,
+        tree: &mut Tree, profiles: &mut ProfileMap, r: ResourceId, builder: SubtreeScanBuilder,
         intent: BurstIntent,
     ) -> ProfileId {
         let mut p = profile_at(r, builder.build());
         p.transition_state(ProfileState::Active(
             ActiveBurst::PreFire(PreFireBurst::new(
                 TimerId::from(1),
-                PreFirePhase::Batching {
-                    settle_timer: TimerId::from(2),
-                },
+                PreFirePhase::Batching { settle_timer: TimerId::from(2) },
                 intent,
                 DirtyProvenance::new(),
                 None,
@@ -1425,12 +1201,8 @@ mod tests {
         let mut tree = Tree::new();
         let mut profiles = ProfileMap::new();
         let a = tree.ensure_root("a", ResourceRole::User);
-        let mid = tree
-            .ensure_child(a, "mid", ResourceRole::User)
-            .expect("test live parent");
-        let deep = tree
-            .ensure_child(mid, "deep", ResourceRole::User)
-            .expect("test live parent");
+        let mid = tree.ensure_child(a, "mid", ResourceRole::User).expect("test live parent");
+        let deep = tree.ensure_child(mid, "deep", ResourceRole::User).expect("test live parent");
         for r in [a, mid, deep] {
             mark_dir(&mut tree, r);
         }
@@ -1461,12 +1233,8 @@ mod tests {
         let mut profiles_idle = ProfileMap::new();
         let mut tree2 = Tree::new();
         let a2 = tree2.ensure_root("a", ResourceRole::User);
-        let mid2 = tree2
-            .ensure_child(a2, "mid", ResourceRole::User)
-            .expect("test live parent");
-        let deep2 = tree2
-            .ensure_child(mid2, "deep", ResourceRole::User)
-            .expect("test live parent");
+        let mid2 = tree2.ensure_child(a2, "mid", ResourceRole::User).expect("test live parent");
+        let deep2 = tree2.ensure_child(mid2, "deep", ResourceRole::User).expect("test live parent");
         for r in [a2, mid2, deep2] {
             mark_dir(&mut tree2, r);
         }
@@ -1477,18 +1245,8 @@ mod tests {
             SubtreeScan::builder().max_depth(NonZeroU32::new(1)),
         );
         let _ = attach_idle(&mut tree2, &mut profiles_idle, mid2, SubtreeScan::builder());
-        let _ = attach_idle(
-            &mut tree2,
-            &mut profiles_idle,
-            deep2,
-            SubtreeScan::builder(),
-        );
-        assert!(!has_active_standard_descendant(
-            &tree2,
-            &profiles_idle,
-            p_a2,
-            &mut PathBuf::new(),
-        ));
+        let _ = attach_idle(&mut tree2, &mut profiles_idle, deep2, SubtreeScan::builder());
+        assert!(!has_active_standard_descendant(&tree2, &profiles_idle, p_a2, &mut PathBuf::new()));
     }
 
     #[test]
@@ -1525,15 +1283,9 @@ mod tests {
         let mut tree = Tree::new();
         let mut profiles = ProfileMap::new();
         let root = tree.ensure_root("root", ResourceRole::User);
-        let c1 = tree
-            .ensure_child(root, "c1", ResourceRole::User)
-            .expect("test live parent");
-        let c2 = tree
-            .ensure_child(root, "c2", ResourceRole::User)
-            .expect("test live parent");
-        let c3 = tree
-            .ensure_child(root, "c3", ResourceRole::User)
-            .expect("test live parent");
+        let c1 = tree.ensure_child(root, "c1", ResourceRole::User).expect("test live parent");
+        let c2 = tree.ensure_child(root, "c2", ResourceRole::User).expect("test live parent");
+        let c3 = tree.ensure_child(root, "c3", ResourceRole::User).expect("test live parent");
         for r in [root, c1, c2, c3] {
             mark_dir(&mut tree, r);
         }
@@ -1547,12 +1299,7 @@ mod tests {
             BurstIntent::Standard,
         );
         let _ = attach_idle(&mut tree, &mut profiles, c3, SubtreeScan::builder());
-        assert!(has_active_standard_descendant(
-            &tree,
-            &profiles,
-            p_root,
-            &mut PathBuf::new()
-        ));
+        assert!(has_active_standard_descendant(&tree, &profiles, p_root, &mut PathBuf::new()));
     }
 
     #[test]
@@ -1564,9 +1311,7 @@ mod tests {
             let mut tree = Tree::new();
             let mut profiles = ProfileMap::new();
             let root = tree.ensure_root("root", ResourceRole::User);
-            let c = tree
-                .ensure_child(root, "c", ResourceRole::User)
-                .expect("test live parent");
+            let c = tree.ensure_child(root, "c", ResourceRole::User).expect("test live parent");
             mark_dir(&mut tree, root);
             mark_dir(&mut tree, c);
             let p_root = attach_idle(&mut tree, &mut profiles, root, SubtreeScan::builder());
@@ -1574,10 +1319,7 @@ mod tests {
             has_active_standard_descendant(&tree, &profiles, p_root, &mut PathBuf::new())
         };
         assert!(!topo(BurstIntent::Seed), "Seed descendant never gates");
-        assert!(
-            topo(BurstIntent::Standard),
-            "the same descendant in a Standard burst does gate",
-        );
+        assert!(topo(BurstIntent::Standard), "the same descendant in a Standard burst does gate");
     }
 
     #[test]
@@ -1589,12 +1331,8 @@ mod tests {
         let mut tree = Tree::new();
         let mut profiles = ProfileMap::new();
         let a = tree.ensure_root("a", ResourceRole::User);
-        let mid = tree
-            .ensure_child(a, "mid", ResourceRole::User)
-            .expect("test live parent");
-        let deep = tree
-            .ensure_child(mid, "deep", ResourceRole::User)
-            .expect("test live parent");
+        let mid = tree.ensure_child(a, "mid", ResourceRole::User).expect("test live parent");
+        let deep = tree.ensure_child(mid, "deep", ResourceRole::User).expect("test live parent");
         for r in [a, mid, deep] {
             mark_dir(&mut tree, r);
         }

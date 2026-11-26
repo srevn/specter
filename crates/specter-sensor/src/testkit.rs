@@ -24,15 +24,8 @@ use std::sync::Mutex;
 /// One recorded call into the watcher's mutator surface.
 #[derive(Debug, Clone)]
 pub enum WatcherCall {
-    Watch {
-        resource: ResourceId,
-        path: PathBuf,
-        kind: ResourceKind,
-        events: ClassSet,
-    },
-    Unwatch {
-        resource: ResourceId,
-    },
+    Watch { resource: ResourceId, path: PathBuf, kind: ResourceKind, events: ClassSet },
+    Unwatch { resource: ResourceId },
 }
 
 /// Live record of an installed watch on the mock. One entry per successfully-`watch()`ed resource;
@@ -86,12 +79,8 @@ impl MockFsWatcher {
     pub fn new() -> Self {
         let (read_fd, write_fd) =
             UnixStream::pair().expect("MockFsWatcher: socketpair must succeed in tests");
-        read_fd
-            .set_nonblocking(true)
-            .expect("MockFsWatcher: O_NONBLOCK on read side");
-        write_fd
-            .set_nonblocking(true)
-            .expect("MockFsWatcher: O_NONBLOCK on write side");
+        read_fd.set_nonblocking(true).expect("MockFsWatcher: O_NONBLOCK on read side");
+        write_fd.set_nonblocking(true).expect("MockFsWatcher: O_NONBLOCK on write side");
         Self {
             calls: Vec::new(),
             installed: SecondaryMap::new(),
@@ -143,9 +132,7 @@ impl MockFsWatcher {
     pub fn registered_events(&self, r: ResourceId) -> Option<ClassSet> {
         for c in self.calls.iter().rev() {
             match c {
-                WatcherCall::Watch {
-                    resource, events, ..
-                } if *resource == r => {
+                WatcherCall::Watch { resource, events, .. } if *resource == r => {
                     return Some(*events);
                 }
                 WatcherCall::Unwatch { resource } if *resource == r => return None,
@@ -173,29 +160,13 @@ impl Default for MockFsWatcher {
 
 impl FsWatcher for MockFsWatcher {
     fn watch(
-        &mut self,
-        r: ResourceId,
-        path: &Path,
-        kind: ResourceKind,
-        events: ClassSet,
+        &mut self, r: ResourceId, path: &Path, kind: ResourceKind, events: ClassSet,
     ) -> Result<(), WatchFailure> {
-        self.calls.push(WatcherCall::Watch {
-            resource: r,
-            path: path.to_owned(),
-            kind,
-            events,
-        });
+        self.calls.push(WatcherCall::Watch { resource: r, path: path.to_owned(), kind, events });
         if let Some(failure) = self.next_watch_failure.take() {
             return Err(failure);
         }
-        self.installed.insert(
-            r,
-            MockEntry {
-                path: path.to_owned(),
-                kind,
-                events,
-            },
-        );
+        self.installed.insert(r, MockEntry { path: path.to_owned(), kind, events });
         Ok(())
     }
 
@@ -230,15 +201,8 @@ impl FsWatcher for MockFsWatcher {
         let fs = std::mem::take(&mut self.queued_events);
         let overflow = std::mem::take(&mut self.queued_overflow);
         let emitted = fs.len() + overflow.len();
-        out.extend(
-            fs.into_iter()
-                .map(|(resource, event)| WatcherEvent::Fs { resource, event }),
-        );
-        out.extend(
-            overflow
-                .into_iter()
-                .map(|scope| WatcherEvent::Overflow { scope }),
-        );
+        out.extend(fs.into_iter().map(|(resource, event)| WatcherEvent::Fs { resource, event }));
+        out.extend(overflow.into_iter().map(|scope| WatcherEvent::Overflow { scope }));
         Ok(emitted)
     }
 }
@@ -285,17 +249,11 @@ impl MockProber {
 
 impl Prober for MockProber {
     fn submit(&self, req: ProbeRequest) {
-        self.submitted
-            .lock()
-            .expect("MockProber poisoned")
-            .push(req);
+        self.submitted.lock().expect("MockProber poisoned").push(req);
     }
 
     fn cancel(&self, owner: ProfileId) {
-        self.cancelled
-            .lock()
-            .expect("MockProber poisoned")
-            .push(owner);
+        self.cancelled.lock().expect("MockProber poisoned").push(owner);
     }
 }
 
@@ -321,13 +279,8 @@ mod tests {
         let ids = fresh_resource_ids(1);
         let mut w = MockFsWatcher::new();
 
-        w.watch(
-            ids[0],
-            &PathBuf::from("/tmp/a"),
-            ResourceKind::Unknown,
-            ClassSet::EMPTY,
-        )
-        .expect("watch ok");
+        w.watch(ids[0], &PathBuf::from("/tmp/a"), ResourceKind::Unknown, ClassSet::EMPTY)
+            .expect("watch ok");
 
         assert_eq!(w.calls.len(), 1);
         assert!(matches!(
@@ -344,34 +297,17 @@ mod tests {
     fn watch_returns_error_when_armed() {
         let ids = fresh_resource_ids(1);
         let mut w = MockFsWatcher::new();
-        w.fail_next_watch(WatchFailure::Pressure {
-            errno: libc::EMFILE,
-        });
+        w.fail_next_watch(WatchFailure::Pressure { errno: libc::EMFILE });
 
-        let res = w.watch(
-            ids[0],
-            &PathBuf::from("/tmp/a"),
-            ResourceKind::Unknown,
-            ClassSet::EMPTY,
-        );
-        assert_eq!(
-            res,
-            Err(WatchFailure::Pressure {
-                errno: libc::EMFILE
-            })
-        );
+        let res = w.watch(ids[0], &PathBuf::from("/tmp/a"), ResourceKind::Unknown, ClassSet::EMPTY);
+        assert_eq!(res, Err(WatchFailure::Pressure { errno: libc::EMFILE }));
         // The call is still recorded; the error short-circuits installation.
         assert_eq!(w.calls.len(), 1);
         assert!(!w.installed.contains_key(ids[0]));
 
         // One-shot — the next watch succeeds.
-        w.watch(
-            ids[0],
-            &PathBuf::from("/tmp/a"),
-            ResourceKind::Unknown,
-            ClassSet::EMPTY,
-        )
-        .expect("second watch ok");
+        w.watch(ids[0], &PathBuf::from("/tmp/a"), ResourceKind::Unknown, ClassSet::EMPTY)
+            .expect("second watch ok");
         assert!(w.installed.contains_key(ids[0]));
     }
 
@@ -380,13 +316,7 @@ mod tests {
         let ids = fresh_resource_ids(1);
         let mut w = MockFsWatcher::new();
 
-        w.watch(
-            ids[0],
-            &PathBuf::from("/tmp/a"),
-            ResourceKind::Unknown,
-            ClassSet::EMPTY,
-        )
-        .unwrap();
+        w.watch(ids[0], &PathBuf::from("/tmp/a"), ResourceKind::Unknown, ClassSet::EMPTY).unwrap();
         assert!(w.installed.contains_key(ids[0]));
 
         w.unwatch(ids[0]);
@@ -442,12 +372,7 @@ mod tests {
             &out[0],
             WatcherEvent::Fs { resource, event } if *resource == ids[0] && *event == FsEvent::ContentChanged
         ));
-        assert!(matches!(
-            &out[1],
-            WatcherEvent::Overflow {
-                scope: OverflowScope::Global,
-            }
-        ));
+        assert!(matches!(&out[1], WatcherEvent::Overflow { scope: OverflowScope::Global }));
         assert!(matches!(
             &out[2],
             WatcherEvent::Overflow {
@@ -468,12 +393,7 @@ mod tests {
         let mut out: Vec<WatcherEvent> = Vec::new();
         let n = w.drain_ready(&mut out).unwrap();
         assert_eq!(n, 1);
-        assert!(matches!(
-            &out[0],
-            WatcherEvent::Overflow {
-                scope: OverflowScope::Global,
-            }
-        ));
+        assert!(matches!(&out[0], WatcherEvent::Overflow { scope: OverflowScope::Global }));
     }
 
     /// `as_fd()` is the edge-triggered readiness contract the bin's mio reactor relies on: the fd
@@ -525,13 +445,7 @@ mod tests {
         let ids = fresh_resource_ids(1);
         let mut w = MockFsWatcher::new();
 
-        w.watch(
-            ids[0],
-            &PathBuf::from("/tmp/a"),
-            ResourceKind::File,
-            ClassSet::CONTENT,
-        )
-        .unwrap();
+        w.watch(ids[0], &PathBuf::from("/tmp/a"), ResourceKind::File, ClassSet::CONTENT).unwrap();
         assert_eq!(w.registered_events(ids[0]), Some(ClassSet::CONTENT));
 
         w.watch(
@@ -553,13 +467,7 @@ mod tests {
         let ids = fresh_resource_ids(1);
         let mut w = MockFsWatcher::new();
 
-        w.watch(
-            ids[0],
-            &PathBuf::from("/tmp/a"),
-            ResourceKind::Dir,
-            ClassSet::STRUCTURE,
-        )
-        .unwrap();
+        w.watch(ids[0], &PathBuf::from("/tmp/a"), ResourceKind::Dir, ClassSet::STRUCTURE).unwrap();
         w.unwatch(ids[0]);
         assert_eq!(w.registered_events(ids[0]), None);
     }
@@ -569,13 +477,7 @@ mod tests {
         let ids = fresh_resource_ids(2);
         let mut w = MockFsWatcher::new();
 
-        w.watch(
-            ids[0],
-            &PathBuf::from("/tmp/a"),
-            ResourceKind::Unknown,
-            ClassSet::EMPTY,
-        )
-        .unwrap();
+        w.watch(ids[0], &PathBuf::from("/tmp/a"), ResourceKind::Unknown, ClassSet::EMPTY).unwrap();
         // ids[1] was never watched; registered_events should return None.
         assert_eq!(w.registered_events(ids[1]), None);
     }
@@ -588,16 +490,8 @@ mod tests {
         let ids = fresh_resource_ids(1);
         let mut w = MockFsWatcher::new();
 
-        w.watch(
-            ids[0],
-            &PathBuf::from("/tmp/a"),
-            ResourceKind::File,
-            ClassSet::CONTENT,
-        )
-        .unwrap();
-        w.fail_next_watch(WatchFailure::Pressure {
-            errno: libc::EMFILE,
-        });
+        w.watch(ids[0], &PathBuf::from("/tmp/a"), ResourceKind::File, ClassSet::CONTENT).unwrap();
+        w.fail_next_watch(WatchFailure::Pressure { errno: libc::EMFILE });
         let _ = w.watch(
             ids[0],
             &PathBuf::from("/tmp/a"),
@@ -605,10 +499,7 @@ mod tests {
             ClassSet::CONTENT | ClassSet::METADATA,
         );
         // Helper reads the call log — sees the failed Watch attempt with the widened mask.
-        assert_eq!(
-            w.registered_events(ids[0]),
-            Some(ClassSet::CONTENT | ClassSet::METADATA)
-        );
+        assert_eq!(w.registered_events(ids[0]), Some(ClassSet::CONTENT | ClassSet::METADATA));
     }
 
     // ---------------------------------------------------------------- MockProber

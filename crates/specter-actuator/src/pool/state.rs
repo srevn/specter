@@ -257,11 +257,8 @@ pub(crate) struct ActuatorState {
 
 impl ActuatorState {
     pub fn new(
-        concurrency: NonZeroUsize,
-        env_snapshot: Arc<EnvSnapshot>,
-        temp_dir: Arc<Path>,
-        actuator_pid: u32,
-        shutdown_grace: Duration,
+        concurrency: NonZeroUsize, env_snapshot: Arc<EnvSnapshot>, temp_dir: Arc<Path>,
+        actuator_pid: u32, shutdown_grace: Duration,
     ) -> Self {
         Self {
             slots: BTreeMap::new(),
@@ -282,10 +279,7 @@ impl ActuatorState {
     /// and `plan_continue` (an in-flight plan deferred between steps) keep the slot in "plan in
     /// flight" state from the coalesce point of view.
     pub fn handle_submit(
-        &mut self,
-        effect: Effect,
-        spawner: &dyn Spawner,
-        reap_tx: &Sender<EffectCompletion>,
+        &mut self, effect: Effect, spawner: &dyn Spawner, reap_tx: &Sender<EffectCompletion>,
         engine_in: &dyn EffectCompleteSender,
     ) {
         let key = effect.key();
@@ -309,11 +303,8 @@ impl ActuatorState {
     /// The two-step shape (`reap_pump` then `pump`) is so the on-stack reap can re-acquire its
     /// just-freed permit before `pump` runs (plan-atomicity under contention).
     pub fn handle_reap(
-        &mut self,
-        completion: EffectCompletion,
-        engine_in: &dyn EffectCompleteSender,
-        spawner: &dyn Spawner,
-        reap_tx: &Sender<EffectCompletion>,
+        &mut self, completion: EffectCompletion, engine_in: &dyn EffectCompleteSender,
+        spawner: &dyn Spawner, reap_tx: &Sender<EffectCompletion>,
     ) {
         self.reap_pump(completion, engine_in, spawner, reap_tx);
         self.pump(spawner, reap_tx, engine_in);
@@ -358,11 +349,8 @@ impl ActuatorState {
         // slots in the same scope would alias. The collected `Vec` is bounded by the number of
         // matching slots (≤ concurrency), so the heap allocation is small and rare. `DedupKey` is
         // `Copy`, so the collect is a memcpy of slotmap-keyed handles, not an unbounded clone.
-        let keys: Vec<DedupKey> = self
-            .slots
-            .keys()
-            .filter_map(|k| (k.profile() == profile).then_some(*k))
-            .collect();
+        let keys: Vec<DedupKey> =
+            self.slots.keys().filter_map(|k| (k.profile() == profile).then_some(*k)).collect();
         if keys.is_empty() {
             return;
         }
@@ -405,9 +393,7 @@ impl ActuatorState {
     /// No `spawner` / `reap_tx` parameter: the Drop branch never spawns, so the shutdown caller
     /// threads neither.
     pub fn handle_reap_drop(
-        &mut self,
-        completion: EffectCompletion,
-        engine_in: &dyn EffectCompleteSender,
+        &mut self, completion: EffectCompletion, engine_in: &dyn EffectCompleteSender,
     ) {
         tracing::trace!(?completion.key, ?completion.outcome, "reap drop");
         // `key` is `Copy` (slotmap handle); read it off the envelope for the slot lookup, then thread
@@ -449,11 +435,8 @@ impl ActuatorState {
     /// accounting without touching the per-Sub gate (which a live plan for the same Sub may still
     /// hold at a different key) or the tmp file.
     fn reap_pump(
-        &mut self,
-        completion: EffectCompletion,
-        engine_in: &dyn EffectCompleteSender,
-        spawner: &dyn Spawner,
-        reap_tx: &Sender<EffectCompletion>,
+        &mut self, completion: EffectCompletion, engine_in: &dyn EffectCompleteSender,
+        spawner: &dyn Spawner, reap_tx: &Sender<EffectCompletion>,
     ) {
         tracing::trace!(?completion.key, ?completion.outcome, "reap");
         // `key` is `Copy`; read off the envelope for the slot lookup and thread the envelope
@@ -466,12 +449,7 @@ impl ActuatorState {
             self.terminate_stale(completion, engine_in);
             return;
         };
-        let RunningJob {
-            effect,
-            cursor,
-            diff_tmp,
-            ..
-        } = job;
+        let RunningJob { effect, cursor, diff_tmp, .. } = job;
         self.advance_or_terminate(
             completion, effect, diff_tmp, cursor, spawner, reap_tx, engine_in,
         );
@@ -515,14 +493,9 @@ impl ActuatorState {
     /// → Failed` synth loop) mutate `completion.outcome` in place — the envelope's identity (`(sub,
     /// key)`) is preserved, only the carried outcome shifts.
     fn advance_or_terminate(
-        &mut self,
-        mut completion: EffectCompletion,
-        effect: Arc<Effect>,
-        diff_tmp: Option<Arc<DiffTmpFile>>,
-        mut cursor: u32,
-        spawner: &dyn Spawner,
-        reap_tx: &Sender<EffectCompletion>,
-        engine_in: &dyn EffectCompleteSender,
+        &mut self, mut completion: EffectCompletion, effect: Arc<Effect>,
+        diff_tmp: Option<Arc<DiffTmpFile>>, mut cursor: u32, spawner: &dyn Spawner,
+        reap_tx: &Sender<EffectCompletion>, engine_in: &dyn EffectCompleteSender,
     ) {
         loop {
             let op = &effect.program.ops()[cursor as usize];
@@ -563,11 +536,7 @@ impl ActuatorState {
                             // across the permit wait, and the next step's spawn clones it back out.
                             self.queue_plan_continue(
                                 completion.key,
-                                PlanContinuation {
-                                    effect,
-                                    cursor: next,
-                                    diff_tmp,
-                                },
+                                PlanContinuation { effect, cursor: next, diff_tmp },
                             );
                             return;
                         }
@@ -634,9 +603,7 @@ impl ActuatorState {
     /// `running_subs.remove` here be total — guarded by an unconditional `debug_assert!(was_present)`
     /// — pinning the bump/remove pairing under the set-membership shape.
     fn terminate_plan(
-        &mut self,
-        completion: EffectCompletion,
-        policy: ReapPolicy,
+        &mut self, completion: EffectCompletion, policy: ReapPolicy,
         engine_in: &dyn EffectCompleteSender,
     ) {
         // Snapshot the `Copy` identity scalars before the envelope moves into the wire `send`. Both
@@ -708,9 +675,7 @@ impl ActuatorState {
     /// `handle_submit`, which is on the same single controller thread; the stale-completion path is
     /// a no-op against that arm.
     fn terminate_stale(
-        &mut self,
-        completion: EffectCompletion,
-        engine_in: &dyn EffectCompleteSender,
+        &mut self, completion: EffectCompletion, engine_in: &dyn EffectCompleteSender,
     ) {
         // `key` is `Copy`; snapshot before the envelope moves into the wire send so the slot-remove
         // below stays addressable.
@@ -737,9 +702,7 @@ impl ActuatorState {
     /// plan-continue short-circuits the loop the same way a permit-blocked fresh plan does, since
     /// both contend for the same global semaphore.
     pub fn pump(
-        &mut self,
-        spawner: &dyn Spawner,
-        reap_tx: &Sender<EffectCompletion>,
+        &mut self, spawner: &dyn Spawner, reap_tx: &Sender<EffectCompletion>,
         engine_in: &dyn EffectCompleteSender,
     ) {
         debug_assert!(
@@ -762,10 +725,8 @@ impl ActuatorState {
                     break;
                 };
                 slot.in_ready_queue = false;
-                let cont = slot
-                    .plan_continue
-                    .take()
-                    .expect("plan_continue checked Some directly above");
+                let cont =
+                    slot.plan_continue.take().expect("plan_continue checked Some directly above");
                 self.spawn_continuation(key, sub, cont, permit, spawner, reap_tx, engine_in);
                 continue;
             }
@@ -789,15 +750,7 @@ impl ActuatorState {
             let effect = slot.pending.take().expect(
                 "popped slot carries pending (plan_continue branch handled the alternative)",
             );
-            self.start_plan(
-                key,
-                sub,
-                Arc::new(effect),
-                permit,
-                spawner,
-                reap_tx,
-                engine_in,
-            );
+            self.start_plan(key, sub, Arc::new(effect), permit, spawner, reap_tx, engine_in);
         }
         // Drain (don't consume) so the deque retains its capacity for the next pump. The flag is
         // already true (we set it when we pushed and only cleared it on successful spawn). Re-stamp
@@ -834,13 +787,8 @@ impl ActuatorState {
     /// keep the Arc alive past the call for no reason.
     #[allow(clippy::needless_pass_by_value)]
     fn start_plan(
-        &mut self,
-        key: DedupKey,
-        sub: SubId,
-        effect: Arc<Effect>,
-        permit: Permit,
-        spawner: &dyn Spawner,
-        reap_tx: &Sender<EffectCompletion>,
+        &mut self, key: DedupKey, sub: SubId, effect: Arc<Effect>, permit: Permit,
+        spawner: &dyn Spawner, reap_tx: &Sender<EffectCompletion>,
         engine_in: &dyn EffectCompleteSender,
     ) {
         // Materialise the diff tmp file before the first instruction's spawn so the resolver can
@@ -921,20 +869,11 @@ impl ActuatorState {
     /// plan terminus. Either way the per-Sub gate (held since the original `start_plan`) is released
     /// at terminate, and any subsequent advance reuses the inherited tmp path.
     fn spawn_continuation(
-        &mut self,
-        key: DedupKey,
-        sub: SubId,
-        cont: PlanContinuation,
-        permit: Permit,
-        spawner: &dyn Spawner,
-        reap_tx: &Sender<EffectCompletion>,
+        &mut self, key: DedupKey, sub: SubId, cont: PlanContinuation, permit: Permit,
+        spawner: &dyn Spawner, reap_tx: &Sender<EffectCompletion>,
         engine_in: &dyn EffectCompleteSender,
     ) {
-        let PlanContinuation {
-            effect,
-            cursor,
-            diff_tmp,
-        } = cont;
+        let PlanContinuation { effect, cursor, diff_tmp } = cont;
         match self.spawn_step_with_permit(
             &key,
             sub,
@@ -986,13 +925,8 @@ impl ActuatorState {
     /// cannot defer (its permit is already acquired), so its return type is the tighter `Result<(),
     /// SpawnFailureCause>`.
     fn try_spawn_step(
-        &mut self,
-        key: &DedupKey,
-        sub: SubId,
-        effect: &Arc<Effect>,
-        cursor: u32,
-        diff_tmp: Option<&Arc<DiffTmpFile>>,
-        spawner: &dyn Spawner,
+        &mut self, key: &DedupKey, sub: SubId, effect: &Arc<Effect>, cursor: u32,
+        diff_tmp: Option<&Arc<DiffTmpFile>>, spawner: &dyn Spawner,
         reap_tx: &Sender<EffectCompletion>,
     ) -> Result<(), SpawnError> {
         let Some(permit) = self.permits.try_acquire() else {
@@ -1021,14 +955,8 @@ impl ActuatorState {
     /// pins "the wall-clock instant immediately before the kernel runs the user's command," which
     /// for a pipe is the instant all stages start.
     fn spawn_step_with_permit(
-        &mut self,
-        key: &DedupKey,
-        sub: SubId,
-        effect: &Arc<Effect>,
-        cursor: u32,
-        diff_tmp: Option<&Arc<DiffTmpFile>>,
-        permit: Permit,
-        spawner: &dyn Spawner,
+        &mut self, key: &DedupKey, sub: SubId, effect: &Arc<Effect>, cursor: u32,
+        diff_tmp: Option<&Arc<DiffTmpFile>>, permit: Permit, spawner: &dyn Spawner,
         reap_tx: &Sender<EffectCompletion>,
     ) -> Result<(), SpawnFailureCause> {
         let now = std::time::SystemTime::now();
@@ -1083,17 +1011,9 @@ impl ActuatorState {
     /// error, surfaced via `expect` rather than silently masked — silent masking would otherwise
     /// leak the signaler and leave the child unreachable from shutdown signaling.
     fn spawn_exec_with_permit(
-        &mut self,
-        key: &DedupKey,
-        sub: SubId,
-        effect: &Arc<Effect>,
-        cursor: u32,
-        exec: &ExecAction,
-        now: std::time::SystemTime,
-        cwd: &Path,
-        diff_tmp: Option<&Arc<DiffTmpFile>>,
-        permit: Permit,
-        spawner: &dyn Spawner,
+        &mut self, key: &DedupKey, sub: SubId, effect: &Arc<Effect>, cursor: u32,
+        exec: &ExecAction, now: std::time::SystemTime, cwd: &Path,
+        diff_tmp: Option<&Arc<DiffTmpFile>>, permit: Permit, spawner: &dyn Spawner,
         reap_tx: &Sender<EffectCompletion>,
     ) -> Result<(), SpawnFailureCause> {
         let diff_path: Option<&Path> = diff_tmp.map(|h| h.path());
@@ -1118,11 +1038,7 @@ impl ActuatorState {
                 return Err(SpawnFailureCause::OsSpawn);
             }
         };
-        let crate::spawner::SpawnHandles {
-            pid,
-            waiter,
-            signaler,
-        } = handles;
+        let crate::spawner::SpawnHandles { pid, waiter, signaler } = handles;
 
         // The signaler Arc has up to three co-owners: the installed [`RunningJob::signaler`]
         // (consumed by shutdown / recovery), the optional per-step timer thread (drops on natural
@@ -1132,9 +1048,8 @@ impl ActuatorState {
         // of whether either sibling spawn succeeds. The timer clone is conditional (only paid when
         // `exec.timeout().is_some()`) and pairs the cloned Arc with its deadline so the two can't
         // drift apart.
-        let timer_arm: Option<(Duration, Arc<dyn ChildSignaler>)> = exec
-            .timeout()
-            .map(|deadline| (deadline, Arc::clone(&signaler)));
+        let timer_arm: Option<(Duration, Arc<dyn ChildSignaler>)> =
+            exec.timeout().map(|deadline| (deadline, Arc::clone(&signaler)));
         let signaler_for_wait = Arc::clone(&signaler);
         let slot = self
             .slots
@@ -1167,11 +1082,7 @@ impl ActuatorState {
                 deadline,
                 self.shutdown_grace,
                 timer_signaler,
-                timer::TimerContext::Exec {
-                    key: *key,
-                    cursor,
-                    pid,
-                },
+                timer::TimerContext::Exec { key: *key, cursor, pid },
             );
         }
 
@@ -1210,17 +1121,9 @@ impl ActuatorState {
     /// already rolled back any partially-spawned stages — the caller just returns
     /// `SpawnError::Failed`.
     fn spawn_pipe_with_permit(
-        &mut self,
-        key: &DedupKey,
-        sub: SubId,
-        effect: &Arc<Effect>,
-        cursor: u32,
-        stages: &[ExecAction],
-        now: std::time::SystemTime,
-        cwd: &Path,
-        diff_tmp: Option<&Arc<DiffTmpFile>>,
-        permit: Permit,
-        spawner: &dyn Spawner,
+        &mut self, key: &DedupKey, sub: SubId, effect: &Arc<Effect>, cursor: u32,
+        stages: &[ExecAction], now: std::time::SystemTime, cwd: &Path,
+        diff_tmp: Option<&Arc<DiffTmpFile>>, permit: Permit, spawner: &dyn Spawner,
         reap_tx: &Sender<EffectCompletion>,
     ) -> Result<(), SpawnFailureCause> {
         let diff_path: Option<&Path> = diff_tmp.map(|h| h.path());
@@ -1243,10 +1146,7 @@ impl ActuatorState {
         };
         let stage_specs: Vec<StageSpec<'_>> = resolved
             .iter()
-            .map(|(cmd, env)| StageSpec {
-                argv: cmd.argv.as_slice(),
-                env: env.as_slice(),
-            })
+            .map(|(cmd, env)| StageSpec { argv: cmd.argv.as_slice(), env: env.as_slice() })
             .collect();
 
         let handles = match spawner.spawn_pipe(&stage_specs, cwd) {
@@ -1319,23 +1219,12 @@ impl ActuatorState {
                     deadline,
                     self.shutdown_grace,
                     Arc::clone(sig),
-                    timer::TimerContext::PipeStage {
-                        key: *key,
-                        cursor,
-                        stage,
-                        pid: last_pid,
-                    },
+                    timer::TimerContext::PipeStage { key: *key, cursor, stage, pid: last_pid },
                 );
             }
         }
 
-        tracing::debug!(
-            ?key,
-            cursor,
-            last_pid,
-            stages = stages.len(),
-            "spawned pipe"
-        );
+        tracing::debug!(?key, cursor, last_pid, stages = stages.len(), "spawned pipe");
         Ok(())
     }
 
@@ -1362,15 +1251,8 @@ impl ActuatorState {
     /// is single-threaded and the caller has just installed `slot.running`.
     #[allow(clippy::needless_pass_by_value)]
     fn spawn_wait_thread_after_install(
-        &mut self,
-        key: &DedupKey,
-        sub: SubId,
-        pid: u32,
-        cursor: u32,
-        waiter: Box<dyn ChildWaiter>,
-        signaler: Arc<dyn ChildSignaler>,
-        permit: Permit,
-        reap_tx: &Sender<EffectCompletion>,
+        &mut self, key: &DedupKey, sub: SubId, pid: u32, cursor: u32, waiter: Box<dyn ChildWaiter>,
+        signaler: Arc<dyn ChildSignaler>, permit: Permit, reap_tx: &Sender<EffectCompletion>,
     ) -> Result<(), SpawnFailureCause> {
         let reap_tx_for_thread = reap_tx.clone();
         let wait_key = *key;
@@ -1393,10 +1275,7 @@ impl ActuatorState {
                 .slots
                 .get_mut(key)
                 .expect("slot installed by this call; controller is single-threaded");
-            let job = slot
-                .running
-                .take()
-                .expect("slot.running installed unconditionally above");
+            let job = slot.running.take().expect("slot.running installed unconditionally above");
             recover_orphan_after_wait_thread_failure(job);
             return Err(SpawnFailureCause::WaitThread);
         }
@@ -1470,12 +1349,8 @@ fn recover_orphan_after_wait_thread_failure(job: RunningJob) {
 /// this side of the channel.
 #[allow(clippy::needless_pass_by_value)] // closure-spawned: arguments owned for the thread
 fn wait_loop(
-    waiter: Box<dyn ChildWaiter>,
-    signaler: Arc<dyn ChildSignaler>,
-    key: DedupKey,
-    sub: SubId,
-    permit: Permit,
-    reap_tx: Sender<EffectCompletion>,
+    waiter: Box<dyn ChildWaiter>, signaler: Arc<dyn ChildSignaler>, key: DedupKey, sub: SubId,
+    permit: Permit, reap_tx: Sender<EffectCompletion>,
 ) {
     let outcome = match std::panic::catch_unwind(AssertUnwindSafe(|| waiter.wait())) {
         Ok(Ok(o)) => o,
@@ -1548,9 +1423,7 @@ mod tests {
     struct TestEngineIn(Sender<Input>);
     impl EffectCompleteSender for TestEngineIn {
         fn send(&self, completion: EffectCompletion) -> Result<(), SendError> {
-            self.0
-                .send(Input::EffectComplete(completion))
-                .map_err(|_| SendError::Disconnected)
+            self.0.send(Input::EffectComplete(completion)).map_err(|_| SendError::Disconnected)
         }
     }
 
@@ -1622,10 +1495,7 @@ mod tests {
     }
 
     fn dummy_effect_with_steps(
-        key: DedupKey,
-        target: ResourceId,
-        corr: u64,
-        steps: usize,
+        key: DedupKey, target: ResourceId, corr: u64, steps: usize,
     ) -> Effect {
         // Every caller passes a `perfile_key(N, N, N)` whose `resource` equals the `target` (both
         // `unique_resource_id(N)`), so the derived `key()` reproduces the original `perfile_key`.
@@ -1641,12 +1511,7 @@ mod tests {
             anchor_kind: ResourceKind::Dir,
             exclude: Arc::from(Vec::<CompactString>::new()),
         };
-        Effect::per_file(
-            common,
-            target,
-            CompactString::new(""),
-            Arc::new(Diff::default()),
-        )
+        Effect::per_file(common, target, CompactString::new(""), Arc::new(Diff::default()))
     }
 
     /// No-op Spawner stub for tests that go through `reap_pump` on paths where advance is not
@@ -1657,17 +1522,12 @@ mod tests {
     struct UnusedSpawner;
     impl Spawner for UnusedSpawner {
         fn spawn(
-            &self,
-            _argv: &[String],
-            _env: &[EnvVar<'_>],
-            _cwd: &Path,
+            &self, _argv: &[String], _env: &[EnvVar<'_>], _cwd: &Path,
         ) -> io::Result<SpawnHandles> {
             unreachable!("UnusedSpawner used by a test that didn't expect spawn()")
         }
         fn spawn_pipe(
-            &self,
-            _stages: &[crate::spawner::StageSpec<'_>],
-            _cwd: &Path,
+            &self, _stages: &[crate::spawner::StageSpec<'_>], _cwd: &Path,
         ) -> io::Result<crate::spawner::PipeSpawnHandles> {
             unreachable!("UnusedSpawner used by a test that didn't expect spawn_pipe()")
         }
@@ -1712,10 +1572,7 @@ mod tests {
     }
     impl Spawner for ScriptedSpawner {
         fn spawn(
-            &self,
-            _argv: &[String],
-            _env: &[EnvVar<'_>],
-            _cwd: &Path,
+            &self, _argv: &[String], _env: &[EnvVar<'_>], _cwd: &Path,
         ) -> io::Result<SpawnHandles> {
             // Copy out of the lock before checking — the MutexGuard's significant Drop would
             // otherwise live across the if-let.
@@ -1730,17 +1587,12 @@ mod tests {
             let dead = crate::lifecycle::DeadFlag::new();
             Ok(SpawnHandles {
                 pid,
-                waiter: Box::new(ScriptedWaiter {
-                    rx,
-                    dead: dead.clone(),
-                }),
+                waiter: Box::new(ScriptedWaiter { rx, dead: dead.clone() }),
                 signaler: Arc::new(ScriptedSignaler { dead }),
             })
         }
         fn spawn_pipe(
-            &self,
-            _stages: &[crate::spawner::StageSpec<'_>],
-            _cwd: &Path,
+            &self, _stages: &[crate::spawner::StageSpec<'_>], _cwd: &Path,
         ) -> io::Result<crate::spawner::PipeSpawnHandles> {
             // The multi-step pure-state tests in this module don't exercise pipe dispatch — they
             // use single-Exec programs only. Treat as a regression catcher: if a future test
@@ -1832,21 +1684,13 @@ mod tests {
     /// Build a stub `RunningJob` that mimics a freshly-spawned step of a single-step plan. Counted
     /// signaler shared so tests can assert no SIGTERM/SIGKILL during pure-state teardown.
     fn stub_running_job(effect: Arc<Effect>, signaler: Arc<CountingSignaler>) -> RunningJob {
-        RunningJob {
-            pid: 99_999,
-            signaler,
-            effect,
-            cursor: 0,
-            diff_tmp: None,
-        }
+        RunningJob { pid: 99_999, signaler, effect, cursor: 0, diff_tmp: None }
     }
 
     /// Channel pair sized for the controller's reap channel; rarely drained in these tests since
     /// most paths don't actually spawn.
-    fn reap_channel() -> (
-        Sender<EffectCompletion>,
-        crossbeam::channel::Receiver<EffectCompletion>,
-    ) {
+    fn reap_channel() -> (Sender<EffectCompletion>, crossbeam::channel::Receiver<EffectCompletion>)
+    {
         crossbeam::channel::bounded(64)
     }
 
@@ -1903,9 +1747,8 @@ mod tests {
 
         let key = perfile_key(60, 60, 60);
         let sub = unique_sub_id(60);
-        let signaler: Arc<dyn ChildSignaler> = Arc::new(ScriptedSignaler {
-            dead: crate::lifecycle::DeadFlag::new(),
-        });
+        let signaler: Arc<dyn ChildSignaler> =
+            Arc::new(ScriptedSignaler { dead: crate::lifecycle::DeadFlag::new() });
         let permits = crate::permits::Permits::new(nz(1));
         let permit = permits.try_acquire().expect("permit available");
         let (reap_tx, _reap_rx) = reap_channel();
@@ -1940,11 +1783,7 @@ mod tests {
         let spawner = UnusedSpawner;
 
         state.reap_pump(
-            EffectCompletion {
-                key,
-                sub,
-                outcome: EffectOutcome::Failed(Termination::Internal),
-            },
+            EffectCompletion { key, sub, outcome: EffectOutcome::Failed(Termination::Internal) },
             &engine_in,
             &spawner,
             &reap_tx,
@@ -1960,10 +1799,7 @@ mod tests {
             Ok(Input::EffectComplete(c)) => {
                 assert_eq!(c.sub, sub);
                 assert_eq!(c.key, key);
-                assert!(matches!(
-                    c.outcome,
-                    EffectOutcome::Failed(Termination::Internal)
-                ));
+                assert!(matches!(c.outcome, EffectOutcome::Failed(Termination::Internal)));
             }
             other => panic!("expected EffectComplete::Failed; got {other:?}"),
         }
@@ -2012,10 +1848,7 @@ mod tests {
             Ok(Input::EffectComplete(c)) => {
                 assert_eq!(c.sub, sub);
                 assert_eq!(c.key, stale_key);
-                assert!(matches!(
-                    c.outcome,
-                    EffectOutcome::Failed(Termination::Internal)
-                ));
+                assert!(matches!(c.outcome, EffectOutcome::Failed(Termination::Internal)));
             }
             other => panic!("expected EffectComplete::Failed; got {other:?}"),
         }
@@ -2044,11 +1877,7 @@ mod tests {
         let spawner = UnusedSpawner;
 
         state.reap_pump(
-            EffectCompletion {
-                key,
-                sub,
-                outcome: EffectOutcome::Failed(Termination::Internal),
-            },
+            EffectCompletion { key, sub, outcome: EffectOutcome::Failed(Termination::Internal) },
             &engine_in,
             &spawner,
             &reap_tx,
@@ -2056,16 +1885,8 @@ mod tests {
 
         assert!(state.slots.is_empty(), "slot removed");
         assert!(state.running_subs.is_empty(), "per-Sub gate cleared");
-        assert_eq!(
-            signaler.term.load(Ordering::SeqCst),
-            0,
-            "no SIGTERM during teardown",
-        );
-        assert_eq!(
-            signaler.kill.load(Ordering::SeqCst),
-            0,
-            "no SIGKILL during teardown",
-        );
+        assert_eq!(signaler.term.load(Ordering::SeqCst), 0, "no SIGTERM during teardown");
+        assert_eq!(signaler.kill.load(Ordering::SeqCst), 0, "no SIGKILL during teardown");
         let _ = rx.try_recv().expect("EffectComplete emitted");
     }
 
@@ -2092,11 +1913,7 @@ mod tests {
         let spawner = UnusedSpawner;
 
         state.reap_pump(
-            EffectCompletion {
-                key,
-                sub,
-                outcome: EffectOutcome::Ok,
-            },
+            EffectCompletion { key, sub, outcome: EffectOutcome::Ok },
             &engine_in,
             &spawner,
             &reap_tx,
@@ -2104,10 +1921,7 @@ mod tests {
 
         let slot_after = state.slots.get(&key).expect("slot preserved with pending");
         assert!(slot_after.running.is_none(), "running cleared");
-        assert!(
-            slot_after.pending.is_some(),
-            "pending preserved for re-spawn"
-        );
+        assert!(slot_after.pending.is_some(), "pending preserved for re-spawn");
         assert!(slot_after.in_ready_queue);
         assert_eq!(
             state.ready_queue.iter().collect::<Vec<_>>(),
@@ -2138,11 +1952,7 @@ mod tests {
         let engine_in = TestEngineIn(tx);
 
         state.handle_reap_drop(
-            EffectCompletion {
-                key,
-                sub,
-                outcome: EffectOutcome::Failed(Termination::Internal),
-            },
+            EffectCompletion { key, sub, outcome: EffectOutcome::Failed(Termination::Internal) },
             &engine_in,
         );
 
@@ -2183,21 +1993,14 @@ mod tests {
         let spawner = ScriptedSpawner::new();
 
         state.reap_pump(
-            EffectCompletion {
-                key,
-                sub,
-                outcome: EffectOutcome::Ok,
-            },
+            EffectCompletion { key, sub, outcome: EffectOutcome::Ok },
             &engine_in,
             &spawner,
             &reap_tx,
         );
 
         assert_eq!(spawner.spawned().len(), 1, "step 1 was spawned");
-        let slot_after = state
-            .slots
-            .get(&key)
-            .expect("slot preserved during advance");
+        let slot_after = state.slots.get(&key).expect("slot preserved during advance");
         let running = slot_after.running.as_ref().expect("running reinstalled");
         assert_eq!(running.cursor, 1, "cursor advanced");
         assert!(
@@ -2237,11 +2040,7 @@ mod tests {
         let spawner = UnusedSpawner;
 
         state.reap_pump(
-            EffectCompletion {
-                key,
-                sub,
-                outcome: EffectOutcome::Failed(Termination::Exit(2)),
-            },
+            EffectCompletion { key, sub, outcome: EffectOutcome::Failed(Termination::Exit(2)) },
             &engine_in,
             &spawner,
             &reap_tx,
@@ -2250,10 +2049,9 @@ mod tests {
         assert!(state.slots.is_empty(), "slot removed on terminal");
         assert!(state.running_subs.is_empty(), "per-Sub gate cleared");
         match rx.try_recv() {
-            Ok(Input::EffectComplete(c)) => assert!(matches!(
-                c.outcome,
-                EffectOutcome::Failed(Termination::Exit(2))
-            )),
+            Ok(Input::EffectComplete(c)) => {
+                assert!(matches!(c.outcome, EffectOutcome::Failed(Termination::Exit(2))));
+            }
             other => panic!("expected EffectComplete::Failed; got {other:?}"),
         }
     }
@@ -2286,11 +2084,7 @@ mod tests {
         let spawner = UnusedSpawner;
 
         state.reap_pump(
-            EffectCompletion {
-                key,
-                sub,
-                outcome: EffectOutcome::Ok,
-            },
+            EffectCompletion { key, sub, outcome: EffectOutcome::Ok },
             &engine_in,
             &spawner,
             &reap_tx,
@@ -2313,10 +2107,7 @@ mod tests {
     fn step_ok_not_last_with_no_permit_defers_via_plan_continue() {
         // cap=1 with another job already holding the only permit.
         let mut state = test_state(nz(1));
-        let _hold = state
-            .permits
-            .try_acquire()
-            .expect("acquire hogs the only permit");
+        let _hold = state.permits.try_acquire().expect("acquire hogs the only permit");
         let key = perfile_key(13, 13, 13);
         let sub = unique_sub_id(13);
         let res = unique_resource_id(13);
@@ -2340,11 +2131,7 @@ mod tests {
         let spawner = UnusedSpawner;
 
         state.reap_pump(
-            EffectCompletion {
-                key,
-                sub,
-                outcome: EffectOutcome::Ok,
-            },
+            EffectCompletion { key, sub, outcome: EffectOutcome::Ok },
             &engine_in,
             &spawner,
             &reap_tx,
@@ -2352,17 +2139,11 @@ mod tests {
 
         let slot_after = state.slots.get(&key).expect("slot preserved");
         assert!(slot_after.running.is_none(), "running was taken");
-        let cont = slot_after
-            .plan_continue
-            .as_ref()
-            .expect("plan_continue installed");
+        let cont = slot_after.plan_continue.as_ref().expect("plan_continue installed");
         assert_eq!(cont.cursor, 1, "deferred at instruction 1");
         assert!(slot_after.in_ready_queue);
         assert_eq!(state.ready_queue.iter().collect::<Vec<_>>(), vec![&key]);
-        assert!(
-            state.running_subs.contains(&sub),
-            "per-Sub gate hold preserved across deferral",
-        );
+        assert!(state.running_subs.contains(&sub), "per-Sub gate hold preserved across deferral");
         assert!(rx.try_recv().is_err(), "no EffectComplete on deferral");
     }
 
@@ -2398,17 +2179,10 @@ mod tests {
         state.handle_submit(new_effect, &spawner, &reap_tx, &engine_in);
 
         let slot_after = state.slots.get(&key).expect("slot preserved");
-        let cont = slot_after
-            .plan_continue
-            .as_ref()
-            .expect("plan_continue NOT touched by submit");
+        let cont = slot_after.plan_continue.as_ref().expect("plan_continue NOT touched by submit");
         assert_eq!(cont.cursor, 1);
         let pending = slot_after.pending.as_ref().expect("pending set");
-        assert_eq!(
-            pending.correlation,
-            CorrelationId::from(99),
-            "pending replaced by new submit",
-        );
+        assert_eq!(pending.correlation, CorrelationId::from(99), "pending replaced by new submit");
     }
 
     /// Drop policy mid-plan: terminal arm runs immediately with the reaped outcome; advance is
@@ -2437,11 +2211,7 @@ mod tests {
         let engine_in = TestEngineIn(tx);
 
         state.handle_reap_drop(
-            EffectCompletion {
-                key,
-                sub,
-                outcome: EffectOutcome::Ok,
-            },
+            EffectCompletion { key, sub, outcome: EffectOutcome::Ok },
             &engine_in,
         );
 
@@ -2484,11 +2254,7 @@ mod tests {
         spawner.inject_spawn_error(io::ErrorKind::NotFound);
 
         state.reap_pump(
-            EffectCompletion {
-                key,
-                sub,
-                outcome: EffectOutcome::Ok,
-            },
+            EffectCompletion { key, sub, outcome: EffectOutcome::Ok },
             &engine_in,
             &spawner,
             &reap_tx,
@@ -2497,10 +2263,9 @@ mod tests {
         assert!(state.slots.is_empty(), "slot removed after synth Failed");
         assert!(state.running_subs.is_empty(), "per-Sub gate cleared");
         match rx.try_recv() {
-            Ok(Input::EffectComplete(c)) => assert!(matches!(
-                c.outcome,
-                EffectOutcome::Failed(Termination::Internal)
-            )),
+            Ok(Input::EffectComplete(c)) => {
+                assert!(matches!(c.outcome, EffectOutcome::Failed(Termination::Internal)));
+            }
             other => panic!("expected EffectComplete::Failed; got {other:?}"),
         }
     }
@@ -2527,23 +2292,14 @@ mod tests {
         // (untouched — different profile)
         let p_sub = unique_sub_id(100);
         let p_profile = unique_profile_id(100);
-        let p_k1 = DedupKey::PerFile {
-            sub: p_sub,
-            profile: p_profile,
-            resource: unique_resource_id(1),
-        };
-        let p_k2 = DedupKey::PerFile {
-            sub: p_sub,
-            profile: p_profile,
-            resource: unique_resource_id(2),
-        };
+        let p_k1 =
+            DedupKey::PerFile { sub: p_sub, profile: p_profile, resource: unique_resource_id(1) };
+        let p_k2 =
+            DedupKey::PerFile { sub: p_sub, profile: p_profile, resource: unique_resource_id(2) };
         let q_sub = unique_sub_id(200);
         let q_profile = unique_profile_id(200);
-        let q_key = DedupKey::PerFile {
-            sub: q_sub,
-            profile: q_profile,
-            resource: unique_resource_id(3),
-        };
+        let q_key =
+            DedupKey::PerFile { sub: q_sub, profile: q_profile, resource: unique_resource_id(3) };
 
         // P's running slot — carries a counting signaler so we can assert exactly one SIGTERM was
         // delivered through this child.
@@ -2562,11 +2318,7 @@ mod tests {
         let p_k2_pending = dummy_effect(p_k2, unique_resource_id(2), 2);
         state.slots.insert(
             p_k2,
-            Slot {
-                pending: Some(p_k2_pending),
-                in_ready_queue: true,
-                ..Slot::default()
-            },
+            Slot { pending: Some(p_k2_pending), in_ready_queue: true, ..Slot::default() },
         );
         state.ready_queue.push_back(p_k2);
 
@@ -2607,10 +2359,7 @@ mod tests {
         // purged. The load-bearing panic-prevention invariant — the next pump's
         // `pending.take().expect()` would panic if the key remained in the queue with an empty slot.
         let p_k2_slot = state.slots.get(&p_k2).expect("P-k2 slot preserved");
-        assert!(
-            p_k2_slot.pending.is_none(),
-            "P-k2's pending must be dropped",
-        );
+        assert!(p_k2_slot.pending.is_none(), "P-k2's pending must be dropped");
         assert!(
             !p_k2_slot.in_ready_queue,
             "P-k2's in_ready_queue must be cleared (pump invariant)",

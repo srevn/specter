@@ -73,10 +73,7 @@ impl FsIdentity {
     #[cfg(unix)]
     #[must_use]
     pub fn from_metadata(meta: &impl std::os::unix::fs::MetadataExt) -> Self {
-        Self {
-            inode: meta.ino(),
-            device: meta.dev(),
-        }
+        Self { inode: meta.ino(), device: meta.dev() }
     }
 
     /// The kernel inode number observed at `stat` time.

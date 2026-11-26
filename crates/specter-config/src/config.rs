@@ -68,10 +68,7 @@ impl LogConfig {
     /// path is associated). The bin caller owns the CLI-source context in the format string instead
     /// — see `specter-bin`'s `App::run` and `EngineDriver::apply_log_reload`.
     pub fn merge_cli(
-        mut self,
-        level: Option<LogLevel>,
-        destination: Option<LogDestination>,
-        path: Option<&Path>,
+        mut self, level: Option<LogLevel>, destination: Option<LogDestination>, path: Option<&Path>,
     ) -> Result<Self, ValidationIssue> {
         if let Some(l) = level {
             self.level = l;
@@ -106,9 +103,7 @@ impl LogConfig {
 /// operator sees both override sites; the config-load flow passes the empty string for the bare
 /// structural rule.
 fn validate_log_path(
-    destination: LogDestination,
-    path: Option<&Path>,
-    empty_hint: &str,
+    destination: LogDestination, path: Option<&Path>, empty_hint: &str,
 ) -> Result<Option<PathBuf>, ValidationIssue> {
     match (destination, path) {
         (LogDestination::Stderr, _) => Ok(None),
@@ -269,10 +264,7 @@ impl Config {
     /// How many entries are dynamic, disabled ones included.
     #[must_use]
     pub fn dynamic_count(&self) -> usize {
-        self.watches
-            .iter()
-            .filter(|s| matches!(s.target, WatchTarget::Dynamic(_)))
-            .count()
+        self.watches.iter().filter(|s| matches!(s.target, WatchTarget::Dynamic(_))).count()
     }
 
     /// Names of every operator-suppressed entry — the complement of [`Self::active_watches`]
@@ -282,11 +274,7 @@ impl Config {
     /// drifting apart when the underlying spec shape evolves.
     #[must_use]
     pub fn disabled_names(&self) -> Vec<&str> {
-        self.watches
-            .iter()
-            .filter(|s| !s.enabled)
-            .map(|s| s.name.as_str())
-            .collect()
+        self.watches.iter().filter(|s| !s.enabled).map(|s| s.name.as_str()).collect()
     }
 
     /// Advisory findings on a validated config — hazards that load and run but probably don't mean
@@ -336,10 +324,8 @@ impl Config {
     }
 
     pub fn from_path(path: &Path) -> Result<Self, ConfigError> {
-        let s = std::fs::read_to_string(path).map_err(|e| ConfigError::Io {
-            path: path.to_owned(),
-            source: e,
-        })?;
+        let s = std::fs::read_to_string(path)
+            .map_err(|e| ConfigError::Io { path: path.to_owned(), source: e })?;
         let cfg = Self::from_str_inner(&s, Some(path))?;
         log_config_loaded(&cfg, path);
         Ok(cfg)
@@ -356,19 +342,14 @@ impl Config {
     /// pin the loader to stale content.
     pub fn from_path_with_meta(path: &Path) -> Result<(Self, FileMeta), ConfigError> {
         use std::io::Read as _;
-        let mut f = std::fs::File::open(path).map_err(|e| ConfigError::Io {
-            path: path.to_owned(),
-            source: e,
-        })?;
-        let meta = FileMeta::from_metadata(&f.metadata().map_err(|e| ConfigError::Io {
-            path: path.to_owned(),
-            source: e,
-        })?);
+        let mut f = std::fs::File::open(path)
+            .map_err(|e| ConfigError::Io { path: path.to_owned(), source: e })?;
+        let meta = FileMeta::from_metadata(
+            &f.metadata().map_err(|e| ConfigError::Io { path: path.to_owned(), source: e })?,
+        );
         let mut s = String::new();
-        f.read_to_string(&mut s).map_err(|e| ConfigError::Io {
-            path: path.to_owned(),
-            source: e,
-        })?;
+        f.read_to_string(&mut s)
+            .map_err(|e| ConfigError::Io { path: path.to_owned(), source: e })?;
         let cfg = Self::from_str_inner(&s, Some(path))?;
         log_config_loaded(&cfg, path);
         Ok((cfg, meta))
@@ -443,10 +424,7 @@ fn validate(raw: &RawConfig, path: Option<&Path>) -> Result<Config, ConfigError>
     if errors.is_empty() {
         Ok(Config { log, watches })
     } else {
-        Err(ConfigError::Validate {
-            path: path.map(Path::to_owned),
-            errors,
-        })
+        Err(ConfigError::Validate { path: path.map(Path::to_owned), errors })
     }
 }
 
@@ -499,15 +477,7 @@ fn validate_log(raw: &RawLogConfig) -> Result<LogConfig, Vec<ValidationIssue>> {
         }
     };
 
-    if errors.is_empty() {
-        Ok(LogConfig {
-            level,
-            destination,
-            path,
-        })
-    } else {
-        Err(errors)
-    }
+    if errors.is_empty() { Ok(LogConfig { level, destination, path }) } else { Err(errors) }
 }
 
 /// Validate the `name` field. Two failures are mutually exclusive: empty (rejected as
@@ -552,8 +522,7 @@ fn validate_name(idx: usize, raw_name: &str) -> Result<(), ValidationIssue> {
 /// The returned Arc is the same allocation the engine's `Sub.program` and every emitted
 /// `Effect.program` references — one shared bytecode IR per validated Sub.
 fn validate_actions(
-    idx: usize,
-    raw_actions: &[RawAction],
+    idx: usize, raw_actions: &[RawAction],
 ) -> Result<Arc<ActionProgram>, Vec<ValidationIssue>> {
     if raw_actions.is_empty() {
         return Err(vec![ValidationIssue::new(
@@ -565,13 +534,8 @@ fn validate_actions(
     }
 
     let tree = validate_action_list(idx, "actions", raw_actions, 0)?;
-    lower_to_program(&tree).map_err(|e| {
-        vec![ValidationIssue::from_program_error(
-            &e,
-            Some(idx),
-            "actions",
-        )]
-    })
+    lower_to_program(&tree)
+        .map_err(|e| vec![ValidationIssue::from_program_error(&e, Some(idx), "actions")])
 }
 
 /// Recursive validation of a `[RawAction]` slice. `path` is the breadcrumb-style label of the slice
@@ -592,10 +556,7 @@ fn validate_actions(
 /// validator past the bound, and the lowering pass downstream can rely on the guarantee without a
 /// mirror check.
 fn validate_action_list(
-    watch_idx: usize,
-    path: &str,
-    raw_actions: &[RawAction],
-    depth: u8,
+    watch_idx: usize, path: &str, raw_actions: &[RawAction], depth: u8,
 ) -> Result<Vec<Action>, Vec<ValidationIssue>> {
     if depth > MAX_CONDITIONAL_DEPTH {
         return Err(vec![ValidationIssue::new(
@@ -616,11 +577,7 @@ fn validate_action_list(
             Err(mut es) => errors.append(&mut es),
         }
     }
-    if errors.is_empty() {
-        Ok(tree)
-    } else {
-        Err(errors)
-    }
+    if errors.is_empty() { Ok(tree) } else { Err(errors) }
 }
 
 /// Validate a single action entry. The "exactly one variant set" rule is the single source of truth
@@ -632,10 +589,7 @@ fn validate_action_list(
 /// `depth` is the conditional nesting level of the enclosing slice — passed unchanged to
 /// [`validate_conditional`], which bumps it by `1` before descending into `then` / `else`.
 fn validate_one_action(
-    watch_idx: usize,
-    path: &str,
-    raw: &RawAction,
-    depth: u8,
+    watch_idx: usize, path: &str, raw: &RawAction, depth: u8,
 ) -> Result<Action, Vec<ValidationIssue>> {
     let is_exec = raw.exec.is_some();
     let is_pipe = raw.pipe.is_some();
@@ -700,9 +654,7 @@ fn validate_one_action(
 /// [`specter_core::program::SpawnBody::Pipe`] without re-allocating (the newtype is zero-cost over
 /// the shared `Arc`).
 fn validate_pipe(
-    watch_idx: usize,
-    path: &str,
-    stages: &[RawExec],
+    watch_idx: usize, path: &str, stages: &[RawExec],
 ) -> Result<Action, Vec<ValidationIssue>> {
     if stages.is_empty() {
         return Err(vec![ValidationIssue::new(
@@ -732,13 +684,7 @@ fn validate_pipe(
             Err(mut es) => errors.append(&mut es),
         }
     }
-    if errors.is_empty() {
-        Ok(Action::Pipe {
-            stages: Arc::from(validated),
-        })
-    } else {
-        Err(errors)
-    }
+    if errors.is_empty() { Ok(Action::Pipe { stages: Arc::from(validated) }) } else { Err(errors) }
 }
 
 /// Validate the `when` / `then` / `else` triple on a [`RawAction`].
@@ -756,10 +702,7 @@ fn validate_pipe(
 /// the slice this conditional lives in; recursion into `then` / `else` advances it by `1` so
 /// [`validate_action_list`]'s [`MAX_CONDITIONAL_DEPTH`] gate sees the descending count.
 fn validate_conditional(
-    watch_idx: usize,
-    path: &str,
-    raw: &RawAction,
-    depth: u8,
+    watch_idx: usize, path: &str, raw: &RawAction, depth: u8,
 ) -> Result<Action, Vec<ValidationIssue>> {
     let when_raw = raw.when.as_ref();
     let then_raw = raw.then.as_deref();
@@ -775,11 +718,7 @@ fn validate_conditional(
                  (got when={}, then={}{})",
                 when_raw.is_some(),
                 then_raw.is_some(),
-                if otherwise_raw.is_some() {
-                    ", else=true"
-                } else {
-                    ""
-                },
+                if otherwise_raw.is_some() { ", else=true" } else { "" },
             ),
         )]);
     }
@@ -844,9 +783,7 @@ fn validate_conditional(
 /// timeout = "..." }`) and pipe stages. Delegates to [`validate_exec_argv`] under the path label
 /// `"<path>.exec"` so argv-slot errors quote the surrounding action's location.
 fn validate_raw_exec(
-    watch_idx: usize,
-    path: &str,
-    raw: &RawExec,
+    watch_idx: usize, path: &str, raw: &RawExec,
 ) -> Result<ExecAction, Vec<ValidationIssue>> {
     validate_exec_argv(watch_idx, path, "exec", &raw.exec, raw.timeout)
 }
@@ -866,11 +803,7 @@ fn validate_raw_exec(
 /// exec and predicate-exec, `"pipe[i].exec"` for pipe stages. The error detail joins them with `.`
 /// so the path is unambiguous.
 fn validate_exec_argv(
-    watch_idx: usize,
-    path: &str,
-    argv_field: &str,
-    raw_argv: &[String],
-    timeout: Option<Duration>,
+    watch_idx: usize, path: &str, argv_field: &str, raw_argv: &[String], timeout: Option<Duration>,
 ) -> Result<ExecAction, Vec<ValidationIssue>> {
     if raw_argv.is_empty() {
         return Err(vec![ValidationIssue::new(
@@ -917,11 +850,7 @@ fn validate_exec_argv(
             ),
         ));
     }
-    if errors.is_empty() {
-        Ok(ExecAction::new(argv, timeout))
-    } else {
-        Err(errors)
-    }
+    if errors.is_empty() { Ok(ExecAction::new(argv, timeout)) } else { Err(errors) }
 }
 
 /// Validate `settle` / `max_settle`. Returns `Ok((settle, max_settle))` when both pass;
@@ -934,9 +863,7 @@ fn validate_exec_argv(
 ///   arithmetic at the engine layer handles values up to many years; the unit-suffixed duration
 ///   grammar makes magnitude typos obvious at the source.
 fn validate_settle(
-    idx: usize,
-    raw_settle: Option<Duration>,
-    raw_max_settle: Option<Duration>,
+    idx: usize, raw_settle: Option<Duration>, raw_max_settle: Option<Duration>,
 ) -> Result<(Duration, Duration), Vec<ValidationIssue>> {
     let mut errors: Vec<ValidationIssue> = Vec::new();
     let settle = raw_settle.unwrap_or(DEFAULT_SETTLE);
@@ -967,11 +894,7 @@ fn validate_settle(
         }
         None => DEFAULT_MAX_SETTLE,
     };
-    if errors.is_empty() {
-        Ok((settle, max_settle))
-    } else {
-        Err(errors)
-    }
+    if errors.is_empty() { Ok((settle, max_settle)) } else { Err(errors) }
 }
 
 /// Validate `scope`. Returns `Ok(EffectScope)` on success; `Err` with the parse failure issue. Scope
@@ -1007,10 +930,9 @@ fn validate_scope(idx: usize, raw_scope: Option<&str>) -> Result<EffectScope, Va
 fn validate_static_path(idx: usize, raw_path: &str) -> Result<PathBuf, ValidationIssue> {
     canonicalize_lenient(Path::new(raw_path)).map_err(|e| {
         let (kind, detail) = match &e {
-            PathError::NotAbsolute => (
-                IssueKind::NonAbsolute,
-                format!("path `{raw_path}` must be absolute"),
-            ),
+            PathError::NotAbsolute => {
+                (IssueKind::NonAbsolute, format!("path `{raw_path}` must be absolute"))
+            }
             PathError::Empty => (IssueKind::EmptyPath, "path must not be empty".to_owned()),
             PathError::ContainsParentDir => (
                 IssueKind::PathContainsParentDir,
@@ -1081,10 +1003,7 @@ fn validate_dynamic_pattern(idx: usize, raw_path: &str) -> Result<PatternSpec, V
 /// and collapses to `PathInaccessible` carrying the rendered fault, rather than inventing a kind
 /// for a state the parser already excluded.
 fn dynamic_prefix_issue(
-    idx: usize,
-    raw_path: &str,
-    prefix: &Path,
-    err: &PathError,
+    idx: usize, raw_path: &str, prefix: &Path, err: &PathError,
 ) -> ValidationIssue {
     let shown = prefix.display();
     let (kind, detail) = match err {
@@ -1185,20 +1104,14 @@ fn validate_scan(idx: usize, raw: &RawWatch) -> Result<SubtreeScan, Vec<Validati
         sb = sb.excludes(compiled);
     }
 
-    if errors.is_empty() {
-        Ok(sb.build())
-    } else {
-        Err(errors)
-    }
+    if errors.is_empty() { Ok(sb.build()) } else { Err(errors) }
 }
 
 /// The bound a `[[watch]]` lists to. `recursive = false` is the TOML's other spelling of one level,
 /// so a deeper `max_depth` beside it would say two bounds for one walk. A zero is refused before
 /// the key is read: it parses into no bound the key could contradict.
 fn validate_depth(
-    idx: usize,
-    recursive: bool,
-    max_depth: Option<u32>,
+    idx: usize, recursive: bool, max_depth: Option<u32>,
 ) -> Result<Option<NonZeroU32>, ValidationIssue> {
     const ONE_LEVEL: NonZeroU32 = NonZeroU32::MIN;
     match (recursive, max_depth.map(NonZeroU32::new)) {
@@ -1253,9 +1166,7 @@ fn validate_watch(idx: usize, raw: &RawWatch) -> Result<SubSpec, Vec<ValidationI
         idx,
     );
 
-    match (
-        target_r, name_r, program_r, scope_r, settle_r, scan_r, events_r,
-    ) {
+    match (target_r, name_r, program_r, scope_r, settle_r, scan_r, events_r) {
         (
             Ok(target),
             Ok(()),
@@ -1300,9 +1211,7 @@ fn validate_watch(idx: usize, raw: &RawWatch) -> Result<SubSpec, Vec<ValidationI
 ///
 /// Per-value errors accumulate so a single load surfaces every issue.
 fn parse_events_field(
-    raw: Option<&[String]>,
-    scope: EffectScope,
-    idx: usize,
+    raw: Option<&[String]>, scope: EffectScope, idx: usize,
 ) -> Result<ClassSet, Vec<ValidationIssue>> {
     let Some(values) = raw else {
         return Ok(match scope {
@@ -1363,11 +1272,7 @@ fn parse_events_field(
         }
         out |= bit;
     }
-    if errors.is_empty() {
-        Ok(out)
-    } else {
-        Err(errors)
-    }
+    if errors.is_empty() { Ok(out) } else { Err(errors) }
 }
 
 #[cfg(test)]
@@ -1404,11 +1309,7 @@ mod tests {
     fn assert_only_kind(toml: &str, kind: IssueKind) {
         let err = Config::from_str(toml).unwrap_err();
         let errors = validation_errors(err);
-        assert_eq!(
-            errors.len(),
-            1,
-            "expected exactly one issue, got {errors:?}"
-        );
+        assert_eq!(errors.len(), 1, "expected exactly one issue, got {errors:?}");
         assert_eq!(errors[0].kind, kind);
     }
 
@@ -1479,10 +1380,7 @@ mod tests {
             Config::from_str("[log]\ndestination = \"file\"\npath = \"/var/log/specter.log\"")
                 .unwrap();
         assert_eq!(cfg.log.destination, LogDestination::File);
-        assert_eq!(
-            cfg.log.path.as_deref(),
-            Some(std::path::Path::new("/var/log/specter.log"))
-        );
+        assert_eq!(cfg.log.path.as_deref(), Some(std::path::Path::new("/var/log/specter.log")));
     }
 
     #[test]
@@ -1503,10 +1401,7 @@ mod tests {
             Config::from_str("[log]\ndestination = \"stderr\"\npath = \"/var/log/ignored.log\"")
                 .unwrap();
         assert_eq!(cfg.log.destination, LogDestination::Stderr);
-        assert!(
-            cfg.log.path.is_none(),
-            "path is dropped for stderr destination"
-        );
+        assert!(cfg.log.path.is_none(), "path is dropped for stderr destination");
     }
 
     /// A relative `--log-path` overrides into a `LogDestination::File` fixture; `merge_cli` returns
@@ -1517,14 +1412,9 @@ mod tests {
     /// entirely.
     #[test]
     fn merge_cli_relative_log_path_yields_non_absolute_issue() {
-        let cfg = LogConfig {
-            level: LogLevel::Info,
-            destination: LogDestination::File,
-            path: None,
-        };
-        let issue = cfg
-            .merge_cli(None, None, Some(Path::new("relative-log.txt")))
-            .unwrap_err();
+        let cfg =
+            LogConfig { level: LogLevel::Info, destination: LogDestination::File, path: None };
+        let issue = cfg.merge_cli(None, None, Some(Path::new("relative-log.txt"))).unwrap_err();
         assert!(issue.watch_index.is_none());
         assert_eq!(issue.field, "log.path");
         assert_eq!(issue.kind, IssueKind::NonAbsolute);
@@ -1598,18 +1488,9 @@ mod tests {
              [[watch]]\nname = \"off\"\npath = \"{ROOT}\"\nactions = [{{ exec = [\"echo\"] }}]\nenabled = false\n",
         );
         let cfg = Config::from_str(&toml).unwrap();
-        assert_eq!(
-            cfg.find_active_watch("on").map(|s| s.name.as_str()),
-            Some("on"),
-        );
-        assert!(
-            cfg.find_active_watch("off").is_none(),
-            "disabled entry hidden"
-        );
-        assert!(
-            cfg.find_active_watch("ghost").is_none(),
-            "absent name hidden"
-        );
+        assert_eq!(cfg.find_active_watch("on").map(|s| s.name.as_str()), Some("on"));
+        assert!(cfg.find_active_watch("off").is_none(), "disabled entry hidden");
+        assert!(cfg.find_active_watch("ghost").is_none(), "absent name hidden");
     }
 
     #[test]
@@ -1705,10 +1586,8 @@ mod tests {
         );
         // Field assignment is preserved (pattern issue lists pattern, exclude issues list exclude)
         // — operator triage needs the distinction.
-        let pattern_issue = errors
-            .iter()
-            .find(|e| e.field == "pattern")
-            .expect("pattern issue present");
+        let pattern_issue =
+            errors.iter().find(|e| e.field == "pattern").expect("pattern issue present");
         assert!(pattern_issue.detail.contains("/foo"));
         assert_eq!(
             errors.iter().filter(|e| e.field == "exclude").count(),
@@ -1744,11 +1623,7 @@ mod tests {
         for settle in ["1ms", "200ms", "5s", "30s", "1m"] {
             let toml = minimal_toml(&format!("settle = \"{settle}\"\n"));
             let cfg = Config::from_str(&toml).unwrap();
-            assert_eq!(
-                cfg.watches[0].max_settle,
-                Duration::from_hours(1),
-                "settle = {settle:?}",
-            );
+            assert_eq!(cfg.watches[0].max_settle, Duration::from_hours(1), "settle = {settle:?}");
         }
     }
 
@@ -1757,7 +1632,7 @@ mod tests {
         // No upper bound — operator may opt into multi-hour windows.
         let toml = minimal_toml("settle = \"200ms\"\nmax_settle = \"6h\"\n");
         let cfg = Config::from_str(&toml).unwrap();
-        assert_eq!(cfg.watches[0].max_settle, Duration::from_hours(6),);
+        assert_eq!(cfg.watches[0].max_settle, Duration::from_hours(6));
     }
 
     #[test]
@@ -1781,16 +1656,10 @@ mod tests {
     #[test]
     fn recursive_false_lowers_as_max_depth_one() {
         let lowered = |knobs: &str| {
-            Config::from_str(&minimal_toml(knobs))
-                .expect("valid config")
-                .watches
-                .remove(0)
+            Config::from_str(&minimal_toml(knobs)).expect("valid config").watches.remove(0)
         };
         let one_level = lowered("max_depth = 1\n");
-        assert_eq!(
-            one_level.scan,
-            SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build()
-        );
+        assert_eq!(one_level.scan, SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build());
         assert_eq!(lowered("recursive = false\n"), one_level);
         assert_eq!(lowered("recursive = false\nmax_depth = 1\n"), one_level);
     }
@@ -1855,10 +1724,7 @@ mod tests {
         let toml = minimal_toml("pattern = \"**/*.{c,h,rs}\"\n");
         let cfg = Config::from_str(&toml).unwrap();
         let pattern = GlobPattern::compile("**/*.{c,h,rs}").expect("valid glob");
-        assert_eq!(
-            cfg.watches[0].scan,
-            SubtreeScan::builder().pattern(pattern).build()
-        );
+        assert_eq!(cfg.watches[0].scan, SubtreeScan::builder().pattern(pattern).build());
     }
 
     #[test]
@@ -1866,11 +1732,7 @@ mod tests {
         let toml = minimal_toml("exclude = [\"z/**\", \"a/**\", \"m/**\"]\n");
         let cfg = Config::from_str(&toml).unwrap();
         let scan = ScanConfig::from(cfg.watches[0].scan.clone());
-        let sources: Vec<&str> = scan
-            .exclude_globs()
-            .iter()
-            .map(GlobPattern::source)
-            .collect();
+        let sources: Vec<&str> = scan.exclude_globs().iter().map(GlobPattern::source).collect();
         assert_eq!(sources, vec!["a/**", "m/**", "z/**"]);
     }
 
@@ -1889,10 +1751,7 @@ mod tests {
         assert_eq!(argv[0].parts()[0], ArgPart::literal("fmt"));
         assert_eq!(argv[1].parts()[0], ArgPart::literal("--input="));
         assert_eq!(argv[1].parts()[1], ArgPart::Placeholder(Placeholder::Path));
-        assert_eq!(
-            argv[2].parts()[0],
-            ArgPart::Placeholder(Placeholder::Created)
-        );
+        assert_eq!(argv[2].parts()[0], ArgPart::Placeholder(Placeholder::Created));
     }
 
     #[test]
@@ -2025,11 +1884,7 @@ mod tests {
         let err = Config::from_str(&toml).unwrap_err();
         let errors = validation_errors(err);
         assert_eq!(errors.len(), 2);
-        assert!(
-            errors
-                .iter()
-                .all(|e| e.kind == IssueKind::DuplicateEventClass)
-        );
+        assert!(errors.iter().all(|e| e.kind == IssueKind::DuplicateEventClass));
     }
 
     #[test]
@@ -2114,10 +1969,7 @@ mod tests {
         );
         let cfg = Config::from_str(&toml).unwrap();
         let WatchTarget::Static(path) = &cfg.watches[0].target else {
-            panic!(
-                "a literal path is a static target, got {:?}",
-                cfg.watches[0].target
-            );
+            panic!("a literal path is a static target, got {:?}", cfg.watches[0].target);
         };
         assert!(
             path.ends_with(std::path::Path::new("does-not-exist/leaf")),
@@ -2250,10 +2102,7 @@ mod tests {
                     actions = [{ exec = [\"echo\"] }]";
         let cfg = Config::from_str(toml).unwrap();
         let WatchTarget::Dynamic(spec) = &cfg.watches[0].target else {
-            panic!(
-                "a glob path is a dynamic target, got {:?}",
-                cfg.watches[0].target
-            );
+            panic!("a glob path is a dynamic target, got {:?}", cfg.watches[0].target);
         };
         assert_eq!(spec.literal_prefix_path(), Path::new("/srv/log"));
     }
@@ -2274,10 +2123,7 @@ mod tests {
             .iter()
             .map(|w| (w.name.as_str(), matches!(w.target, WatchTarget::Dynamic(_))))
             .collect();
-        assert_eq!(
-            kinds,
-            vec![("a", false), ("b", true), ("c", false), ("d", true)],
-        );
+        assert_eq!(kinds, vec![("a", false), ("b", true), ("c", false), ("d", true)]);
     }
 
     /// Cross-kind duplicate name still rejected — the duplicate-name check runs at the dispatch loop
@@ -2315,11 +2161,7 @@ mod tests {
         let errors = validation_errors(err);
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].kind, IssueKind::InvalidPattern);
-        assert!(
-            errors[0].detail.contains("var/log/*"),
-            "got {}",
-            errors[0].detail
-        );
+        assert!(errors[0].detail.contains("var/log/*"), "got {}", errors[0].detail);
         assert!(
             errors[0].detail.contains("absolute"),
             "Display message must mention `absolute`; got {}",
@@ -2401,10 +2243,7 @@ mod tests {
             panic!("a dynamic watch's request is addressed to its pattern");
         };
         assert!(Arc::ptr_eq(pattern, spec), "one parsed pattern, shared");
-        assert_eq!(
-            (&req.scan, req.max_settle, req.events),
-            (&w.scan, w.max_settle, w.events)
-        );
+        assert_eq!((&req.scan, req.max_settle, req.events), (&w.scan, w.max_settle, w.events));
         assert_eq!(req.params.settle, w.settle);
         assert_eq!(req.params.spawn.scope(), w.scope);
     }
@@ -2422,10 +2261,7 @@ mod tests {
         let glob = |source| GlobPattern::compile(source).expect("valid glob");
         assert_eq!(
             cfg.watches[0].scan,
-            SubtreeScan::builder()
-                .pattern(glob("*.log"))
-                .exclude(glob("*.gz"))
-                .build()
+            SubtreeScan::builder().pattern(glob("*.log")).exclude(glob("*.gz")).build()
         );
     }
 
@@ -2453,10 +2289,7 @@ mod tests {
         let toml = "[[watch]]\nname = \"root\"\npath = \"/*\"\nactions = [{ exec = [\"echo\"] }]";
         let cfg = Config::from_str(toml).unwrap();
         let WatchTarget::Dynamic(spec) = &cfg.watches[0].target else {
-            panic!(
-                "a glob path is a dynamic target, got {:?}",
-                cfg.watches[0].target
-            );
+            panic!("a glob path is a dynamic target, got {:?}", cfg.watches[0].target);
         };
         assert_eq!(spec.literal_prefix_path(), Path::new("/"));
     }

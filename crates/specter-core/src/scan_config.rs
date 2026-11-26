@@ -64,10 +64,7 @@ impl GlobPattern {
             source: source.to_string(),
             message: e.to_string(),
         })?;
-        Ok(Self {
-            source,
-            matcher: glob.compile_matcher(),
-        })
+        Ok(Self { source, matcher: glob.compile_matcher() })
     }
 
     #[must_use]
@@ -274,20 +271,12 @@ impl ScanConfig {
         }
         match self {
             // `pattern` lives here only to discharge the destructure; its gate is the kinded half.
-            Self::Subtree(SubtreeScan {
-                hidden,
-                exclude,
-                pattern: _,
-                max_depth,
-            }) => {
+            Self::Subtree(SubtreeScan { hidden, exclude, pattern: _, max_depth }) => {
                 if max_depth.is_some_and(|max| depth > max.get()) {
                     return false;
                 }
                 if !*hidden
-                    && rel
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .is_some_and(|s| s.starts_with('.'))
+                    && rel.file_name().and_then(|n| n.to_str()).is_some_and(|s| s.starts_with('.'))
                 {
                     return false;
                 }
@@ -490,9 +479,7 @@ fn validate_source_reachability(s: &str) -> Result<(), ConfigError> {
 /// fork separate Profiles ("Profile-union infection" defence).
 #[must_use]
 pub(crate) fn compute_config_hash(
-    scan: &ScanConfig,
-    max_settle: Duration,
-    events: ClassSet,
+    scan: &ScanConfig, max_settle: Duration, events: ClassSet,
 ) -> u64 {
     let mut h = hasher();
 
@@ -502,12 +489,7 @@ pub(crate) fn compute_config_hash(
         // Profile-partition completeness from a hand-maintained test convention to a compiler
         // invariant. Never add `..`: it silently re-opens the silent-Profile-merge hole. A new
         // *variant* is a non-exhaustive-match compile error until it picks its own discriminant byte.
-        ScanConfig::Subtree(SubtreeScan {
-            hidden,
-            exclude,
-            pattern,
-            max_depth,
-        }) => {
+        ScanConfig::Subtree(SubtreeScan { hidden, exclude, pattern, max_depth }) => {
             h.put_u8(0);
             h.put_u8(u8::from(*hidden));
 
@@ -625,12 +607,7 @@ impl ProfileIdentity {
         // inside `compute_config_hash` does not cover an axis that is neither scan-config,
         // max_settle, nor events).
         let hash = compute_config_hash(&config, max_settle, events);
-        Self {
-            config: Arc::new(config),
-            max_settle,
-            events,
-            hash,
-        }
+        Self { config: Arc::new(config), max_settle, events, hash }
     }
 
     /// The frozen [`ScanConfig`] axis. Borrow for the shape predicates (`match_chain`,
@@ -727,23 +704,15 @@ mod tests {
 
     #[test]
     fn excludes_sorted_at_build_regardless_of_insertion_order() {
-        let scan = SubtreeScan::builder()
-            .exclude(glob("z"))
-            .exclude(glob("a"))
-            .exclude(glob("m"))
-            .build();
+        let scan =
+            SubtreeScan::builder().exclude(glob("z")).exclude(glob("a")).exclude(glob("m")).build();
         let sources: Vec<&str> = scan.exclude.iter().map(GlobPattern::source).collect();
         assert_eq!(sources, vec!["a", "m", "z"]);
     }
 
     #[test]
     fn empty_builder_yields_default_shaped_config() {
-        let SubtreeScan {
-            hidden,
-            exclude,
-            pattern,
-            max_depth,
-        } = SubtreeScan::builder().build();
+        let SubtreeScan { hidden, exclude, pattern, max_depth } = SubtreeScan::builder().build();
         assert!(!hidden);
         assert_eq!(exclude.as_slice(), []);
         assert!(pattern.is_none());
@@ -752,24 +721,15 @@ mod tests {
 
     #[test]
     fn hash_deterministic() {
-        assert_eq!(
-            hash(SubtreeScan::builder().build()),
-            hash(SubtreeScan::builder().build()),
-        );
+        assert_eq!(hash(SubtreeScan::builder().build()), hash(SubtreeScan::builder().build()));
     }
 
     #[test]
     fn hash_canonical_excludes() {
-        let a = SubtreeScan::builder()
-            .exclude(glob("a"))
-            .exclude(glob("z"))
-            .exclude(glob("m"))
-            .build();
-        let b = SubtreeScan::builder()
-            .exclude(glob("z"))
-            .exclude(glob("m"))
-            .exclude(glob("a"))
-            .build();
+        let a =
+            SubtreeScan::builder().exclude(glob("a")).exclude(glob("z")).exclude(glob("m")).build();
+        let b =
+            SubtreeScan::builder().exclude(glob("z")).exclude(glob("m")).exclude(glob("a")).build();
         assert_eq!(hash(a), hash(b));
     }
 
@@ -779,15 +739,9 @@ mod tests {
     /// Pins both the canonical list shape and the hash equality.
     #[test]
     fn build_collapses_duplicate_excludes() {
-        let with_dup = SubtreeScan::builder()
-            .exclude(glob("a"))
-            .exclude(glob("a"))
-            .exclude(glob("z"))
-            .build();
-        let without_dup = SubtreeScan::builder()
-            .exclude(glob("a"))
-            .exclude(glob("z"))
-            .build();
+        let with_dup =
+            SubtreeScan::builder().exclude(glob("a")).exclude(glob("a")).exclude(glob("z")).build();
+        let without_dup = SubtreeScan::builder().exclude(glob("a")).exclude(glob("z")).build();
 
         let sources: Vec<&str> = with_dup.exclude.iter().map(GlobPattern::source).collect();
         assert_eq!(sources, vec!["a", "z"], "duplicate dropped at build");
@@ -819,10 +773,7 @@ mod tests {
     #[test]
     fn hash_distinguishes_pattern() {
         let rs = hash(SubtreeScan::builder().pattern(glob("*.rs")).build());
-        assert_ne!(
-            rs,
-            hash(SubtreeScan::builder().pattern(glob("*.txt")).build())
-        );
+        assert_ne!(rs, hash(SubtreeScan::builder().pattern(glob("*.txt")).build()));
         assert_ne!(rs, hash(SubtreeScan::builder().build()));
     }
 
@@ -870,10 +821,7 @@ mod tests {
         let cfg = ScanConfig::from(SubtreeScan::builder().build());
         let a = ClassSet::CONTENT | ClassSet::METADATA;
         let b = ClassSet::METADATA | ClassSet::CONTENT;
-        assert_eq!(
-            compute_config_hash(&cfg, SETTLE, a),
-            compute_config_hash(&cfg, SETTLE, b),
-        );
+        assert_eq!(compute_config_hash(&cfg, SETTLE, a), compute_config_hash(&cfg, SETTLE, b));
     }
 
     /// Discrimination complement to the fold-completeness ratchets: the compile errors at the fold
@@ -915,21 +863,13 @@ mod tests {
         let h0 =
             ProfileIdentity::new(populated_scan(), BASE_MAX_SETTLE, base_events()).config_hash();
 
-        assert_ne!(
-            h0,
-            rehash_scan(|scan| scan.hidden = false),
-            "hidden must discriminate"
-        );
+        assert_ne!(h0, rehash_scan(|scan| scan.hidden = false), "hidden must discriminate");
         assert_ne!(
             h0,
             rehash_scan(|scan| scan.exclude.push(glob("c"))),
             "exclude must discriminate"
         );
-        assert_ne!(
-            h0,
-            rehash_scan(|scan| scan.pattern = None),
-            "pattern must discriminate"
-        );
+        assert_ne!(h0, rehash_scan(|scan| scan.pattern = None), "pattern must discriminate");
         assert_ne!(
             h0,
             rehash_scan(|scan| scan.max_depth = NonZeroU32::new(8)),
@@ -1027,10 +967,7 @@ mod tests {
         let cfg = chain("/srv/*/data/*/log");
         assert!(cfg.descends_into(0, false));
         assert!(cfg.descends_into(3, false));
-        assert!(
-            !cfg.descends_into(4, true),
-            "the terminus depth never descends",
-        );
+        assert!(!cfg.descends_into(4, true), "the terminus depth never descends");
 
         let subtree = ScanConfig::from(SubtreeScan::builder().build());
         assert!(subtree.descends_into(1, true));
@@ -1112,22 +1049,10 @@ mod tests {
             verdicts(scan, probes) != base_v
         };
 
-        assert!(
-            shifted(|scan| scan.hidden = false),
-            "hidden must discriminate"
-        );
-        assert!(
-            shifted(|scan| scan.exclude.clear()),
-            "exclude must discriminate"
-        );
-        assert!(
-            shifted(|scan| scan.pattern = None),
-            "pattern must discriminate"
-        );
-        assert!(
-            shifted(|scan| scan.max_depth = NonZeroU32::new(6)),
-            "max_depth must discriminate"
-        );
+        assert!(shifted(|scan| scan.hidden = false), "hidden must discriminate");
+        assert!(shifted(|scan| scan.exclude.clear()), "exclude must discriminate");
+        assert!(shifted(|scan| scan.pattern = None), "pattern must discriminate");
+        assert!(shifted(|scan| scan.max_depth = NonZeroU32::new(6)), "max_depth must discriminate");
 
         // Anchor-depth (`depth == 0`) bypasses every filter unconditionally. Pinning the load-bearing
         // "anchor is in scope by construction" property at the predicate's first line, so a future

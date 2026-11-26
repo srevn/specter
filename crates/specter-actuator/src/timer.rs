@@ -63,19 +63,10 @@ use std::time::Duration;
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum TimerContext {
     /// Single-process [`specter_core::program::SpawnBody::Exec`] step.
-    Exec {
-        key: DedupKey,
-        cursor: u32,
-        pid: u32,
-    },
+    Exec { key: DedupKey, cursor: u32, pid: u32 },
     /// One stage of a multi-stage [`specter_core::program::SpawnBody::Pipe`] step. `stage` is the
     /// index inside the pipe's stage list; `pid` is the per-stage pid.
-    PipeStage {
-        key: DedupKey,
-        cursor: u32,
-        stage: u32,
-        pid: u32,
-    },
+    PipeStage { key: DedupKey, cursor: u32, stage: u32, pid: u32 },
 }
 
 impl TimerContext {
@@ -84,9 +75,9 @@ impl TimerContext {
     fn os_thread_name(&self) -> String {
         match *self {
             Self::Exec { cursor, pid, .. } => format!("act-timer-c{cursor}-pid{pid}"),
-            Self::PipeStage {
-                cursor, stage, pid, ..
-            } => format!("act-timer-pipe-c{cursor}-s{stage}-pid{pid}"),
+            Self::PipeStage { cursor, stage, pid, .. } => {
+                format!("act-timer-pipe-c{cursor}-s{stage}-pid{pid}")
+            }
         }
     }
 
@@ -103,12 +94,7 @@ impl TimerContext {
                 ?e,
                 "per-step timer thread spawn failed; deadline not enforced",
             ),
-            Self::PipeStage {
-                key,
-                cursor,
-                stage,
-                pid,
-            } => tracing::error!(
+            Self::PipeStage { key, cursor, stage, pid } => tracing::error!(
                 ?key,
                 cursor,
                 stage,
@@ -133,19 +119,15 @@ impl TimerContext {
 /// `deadline > Duration::ZERO` is upheld by config validation (`IssueKind::TimeoutZero`); the
 /// `debug_assert!` is defense-in-depth for a future regression in that layer.
 pub(crate) fn arm_timer(
-    deadline: Duration,
-    grace: Duration,
-    signaler: Arc<dyn ChildSignaler>,
-    ctx: TimerContext,
+    deadline: Duration, grace: Duration, signaler: Arc<dyn ChildSignaler>, ctx: TimerContext,
 ) {
     debug_assert!(
         deadline > Duration::ZERO,
         "arm_timer requires deadline > 0; config validation must reject zero",
     );
     let name = ctx.os_thread_name();
-    if let Err(e) = thread::Builder::new()
-        .name(name)
-        .spawn(move || run_timer(deadline, grace, &*signaler))
+    if let Err(e) =
+        thread::Builder::new().name(name).spawn(move || run_timer(deadline, grace, &*signaler))
     {
         ctx.log_spawn_failure(deadline, &e);
     }
@@ -277,10 +259,6 @@ mod tests {
             run_timer(Duration::from_millis(5), Duration::from_millis(50), &probe);
         });
         assert_eq!(probe.term_calls(), 1, "SIGTERM fired");
-        assert_eq!(
-            probe.kill_calls(),
-            0,
-            "SIGKILL skipped — child died in grace"
-        );
+        assert_eq!(probe.kill_calls(), 0, "SIGKILL skipped — child died in grace");
     }
 }

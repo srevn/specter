@@ -23,11 +23,7 @@ fn set_relative(seg: &'static str) -> impl FnOnce(&mut Effect) {
     move |e: &mut Effect| {
         let resource = e.sort_key().1;
         let diff = Arc::clone(e.diff().expect("perfile_effect carries a diff"));
-        e.target = EffectTarget::PerFile {
-            resource,
-            segment: CompactString::from(seg),
-            diff,
-        };
+        e.target = EffectTarget::PerFile { resource, segment: CompactString::from(seg), diff };
     }
 }
 
@@ -44,17 +40,12 @@ fn set_relative(seg: &'static str) -> impl FnOnce(&mut Effect) {
 /// doubles as cwd) can assert against the tempdir's actual path; cases whose expected value is
 /// independent of the cwd ignore the argument.
 fn assert_env_var_received(
-    name: &str,
-    expected_for: impl FnOnce(&Path) -> String,
-    setup: impl FnOnce(&mut Effect),
+    name: &str, expected_for: impl FnOnce(&Path) -> String, setup: impl FnOnce(&mut Effect),
 ) {
     let dir = tempfile::tempdir().expect("tempdir");
     let out_path = dir.path().join("out");
-    let script = format!(
-        "printf '%s' \"${{{name}}}\" > {out}",
-        name = name,
-        out = out_path.display()
-    );
+    let script =
+        format!("printf '%s' \"${{{name}}}\" > {out}", name = name, out = out_path.display());
     let mut h = Harness::new(nz(2));
     let mut e = perfile_effect(
         1,
@@ -97,11 +88,7 @@ fn child_receives_specter_anchor() {
     // against an arbitrary string (the prior helper's "/abs/proj" placeholder) would set `cwd =
     // /abs/proj` and the spawn would fail with ENOENT. The integration here verifies the cwd-anchor
     // coupling end-to-end.
-    assert_env_var_received(
-        "SPECTER_ANCHOR",
-        |dir| dir.to_string_lossy().into_owned(),
-        |_e| {},
-    );
+    assert_env_var_received("SPECTER_ANCHOR", |dir| dir.to_string_lossy().into_owned(), |_e| {});
 }
 
 #[test]
@@ -124,11 +111,7 @@ fn child_receives_specter_correlation_decimal() {
 
 #[test]
 fn child_receives_specter_forced_zero() {
-    assert_env_var_received(
-        "SPECTER_FORCED",
-        |_dir| "0".to_owned(),
-        |e| e.forced = false,
-    );
+    assert_env_var_received("SPECTER_FORCED", |_dir| "0".to_owned(), |e| e.forced = false);
 }
 
 #[test]
@@ -142,10 +125,7 @@ fn child_receives_specter_created_newline_separated() {
     let dir = tempfile::tempdir().expect("tempdir");
     let out_path = dir.path().join("out");
     let cwd = dir.path().to_path_buf();
-    let script = format!(
-        "printf '%s' \"$SPECTER_CREATED\" > {out}",
-        out = out_path.display()
-    );
+    let script = format!("printf '%s' \"$SPECTER_CREATED\" > {out}", out = out_path.display());
     let mut h = Harness::new(nz(2));
     let diff = Arc::new(Diff {
         created: smallvec![
@@ -162,14 +142,8 @@ fn child_receives_specter_created_newline_separated() {
         ],
         ..Default::default()
     });
-    let mut e = perfile_effect(
-        1,
-        1,
-        1,
-        next_corr(),
-        vec!["/bin/sh".into(), "-c".into(), script],
-        cwd,
-    );
+    let mut e =
+        perfile_effect(1, 1, 1, next_corr(), vec!["/bin/sh".into(), "-c".into(), script], cwd);
     e.target = EffectTarget::PerFile {
         resource: e.sort_key().1,
         segment: CompactString::from(e.relative()),
@@ -211,14 +185,8 @@ fn child_receives_specter_diff_path_when_diff_present() {
     });
     // Use a per-test unique correlation to avoid colliding on the tmp file path with parallel-running
     // tests in the same binary (path = `specter-{pid}-{corr}.diff`; pid is shared per-binary).
-    let mut e = perfile_effect(
-        1,
-        1,
-        1,
-        next_corr(),
-        vec!["/bin/sh".into(), "-c".into(), script],
-        cwd,
-    );
+    let mut e =
+        perfile_effect(1, 1, 1, next_corr(), vec!["/bin/sh".into(), "-c".into(), script], cwd);
     e.target = EffectTarget::PerFile {
         resource: e.sort_key().1,
         segment: CompactString::from(e.relative()),
@@ -245,10 +213,8 @@ fn child_does_not_receive_specter_diff_path_without_diff() {
     let out_path = dir.path().join("out");
     let cwd = dir.path().to_path_buf();
     // Script writes the variable's value (or an empty string if unset).
-    let script = format!(
-        "printf '%s' \"${{SPECTER_DIFF_PATH-}}\" > {out}",
-        out = out_path.display()
-    );
+    let script =
+        format!("printf '%s' \"${{SPECTER_DIFF_PATH-}}\" > {out}", out = out_path.display());
     let mut h = Harness::new(nz(2));
     // Subtree is the only shape that can carry no diff: a PerFile effect's diff is mandatory, so
     // "no diff" is exercised here via a diff-less Subtree fire.
@@ -261,10 +227,7 @@ fn child_does_not_receive_specter_diff_path_without_diff() {
     }
     h.shutdown();
     let captured = std::fs::read_to_string(&out_path).expect("read captured");
-    assert_eq!(
-        captured, "",
-        "SPECTER_DIFF_PATH unset when the effect carries no diff"
-    );
+    assert_eq!(captured, "", "SPECTER_DIFF_PATH unset when the effect carries no diff");
 }
 
 #[test]
@@ -273,10 +236,7 @@ fn tmp_diff_file_cleaned_up_after_completion() {
     let path_record = dir.path().join("path");
     let cwd = dir.path().to_path_buf();
     // Echo the path so we can read it post-completion.
-    let script = format!(
-        "printf '%s' \"$SPECTER_DIFF_PATH\" > {p}",
-        p = path_record.display()
-    );
+    let script = format!("printf '%s' \"$SPECTER_DIFF_PATH\" > {p}", p = path_record.display());
     let mut h = Harness::new(nz(2));
     let diff = Arc::new(Diff {
         created: smallvec![EntryRef {
@@ -286,14 +246,8 @@ fn tmp_diff_file_cleaned_up_after_completion() {
         }],
         ..Default::default()
     });
-    let mut e = perfile_effect(
-        1,
-        1,
-        1,
-        next_corr(),
-        vec!["/bin/sh".into(), "-c".into(), script],
-        cwd,
-    );
+    let mut e =
+        perfile_effect(1, 1, 1, next_corr(), vec!["/bin/sh".into(), "-c".into(), script], cwd);
     e.target = EffectTarget::PerFile {
         resource: e.sort_key().1,
         segment: CompactString::from(e.relative()),

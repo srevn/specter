@@ -59,26 +59,11 @@ fn arb_seq() -> impl Strategy<Value = Vec<Ev>> {
 /// Resolve an `Ev` to its `Input` against the fixture's resources.
 fn input_of(ev: Ev, root: ResourceId, a: ResourceId, b: ResourceId) -> Input {
     match ev {
-        Ev::ContentChanged(0) => Input::FsEvent {
-            resource: root,
-            event: FsEvent::ContentChanged,
-        },
-        Ev::ContentChanged(1) => Input::FsEvent {
-            resource: a,
-            event: FsEvent::ContentChanged,
-        },
-        Ev::ContentChanged(_) => Input::FsEvent {
-            resource: b,
-            event: FsEvent::ContentChanged,
-        },
-        Ev::StructRoot => Input::FsEvent {
-            resource: root,
-            event: FsEvent::StructureChanged,
-        },
-        Ev::Barrier => Input::FsEvent {
-            resource: ResourceId::default(),
-            event: FsEvent::Removed,
-        },
+        Ev::ContentChanged(0) => Input::FsEvent { resource: root, event: FsEvent::ContentChanged },
+        Ev::ContentChanged(1) => Input::FsEvent { resource: a, event: FsEvent::ContentChanged },
+        Ev::ContentChanged(_) => Input::FsEvent { resource: b, event: FsEvent::ContentChanged },
+        Ev::StructRoot => Input::FsEvent { resource: root, event: FsEvent::StructureChanged },
+        Ev::Barrier => Input::FsEvent { resource: ResourceId::default(), event: FsEvent::Removed },
     }
 }
 
@@ -151,14 +136,7 @@ fn drive(inputs: &[Input]) -> (Option<PathBuf>, ProfileStateDiscriminant, Option
     let at = now + SETTLE * 4;
     let mut probe_target = None;
     while let Some(en) = e.pop_expired(at) {
-        let out = e.step(
-            Input::TimerExpired {
-                profile: en.profile,
-                kind: en.kind,
-                id: en.id,
-            },
-            at,
-        );
+        let out = e.step(Input::TimerExpired { profile: en.profile, kind: en.kind, id: en.id }, at);
         if let Some(p) = last_probe_path(&out) {
             probe_target = Some(p);
         }

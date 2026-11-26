@@ -54,9 +54,7 @@ pub(crate) fn open(client: &ClientArgs, verb: &'static str) -> Result<Subscripti
 /// surfacing as `SubDetached` on the stream). An ack that names no Sub answers no named subscribe:
 /// it fails here, where a wait reading it would never see its watch's own detach.
 pub(crate) fn open_watch(
-    client: &ClientArgs,
-    verb: &'static str,
-    name: CompactString,
+    client: &ClientArgs, verb: &'static str, name: CompactString,
 ) -> Result<(Subscription, WireId), ExitCode> {
     match handshake(client, verb, Some(name))? {
         (subscription, Some(target)) => Ok((subscription, target)),
@@ -78,9 +76,7 @@ pub(crate) fn open_watch(
 /// the one-shot verbs), the remaining transport stages through [`connect::emit_error`], the ack tail
 /// through [`connect::fail_response`]. Call sites `return code` directly.
 fn handshake(
-    client: &ClientArgs,
-    verb: &'static str,
-    name: Option<CompactString>,
+    client: &ClientArgs, verb: &'static str, name: Option<CompactString>,
 ) -> Result<(Subscription, Option<WireId>), ExitCode> {
     let mut stream = connect::dial(client, verb)?;
 
@@ -109,20 +105,13 @@ fn handshake(
     }
     let ack: ResponsePayload =
         parse_strict(line.trim_end_matches('\n').as_bytes()).map_err(|e| {
-            connect::emit_error(
-                client,
-                format_args!("specter {verb}: parse ack failed: {e}"),
-            );
+            connect::emit_error(client, format_args!("specter {verb}: parse ack failed: {e}"));
             ExitCode::from(1)
         })?;
     match ack {
-        ResponsePayload::SubscribeAck { sub } => Ok((
-            Subscription {
-                reader,
-                line_buf: String::new(),
-            },
-            sub,
-        )),
+        ResponsePayload::SubscribeAck { sub } => {
+            Ok((Subscription { reader, line_buf: String::new() }, sub))
+        }
         other => Err(connect::fail_response(client, verb, other)),
     }
 }
@@ -189,10 +178,7 @@ mod tests {
                 .write_all(b"{\"kind\":\"subscribe_ack\",\"sub\":null}\n")
                 .expect("write the ack");
         });
-        let client = ClientArgs {
-            socket: Some(socket),
-            color: ColorWhen::Never,
-        };
+        let client = ClientArgs { socket: Some(socket), color: ColorWhen::Never };
         assert!(open_watch(&client, "wait", "logs".into()).is_err());
         daemon.join().expect("the stand-in daemon answered");
     }

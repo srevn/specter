@@ -41,24 +41,16 @@ struct TestProberSink {
 
 impl ProberResponseSender for TestProberSink {
     fn send(&self, response: ProbeResponse) -> Result<(), SendError> {
-        self.tx
-            .send(Input::ProbeResponse(response))
-            .map_err(|_| SendError::Disconnected)
+        self.tx.send(Input::ProbeResponse(response)).map_err(|_| SendError::Disconnected)
     }
 }
 
 fn recv_snapshot(
     rx: &crossbeam::channel::Receiver<Input>,
 ) -> (Arc<specter_core::DirSnapshot>, ProofAuthority) {
-    match rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("response within timeout")
-    {
+    match rx.recv_timeout(Duration::from_secs(2)).expect("response within timeout") {
         Input::ProbeResponse(r) => match r.outcome {
-            ProbeOutcome::SubtreeProven {
-                snapshot,
-                authority,
-            } => (snapshot, authority),
+            ProbeOutcome::SubtreeProven { snapshot, authority } => (snapshot, authority),
             other => panic!("expected SubtreeProven, got {other:?}"),
         },
         other => panic!("unexpected input: {other:?}"),
@@ -114,14 +106,9 @@ fn whole_subtree_samples_witness_offchain_inplace_write() {
             quiescence_verdict(
                 ProofAuthority::Authoritative,
                 false,
-                QuiescenceWitness::HashChannel {
-                    prior: None,
-                    response: h1,
-                },
+                QuiescenceWitness::HashChannel { prior: None, response: h1 },
             ),
-            QuiescenceVerdict::Retry {
-                observed_motion: false,
-            },
+            QuiescenceVerdict::Retry { observed_motion: false },
         ),
         "the first sample primes the channel without certifying",
     );
@@ -139,23 +126,15 @@ fn whole_subtree_samples_witness_offchain_inplace_write() {
     let (s2, a2) = recv_snapshot(&rx);
     assert_eq!(a2, ProofAuthority::Authoritative);
     let h2 = TreeSnapshot::Dir(Arc::clone(&s2)).hash();
-    assert_ne!(
-        h1, h2,
-        "WholeSubtree samples must observe the off-chain in-place write",
-    );
+    assert_ne!(h1, h2, "WholeSubtree samples must observe the off-chain in-place write");
     assert!(
         matches!(
             quiescence_verdict(
                 ProofAuthority::Authoritative,
                 false,
-                QuiescenceWitness::HashChannel {
-                    prior: Some(h1),
-                    response: h2,
-                },
+                QuiescenceWitness::HashChannel { prior: Some(h1), response: h2 },
             ),
-            QuiescenceVerdict::Retry {
-                observed_motion: true,
-            },
+            QuiescenceVerdict::Retry { observed_motion: true },
         ),
         "the channel folds Retry on the disagreement — no false Stable",
     );
@@ -171,10 +150,7 @@ fn whole_subtree_samples_witness_offchain_inplace_write() {
             quiescence_verdict(
                 ProofAuthority::Authoritative,
                 false,
-                QuiescenceWitness::HashChannel {
-                    prior: Some(h2),
-                    response: h3,
-                },
+                QuiescenceWitness::HashChannel { prior: Some(h2), response: h3 },
             ),
             QuiescenceVerdict::Stable(StableReason::Natural),
         ),

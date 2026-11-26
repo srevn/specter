@@ -113,12 +113,7 @@ impl EnvSnapshot {
         K: Into<CompactString>,
         V: Into<CompactString>,
     {
-        Self {
-            map: entries
-                .into_iter()
-                .map(|(k, v)| (k.into(), v.into()))
-                .collect(),
-        }
+        Self { map: entries.into_iter().map(|(k, v)| (k.into(), v.into())).collect() }
     }
 
     /// Look up an env var by name. Returns `None` if the key is absent.

@@ -16,10 +16,7 @@ fn assert_kinds(toml: &str, expected: &[IssueKind]) {
     let errors = validation_errors(err);
     let kinds: Vec<IssueKind> = errors.iter().map(|e| e.kind).collect();
     for k in expected {
-        assert!(
-            kinds.contains(k),
-            "expected {k:?} in {kinds:?} (issues: {errors:?})",
-        );
+        assert!(kinds.contains(k), "expected {k:?} in {kinds:?} (issues: {errors:?})");
     }
 }
 
@@ -315,9 +312,6 @@ fn kitchen_sink_collects_five_distinct_issues() {
         IssueKind::SettleTooSmall,
         IssueKind::MaxDepthZero,
     ] {
-        assert!(
-            kinds.contains(&expected),
-            "missing {expected:?} in {kinds:?}"
-        );
+        assert!(kinds.contains(&expected), "missing {expected:?} in {kinds:?}");
     }
 }

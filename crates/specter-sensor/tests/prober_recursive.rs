@@ -35,9 +35,7 @@ struct TestProberSink {
 
 impl ProberResponseSender for TestProberSink {
     fn send(&self, response: ProbeResponse) -> Result<(), SendError> {
-        self.tx
-            .send(Input::ProbeResponse(response))
-            .map_err(|_| SendError::Disconnected)
+        self.tx.send(Input::ProbeResponse(response)).map_err(|_| SendError::Disconnected)
     }
 }
 
@@ -46,9 +44,7 @@ fn sink(tx: Sender<Input>) -> Arc<dyn ProberResponseSender> {
 }
 
 fn segments(
-    prober: &WorkerProber,
-    rx: &crossbeam::channel::Receiver<Input>,
-    anchor: PathBuf,
+    prober: &WorkerProber, rx: &crossbeam::channel::Receiver<Input>, anchor: PathBuf,
     cfg: ScanConfig,
 ) -> BTreeSet<String> {
     let p = fresh_profile_id();
@@ -79,11 +75,8 @@ fn segments(
 
 fn collect_paths(d: &DirSnapshot, prefix: &str, out: &mut BTreeSet<String>) {
     for (name, child) in d.entries() {
-        let composed = if prefix.is_empty() {
-            name.to_string()
-        } else {
-            format!("{prefix}/{name}")
-        };
+        let composed =
+            if prefix.is_empty() { name.to_string() } else { format!("{prefix}/{name}") };
         out.insert(composed.clone());
         if let ChildEntry::Dir(DirChild::Covered(sub)) = child {
             collect_paths(sub, &composed, out);
@@ -122,9 +115,7 @@ fn exclude_target_dir_omits_subtree_contents() {
     let (tx, rx) = unbounded::<Input>();
     let mut prober = WorkerProber::new(sink(tx), nz(1)).unwrap();
     let cfg = ScanConfig::from(
-        SubtreeScan::builder()
-            .exclude(GlobPattern::compile("target/**").unwrap())
-            .build(),
+        SubtreeScan::builder().exclude(GlobPattern::compile("target/**").unwrap()).build(),
     );
     let segs = segments(&prober, &rx, tmp.path().to_path_buf(), cfg);
     // No entry under `target/` is emitted (every cumulative path starting with `target/` matches
@@ -146,9 +137,7 @@ fn pattern_double_star_matches_recursive_files() {
     let (tx, rx) = unbounded::<Input>();
     let mut prober = WorkerProber::new(sink(tx), nz(1)).unwrap();
     let cfg = ScanConfig::from(
-        SubtreeScan::builder()
-            .pattern(GlobPattern::compile("**/*.c").unwrap())
-            .build(),
+        SubtreeScan::builder().pattern(GlobPattern::compile("**/*.c").unwrap()).build(),
     );
     let segs = segments(&prober, &rx, tmp.path().to_path_buf(), cfg);
     // Dirs always emit (pattern bypass); .c file emits; .txt does not.

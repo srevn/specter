@@ -23,8 +23,7 @@ use std::sync::Arc;
 pub fn single_exec_program(argv: impl IntoIterator<Item = ArgTemplate>) -> Arc<ActionProgram> {
     let mut b = ProgramBuilder::new();
     let h = b.emit(SpawnBody::Exec(ExecAction::new(argv, None)));
-    b.patch_on_ok(h, BranchTarget::Escape)
-        .expect("Escape target is unconditionally accepted");
+    b.patch_on_ok(h, BranchTarget::Escape).expect("Escape target is unconditionally accepted");
     b.patch_on_failed(h, BranchTarget::Terminate)
         .expect("Terminate target is unconditionally accepted");
     Arc::new(b.build().expect("one-op program with both edges patched"))
@@ -47,8 +46,7 @@ pub fn predicate_then_program(when: ExecAction, then_exec: ExecAction) -> Arc<Ac
     // Use the deferred-slot promise: target == pending.len() (= 1), filled by the upcoming `then`
     // emit.
     let then_first = b.continue_to_next();
-    b.patch_on_ok(pred, then_first)
-        .expect("deferred slot target == pending.len() is accepted");
+    b.patch_on_ok(pred, then_first).expect("deferred slot target == pending.len() is accepted");
     b.patch_on_failed(pred, BranchTarget::Escape)
         .expect("Escape target is unconditionally accepted");
 
@@ -58,8 +56,5 @@ pub fn predicate_then_program(when: ExecAction, then_exec: ExecAction) -> Arc<Ac
     b.patch_on_failed(then_handle, BranchTarget::Terminate)
         .expect("Terminate target is unconditionally accepted");
 
-    Arc::new(
-        b.build()
-            .expect("two-op program with all edges patched and in bounds"),
-    )
+    Arc::new(b.build().expect("two-op program with all edges patched and in bounds"))
 }

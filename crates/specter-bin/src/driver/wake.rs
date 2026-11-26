@@ -105,10 +105,7 @@ impl WakingSink {
     /// Wrap a [`Sender<Input>`] and a [`WakeHandle`] into the wake-bearing sink. The `waker` argument
     /// is typically a [`WakeHandle`] clone minted via [`crate::driver::Reactor::wake_handle`].
     pub(crate) const fn new(tx: Sender<Input>, waker: WakeHandle) -> Self {
-        Self {
-            tx: Some(tx),
-            waker,
-        }
+        Self { tx: Some(tx), waker }
     }
 
     /// Push an [`Input`] onto the channel then pulse the wake edge.
@@ -261,10 +258,7 @@ mod tests {
         poll.poll(&mut events, Some(Duration::from_secs(2)))
             .expect("Drop-fired wake unblocks poll");
         assert!(
-            events
-                .iter()
-                .map(mio::event::Event::token)
-                .any(|t| t == waker_token),
+            events.iter().map(mio::event::Event::token).any(|t| t == waker_token),
             "Drop pulses TOKEN_WAKER",
         );
 

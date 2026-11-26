@@ -65,8 +65,7 @@ fn massive_event_burst_emits_overflow() {
 
     // Watch the dir with STRUCTURE — every child create fires `IN_CREATE`, queueing an event into
     // the inotify instance.
-    w.watch(r_dir, tmp.path(), ResourceKind::Dir, ClassSet::STRUCTURE)
-        .expect("watch dir");
+    w.watch(r_dir, tmp.path(), ResourceKind::Dir, ClassSet::STRUCTURE).expect("watch dir");
 
     // Burst: create `queue_cap + headroom` files without any drain intervening. The kernel queues
     // each `IN_CREATE` on the per-instance queue; once it crosses `max_queued_events`, the kernel

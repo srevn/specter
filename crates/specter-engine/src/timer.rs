@@ -80,12 +80,7 @@ impl TimerHeap {
     #[must_use]
     pub fn schedule(&mut self, deadline: Instant, profile: ProfileId, kind: TimerKind) -> TimerId {
         let id = self.counter.next();
-        self.inner.push(Reverse(TimerEntry {
-            deadline,
-            profile,
-            id,
-            kind,
-        }));
+        self.inner.push(Reverse(TimerEntry { deadline, profile, id, kind }));
         id
     }
 
@@ -238,11 +233,7 @@ mod tests {
         let id_b = h.schedule(when, p, TimerKind::Settle);
         let first = h.pop_top().unwrap().id;
         let second = h.pop_top().unwrap().id;
-        let (smaller, larger) = if id_a < id_b {
-            (id_a, id_b)
-        } else {
-            (id_b, id_a)
-        };
+        let (smaller, larger) = if id_a < id_b { (id_a, id_b) } else { (id_b, id_a) };
         assert_eq!(first, smaller);
         assert_eq!(second, larger);
     }

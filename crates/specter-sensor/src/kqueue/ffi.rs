@@ -86,21 +86,14 @@ pub(super) fn kqueue_new() -> io::Result<OwnedFd> {
 /// `watch()` path. `EV_ADD` on an existing `(fd, EVFILT_VNODE)` entry overwrites the prior fflags
 /// atomically.
 pub(super) fn register_vnode(
-    kq: &OwnedFd,
-    target: &OwnedFd,
-    udata: u64,
-    fflags: u32,
+    kq: &OwnedFd, target: &OwnedFd, udata: u64, fflags: u32,
 ) -> io::Result<()> {
     vnode_change(kq, target, udata, libc::EV_ADD | libc::EV_CLEAR, fflags)
 }
 
 #[allow(clippy::similar_names)]
 fn vnode_change(
-    kq: &OwnedFd,
-    target: &OwnedFd,
-    udata: u64,
-    flags: u16,
-    fflags: u32,
+    kq: &OwnedFd, target: &OwnedFd, udata: u64, flags: u16, fflags: u32,
 ) -> io::Result<()> {
     let mut ev = Kevent::zeroed();
     // `OwnedFd::as_raw_fd` returns a non-negative `RawFd` by API contract (the type wraps an owned,
@@ -165,14 +158,7 @@ fn kevent_change(kq: &OwnedFd, ev: &libc::kevent) -> io::Result<()> {
     // 0`, so the kernel reads but does not write. `timeout = NULL` makes the call non-blocking for
     // changes.
     let n = unsafe {
-        kevent(
-            kq.as_raw_fd(),
-            std::ptr::from_ref(ev),
-            1,
-            std::ptr::null_mut(),
-            0,
-            std::ptr::null(),
-        )
+        kevent(kq.as_raw_fd(), std::ptr::from_ref(ev), 1, std::ptr::null_mut(), 0, std::ptr::null())
     };
     if n < 0 {
         return Err(Error::last_os_error());
@@ -239,10 +225,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let fd = open_for_watch(dir.path()).expect("open the watched directory");
         let flags = FdFlag::from_bits_truncate(fcntl(&fd, FcntlArg::F_GETFD).expect("F_GETFD"));
-        assert!(
-            flags.contains(FdFlag::FD_CLOEXEC),
-            "a command would inherit it"
-        );
+        assert!(flags.contains(FdFlag::FD_CLOEXEC), "a command would inherit it");
     }
 
     #[test]

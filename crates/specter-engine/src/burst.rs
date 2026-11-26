@@ -123,10 +123,7 @@ impl Engine {
     /// structurally unreachable and a routing diagnostic there would be spurious — they silently
     /// no-op instead.
     fn require_active_pre_fire(
-        &self,
-        profile_id: ProfileId,
-        helper: BurstHelper,
-        out: &mut StepOutput,
+        &self, profile_id: ProfileId, helper: BurstHelper, out: &mut StepOutput,
     ) -> bool {
         let Some(p) = self.profiles.get(profile_id) else {
             return false;
@@ -156,10 +153,7 @@ impl Engine {
     /// would duplicate the caller-side check without surfacing additional routing breaches (a
     /// phase-level mismatch within PostFire is caught by the helper's inner phase match instead).
     fn require_active_post_fire(
-        &self,
-        profile_id: ProfileId,
-        helper: BurstHelper,
-        out: &mut StepOutput,
+        &self, profile_id: ProfileId, helper: BurstHelper, out: &mut StepOutput,
     ) -> bool {
         let Some(p) = self.profiles.get(profile_id) else {
             return false;
@@ -184,10 +178,7 @@ impl Engine {
     /// in both dev/CI and release builds and survives via the usual `StepOutput.diagnostics`
     /// plumbing, where a `debug_assert!` would panic in dev/CI and silently misroute in release.
     fn require_idle(
-        &self,
-        profile_id: ProfileId,
-        helper: BurstHelper,
-        out: &mut StepOutput,
+        &self, profile_id: ProfileId, helper: BurstHelper, out: &mut StepOutput,
     ) -> bool {
         let Some(p) = self.profiles.get(profile_id) else {
             return false;
@@ -275,10 +266,7 @@ impl Engine {
     /// `EffectComplete::Ok` does NOT call this helper; post-Effect rebase routes through
     /// `transition_to_rebasing`.
     pub(crate) fn start_seed_burst(
-        &mut self,
-        profile_id: ProfileId,
-        trigger: Option<(ResourceId, Arc<Path>)>,
-        now: Instant,
+        &mut self, profile_id: ProfileId, trigger: Option<(ResourceId, Arc<Path>)>, now: Instant,
         out: &mut StepOutput,
     ) {
         if !self.require_idle(profile_id, BurstHelper::StartSeedBurst, out) {
@@ -313,8 +301,7 @@ impl Engine {
         // the burst's `forced = true`, and any in-flight cold-walk response then dispatches as a
         // forced fire through the same path the triggered Seed reaches.
         let burst_deadline =
-            self.timers
-                .schedule(now + max_settle, profile_id, TimerKind::BurstDeadline);
+            self.timers.schedule(now + max_settle, profile_id, TimerKind::BurstDeadline);
 
         // The cold path's emission lives *after* state install (the emission choke reads the
         // correlation back off the armed slot); this flag captures the path choice before the match
@@ -365,8 +352,7 @@ impl Engine {
                 // settle deadline; `dirty` notes the event as the activity witness for
                 // `seed_owes_first_fire`. Shape mirrors `start_standard_burst` exactly.
                 let settle_timer =
-                    self.timers
-                        .schedule(now + settle, profile_id, TimerKind::Settle);
+                    self.timers.schedule(now + settle, profile_id, TimerKind::Settle);
                 dirty.note(trigger_resource, trigger_path);
                 (PreFirePhase::Batching { settle_timer }, Some(now))
             }
@@ -418,12 +404,8 @@ impl Engine {
     /// `WholeSubtree` instead and `dirty` still accumulates (it remains the `owes_proof_from`
     /// activity witness and the diagnostic basis).
     pub(crate) fn start_standard_burst(
-        &mut self,
-        profile_id: ProfileId,
-        event_resource: ResourceId,
-        event_path: &Arc<Path>,
-        now: Instant,
-        out: &mut StepOutput,
+        &mut self, profile_id: ProfileId, event_resource: ResourceId, event_path: &Arc<Path>,
+        now: Instant, out: &mut StepOutput,
     ) {
         if !self.require_idle(profile_id, BurstHelper::StartStandardBurst, out) {
             return;
@@ -438,12 +420,9 @@ impl Engine {
         // window freezes the fold latch, so its eventual fire folds into the baseline instead.
         let fold_latched = p.absorb_window_live(now);
 
-        let settle_timer = self
-            .timers
-            .schedule(now + settle, profile_id, TimerKind::Settle);
+        let settle_timer = self.timers.schedule(now + settle, profile_id, TimerKind::Settle);
         let burst_deadline =
-            self.timers
-                .schedule(now + max_settle, profile_id, TimerKind::BurstDeadline);
+            self.timers.schedule(now + max_settle, profile_id, TimerKind::BurstDeadline);
 
         // Every pre-fire burst birth begins from the drained standing obligation: paths a prior
         // non-consuming terminal parked rightly re-enter the proof here — the dirty-LCA widens over
@@ -510,12 +489,8 @@ impl Engine {
     /// Re-entries from `Verifying` or `Draining` have no live settle timer to reuse and therefore
     /// schedule a fresh entry. `Batching` re-entries skip the schedule.
     pub(crate) fn event_drives_batching(
-        &mut self,
-        profile_id: ProfileId,
-        event_resource: ResourceId,
-        event_path: &Arc<Path>,
-        now: Instant,
-        out: &mut StepOutput,
+        &mut self, profile_id: ProfileId, event_resource: ResourceId, event_path: &Arc<Path>,
+        now: Instant, out: &mut StepOutput,
     ) {
         if !self.require_active_pre_fire(profile_id, BurstHelper::EventDrivesBatching, out) {
             return;
@@ -537,10 +512,8 @@ impl Engine {
         // Decide here whether the existing Batching settle timer (if any) carries over, or whether
         // we mint a fresh one for a Verifying/Draining re-entry. The decision is structural: a live
         // Batching has its own timer slot; Verifying/Draining have none.
-        let needs_fresh_timer = matches!(
-            pre.phase,
-            PreFirePhase::Verifying { .. } | PreFirePhase::Draining
-        );
+        let needs_fresh_timer =
+            matches!(pre.phase, PreFirePhase::Verifying { .. } | PreFirePhase::Draining);
 
         // Idempotent: disarms the `Verifying` slot and emits Cancel iff a probe was in flight. For
         // Batching / Draining entries no slot is armed and the helper is a no-op. On the Verifying
@@ -550,28 +523,19 @@ impl Engine {
         self.cancel_owner_probe(profile_id, out);
 
         let new_settle_timer = if needs_fresh_timer {
-            Some(
-                self.timers
-                    .schedule(now + settle, profile_id, TimerKind::Settle),
-            )
+            Some(self.timers.schedule(now + settle, profile_id, TimerKind::Settle))
         } else {
             None
         };
 
-        if let Some(pre) = self
-            .profiles
-            .get_mut(profile_id)
-            .and_then(Profile::pre_fire_burst_mut)
-        {
+        if let Some(pre) = self.profiles.get_mut(profile_id).and_then(Profile::pre_fire_burst_mut) {
             pre.last_event_time = Some(now);
             // A delivered in-mask event explains any sample-to-sample motion, so the mask-blindspot
             // streak breaks here — only event-*silent* retry windows count.
             pre.retry_streak = 0;
             pre.dirty.note(event_resource, Arc::clone(event_path));
             if let Some(timer_id) = new_settle_timer {
-                pre.phase = PreFirePhase::Batching {
-                    settle_timer: timer_id,
-                };
+                pre.phase = PreFirePhase::Batching { settle_timer: timer_id };
             }
             // else: phase already Batching, settle_timer unchanged. The existing timer fires at its
             // scheduled deadline; the expiry handler reads `last_event_time` and reschedules if
@@ -621,11 +585,7 @@ impl Engine {
     /// `expiry_now − now ≥ settle` (true by construction of the scheduled deadline) and transitions
     /// cleanly — independent of any clock skew between this call and the prior `last_event_time`.
     pub(crate) fn retry_drives_batching(
-        &mut self,
-        profile_id: ProfileId,
-        observed_motion: bool,
-        now: Instant,
-        out: &mut StepOutput,
+        &mut self, profile_id: ProfileId, observed_motion: bool, now: Instant, out: &mut StepOutput,
     ) {
         if !self.require_active_pre_fire(profile_id, BurstHelper::RetryDrivesBatching, out) {
             return;
@@ -633,15 +593,9 @@ impl Engine {
         let Some(settle) = self.profiles.get(profile_id).map(|p| p.settle) else {
             return;
         };
-        let settle_timer = self
-            .timers
-            .schedule(now + settle, profile_id, TimerKind::Settle);
+        let settle_timer = self.timers.schedule(now + settle, profile_id, TimerKind::Settle);
 
-        if let Some(pre) = self
-            .profiles
-            .get_mut(profile_id)
-            .and_then(Profile::pre_fire_burst_mut)
-        {
+        if let Some(pre) = self.profiles.get_mut(profile_id).and_then(Profile::pre_fire_burst_mut) {
             pre.phase = PreFirePhase::Batching { settle_timer };
             pre.last_event_time = Some(now);
             // One more settle window that was event-silent yet *observed motion* (hash-channel
@@ -676,11 +630,7 @@ impl Engine {
     /// the non-pre-fire arm is structurally unreachable and a routing diagnostic there would be
     /// spurious. The `debug_assert!` is the loud dev/CI backstop that the contract held.
     pub(crate) fn reschedule_batching(&mut self, profile_id: ProfileId, settle_timer: TimerId) {
-        if let Some(pre) = self
-            .profiles
-            .get_mut(profile_id)
-            .and_then(Profile::pre_fire_burst_mut)
-        {
+        if let Some(pre) = self.profiles.get_mut(profile_id).and_then(Profile::pre_fire_burst_mut) {
             debug_assert!(
                 matches!(pre.phase, PreFirePhase::Batching { .. }),
                 "reschedule_batching off a non-Batching phase (profile = {profile_id:?})",
@@ -708,11 +658,7 @@ impl Engine {
     /// (preserving the prior inline `else { return; }`) rather than emitting a spurious routing
     /// diagnostic.
     pub(crate) fn force_pending(&mut self, profile_id: ProfileId) {
-        if let Some(pre) = self
-            .profiles
-            .get_mut(profile_id)
-            .and_then(Profile::pre_fire_burst_mut)
-        {
+        if let Some(pre) = self.profiles.get_mut(profile_id).and_then(Profile::pre_fire_burst_mut) {
             pre.forced = true;
         }
     }
@@ -785,10 +731,7 @@ impl Engine {
         // `transition_to_rebasing`'s single arm. Both loud resolutions and the choke's correlation
         // read-back are co-required: read-back stops an orphaned wire, the loud resolutions stop a
         // silent no-probe wedge — neither subsumes the others.
-        let Some(pre) = self
-            .profiles
-            .get_mut(profile_id)
-            .and_then(Profile::pre_fire_burst_mut)
+        let Some(pre) = self.profiles.get_mut(profile_id).and_then(Profile::pre_fire_burst_mut)
         else {
             unreachable!(
                 "transition_to_verifying: Profile {profile_id:?} not \
@@ -800,10 +743,7 @@ impl Engine {
         // from `dirty`'s captured paths when `event_chains_prove_quiescence` holds, `WholeSubtree`
         // otherwise — the predicate that just resolved the target) and `forced` off this armed slot
         // — the transition threads neither, and `dirty` is read there immutably, never drained.
-        pre.phase = PreFirePhase::Verifying {
-            slot: ProbeSlot::armed(correlation),
-            target,
-        };
+        pre.phase = PreFirePhase::Verifying { slot: ProbeSlot::armed(correlation), target };
 
         self.emit_owner_probe(profile_id, out);
     }
@@ -825,11 +765,7 @@ impl Engine {
         if !self.require_active_pre_fire(profile_id, BurstHelper::TransitionToDraining, out) {
             return;
         }
-        if let Some(pre) = self
-            .profiles
-            .get_mut(profile_id)
-            .and_then(Profile::pre_fire_burst_mut)
-        {
+        if let Some(pre) = self.profiles.get_mut(profile_id).and_then(Profile::pre_fire_burst_mut) {
             debug_assert!(
                 matches!(pre.phase, PreFirePhase::Verifying { .. }),
                 "transition_to_draining off a non-Verifying phase (profile = {profile_id:?})",
@@ -868,10 +804,7 @@ impl Engine {
     /// install" two-step), so an orphaned gate timer is structurally impossible here. A stray one
     /// would lazy-drop via `is_timer_referenced` regardless.
     pub(crate) fn transition_to_awaiting(
-        &mut self,
-        profile_id: ProfileId,
-        outstanding: NonZeroU32,
-        now: Instant,
+        &mut self, profile_id: ProfileId, outstanding: NonZeroU32, now: Instant,
         out: &mut StepOutput,
     ) {
         if !self.require_active_pre_fire(profile_id, BurstHelper::TransitionToAwaiting, out) {
@@ -954,13 +887,8 @@ impl Engine {
         let Some(max_settle) = self.profiles.get(profile_id).map(Profile::max_settle) else {
             return;
         };
-        let timer = self
-            .timers
-            .schedule(now + max_settle, profile_id, TimerKind::RebaseCeiling);
-        if let Some(post) = self
-            .profiles
-            .get_mut(profile_id)
-            .and_then(Profile::post_fire_burst_mut)
+        let timer = self.timers.schedule(now + max_settle, profile_id, TimerKind::RebaseCeiling);
+        if let Some(post) = self.profiles.get_mut(profile_id).and_then(Profile::post_fire_burst_mut)
         {
             debug_assert!(
                 matches!(post.ceiling, CeilingState::NotStarted),
@@ -1003,10 +931,7 @@ impl Engine {
     /// phases (and the gate-deadline-recovery caller has its own `Active(PostFire(Awaiting))`
     /// precondition), so only post-fire phases arrive. The non-post-fire arm silently no-ops.
     pub(crate) fn force_pending_post_fire(&mut self, profile_id: ProfileId) {
-        if let Some(post) = self
-            .profiles
-            .get_mut(profile_id)
-            .and_then(Profile::post_fire_burst_mut)
+        if let Some(post) = self.profiles.get_mut(profile_id).and_then(Profile::post_fire_burst_mut)
         {
             post.ceiling = CeilingState::Reached;
         }
@@ -1082,10 +1007,7 @@ impl Engine {
         // Loud arm. `require_active_post_fire` proved `Active(PostFire)`, so `post_fire_burst_mut`
         // resolving `None` means the state machine broke between the gate and the arm — loud crash,
         // not a silent no-probe wedge (co-required with the choke's read-back).
-        let Some(post) = self
-            .profiles
-            .get_mut(profile_id)
-            .and_then(Profile::post_fire_burst_mut)
+        let Some(post) = self.profiles.get_mut(profile_id).and_then(Profile::post_fire_burst_mut)
         else {
             unreachable!(
                 "transition_to_rebasing: Profile {profile_id:?} not \
@@ -1142,11 +1064,7 @@ impl Engine {
     /// settle` (true by construction) and transitions cleanly — independent of any clock skew between
     /// this call and any prior `last_event_time`.
     pub(crate) fn transition_to_settling(
-        &mut self,
-        profile_id: ProfileId,
-        observed_motion: bool,
-        now: Instant,
-        out: &mut StepOutput,
+        &mut self, profile_id: ProfileId, observed_motion: bool, now: Instant, out: &mut StepOutput,
     ) {
         if !self.require_active_post_fire(profile_id, BurstHelper::TransitionToSettling, out) {
             return;
@@ -1155,13 +1073,9 @@ impl Engine {
             return;
         };
         let settle_timer =
-            self.timers
-                .schedule(now + settle, profile_id, TimerKind::PostFireSettle);
+            self.timers.schedule(now + settle, profile_id, TimerKind::PostFireSettle);
 
-        if let Some(post) = self
-            .profiles
-            .get_mut(profile_id)
-            .and_then(Profile::post_fire_burst_mut)
+        if let Some(post) = self.profiles.get_mut(profile_id).and_then(Profile::post_fire_burst_mut)
         {
             debug_assert!(
                 matches!(post.phase, PostFirePhase::Rebasing(_)),
@@ -1205,10 +1119,7 @@ impl Engine {
     /// so the non-post-fire arm is structurally unreachable and a routing diagnostic there would be
     /// spurious. The `debug_assert!` is the loud dev/CI backstop that the contract held.
     pub(crate) fn reschedule_settling(&mut self, profile_id: ProfileId, settle_timer: TimerId) {
-        if let Some(post) = self
-            .profiles
-            .get_mut(profile_id)
-            .and_then(Profile::post_fire_burst_mut)
+        if let Some(post) = self.profiles.get_mut(profile_id).and_then(Profile::post_fire_burst_mut)
         {
             debug_assert!(
                 matches!(post.phase, PostFirePhase::Settling { .. }),
@@ -1365,24 +1276,15 @@ impl Engine {
     /// `event` is threaded purely for the diagnostic so an operator can correlate logs to the
     /// deferred FsEvent.
     pub(crate) fn absorb_event_into_fire_tail(
-        &mut self,
-        profile_id: ProfileId,
-        event_resource: ResourceId,
-        event_path: &Arc<Path>,
-        event: FsEvent,
-        now: Instant,
-        out: &mut StepOutput,
+        &mut self, profile_id: ProfileId, event_resource: ResourceId, event_path: &Arc<Path>,
+        event: FsEvent, now: Instant, out: &mut StepOutput,
     ) {
         if !self.require_active_post_fire(profile_id, BurstHelper::AbsorbEventIntoFireTail, out) {
             return;
         }
-        if let Some(post) = self
-            .profiles
-            .get_mut(profile_id)
-            .and_then(Profile::post_fire_burst_mut)
+        if let Some(post) = self.profiles.get_mut(profile_id).and_then(Profile::post_fire_burst_mut)
         {
-            post.final_window_residual
-                .note(event_resource, Arc::clone(event_path));
+            post.final_window_residual.note(event_resource, Arc::clone(event_path));
             post.last_event_time = Some(now);
             // An absorbed in-mask event explains the rebase loop's sample motion — the mask-blindspot
             // streak breaks, mirroring `event_drives_batching`'s pre-fire reset.
@@ -1423,10 +1325,7 @@ impl Engine {
     /// burst-deadline-bounded exactly like a fresh `start_standard_burst` — it self-heals at the
     /// external change rate and cannot livelock.
     pub(crate) fn restart_burst_from_fire_tail_residual(
-        &mut self,
-        profile_id: ProfileId,
-        now: Instant,
-        out: &mut StepOutput,
+        &mut self, profile_id: ProfileId, now: Instant, out: &mut StepOutput,
     ) {
         if !self.require_active_post_fire(
             profile_id,
@@ -1468,12 +1367,9 @@ impl Engine {
 
         // The two engine timers a fresh Standard burst arms (`start_standard_burst`): the settle
         // debounce and the burst-deadline force-fire ceiling.
-        let settle_timer = self
-            .timers
-            .schedule(now + settle, profile_id, TimerKind::Settle);
+        let settle_timer = self.timers.schedule(now + settle, profile_id, TimerKind::Settle);
         let burst_deadline =
-            self.timers
-                .schedule(now + max_settle, profile_id, TimerKind::BurstDeadline);
+            self.timers.schedule(now + max_settle, profile_id, TimerKind::BurstDeadline);
 
         // Typed restart move PostFire → PreFire — the inverse of `transition_to_awaiting`'s fire
         // move. `into_pre_fire_residual` consumes the post-fire burst by value, so the transform
@@ -1519,15 +1415,9 @@ impl Engine {
 /// every stop moves the root only *up*: the result is an ancestor-or-equal of `path`. A `path` not
 /// under the anchor never starts the descent.
 fn listed_ancestor(
-    anchor: ResourceId,
-    listing: &Arc<DirSnapshot>,
-    path: &Path,
-    tree: &Tree,
+    anchor: ResourceId, listing: &Arc<DirSnapshot>, path: &Path, tree: &Tree,
 ) -> ResourceId {
-    let Some(rel) = tree
-        .get(anchor)
-        .and_then(|a| path.strip_prefix(a.path()).ok())
-    else {
+    let Some(rel) = tree.get(anchor).and_then(|a| path.strip_prefix(a.path()).ok()) else {
         return anchor;
     };
     let (mut slot, mut frame) = (anchor, listing);
@@ -1662,10 +1552,7 @@ mod tests {
             ),
         );
         list(&mut e, pid, dir_snap(&[]));
-        e.profiles
-            .get_mut(pid)
-            .expect("freshly attached")
-            .install_anchor_claim_held();
+        e.profiles.get_mut(pid).expect("freshly attached").install_anchor_claim_held();
         (e, pid)
     }
 
@@ -1673,10 +1560,7 @@ mod tests {
     /// A Standard burst opens only over a settled baseline, so a pin that computes a Standard target
     /// gives its Profile the listing production would hold.
     fn list(e: &mut Engine, pid: specter_core::ProfileId, listing: Arc<DirSnapshot>) {
-        e.profiles
-            .get_mut(pid)
-            .expect("live Profile")
-            .install_dir_current(listing);
+        e.profiles.get_mut(pid).expect("live Profile").install_dir_current(listing);
     }
 
     /// The live resource's materialised path — what the sensor reports as an `FsEvent`'s `event_path`
@@ -1702,10 +1586,7 @@ mod tests {
         assert!(matches!(burst.phase, PreFirePhase::Verifying { .. }));
         assert!(!burst.forced);
         assert!(burst.dirty.is_empty(), "cold-Seed dirty starts empty");
-        assert!(
-            burst.last_event_time.is_none(),
-            "cold-Seed has no driving event",
-        );
+        assert!(burst.last_event_time.is_none(), "cold-Seed has no driving event");
 
         // Heap holds ONLY burst_deadline (no settle_timer on the cold path —
         // Verifying-at-construction skips Batching).
@@ -1756,9 +1637,8 @@ mod tests {
             }
             _ => panic!("expected Active(PreFire)"),
         }
-        let correlation = e
-            .pending_probe_for(pid)
-            .expect("Verifying probe in flight on the state slot");
+        let correlation =
+            e.pending_probe_for(pid).expect("Verifying probe in flight on the state slot");
 
         // Output: one Probe whose correlation matches.
         let probe_correlation = out.probe_ops().iter().find_map(|op| match op {
@@ -1781,9 +1661,7 @@ mod tests {
         e.start_standard_burst(pid, r, &rp, Instant::now(), &mut out);
         e.transition_to_verifying(pid, &mut out);
 
-        let projected = e
-            .pending_probe_for(pid)
-            .expect("a verify probe is in flight");
+        let projected = e.pending_probe_for(pid).expect("a verify probe is in flight");
 
         // Identity is on the Verifying slot itself.
         let slot_correlation = match e.profiles.get(pid).unwrap().state() {
@@ -1816,11 +1694,8 @@ mod tests {
         e.event_drives_batching(pid, r, &rp, Instant::now(), &mut out);
 
         // One Cancel emitted for the in-flight probe.
-        let cancel_count = out
-            .probe_ops()
-            .iter()
-            .filter(|op| matches!(op, ProbeOp::Cancel { .. }))
-            .count();
+        let cancel_count =
+            out.probe_ops().iter().filter(|op| matches!(op, ProbeOp::Cancel { .. })).count();
         assert_eq!(cancel_count, 1);
 
         let p = e.profiles.get(pid).unwrap();
@@ -1829,11 +1704,7 @@ mod tests {
             _ => panic!("expected Active"),
         };
         assert!(matches!(burst.phase, PreFirePhase::Batching { .. }));
-        assert_eq!(
-            burst.intent,
-            BurstIntent::Seed,
-            "intent preserved across Verifying → Batching",
-        );
+        assert_eq!(burst.intent, BurstIntent::Seed, "intent preserved across Verifying → Batching");
     }
 
     #[test]
@@ -1848,11 +1719,8 @@ mod tests {
 
         e.event_drives_batching(pid, r, &rp, Instant::now(), &mut out);
 
-        let cancels = out
-            .probe_ops()
-            .iter()
-            .filter(|op| matches!(op, ProbeOp::Cancel { .. }))
-            .count();
+        let cancels =
+            out.probe_ops().iter().filter(|op| matches!(op, ProbeOp::Cancel { .. })).count();
         assert_eq!(cancels, 0);
 
         // Still Batching; intent preserved.
@@ -1935,15 +1803,12 @@ mod tests {
         // Mirror the real response path: the Verifying slot is disarmed via `take_owner_probe` before
         // burst-end.
         let _ = e.take_owner_probe(pid);
-        assert!(
-            e.pending_probe_for(pid).is_none(),
-            "slot consumed, mirroring on_probe_response",
-        );
+        assert!(e.pending_probe_for(pid).is_none(), "slot consumed, mirroring on_probe_response");
 
         e.finish_burst_to_idle(pid, &mut out);
 
         assert!(
-            matches!(e.profiles.get(pid).unwrap().state(), ProfileState::Idle,),
+            matches!(e.profiles.get(pid).unwrap().state(), ProfileState::Idle),
             "legitimate disarmed caller path returns the Profile to Idle",
         );
     }
@@ -1989,10 +1854,7 @@ mod tests {
             .iter()
             .filter(|entry| entry.profile == pid && entry.kind == TimerKind::Settle)
             .count();
-        assert_eq!(
-            settle_timers, 1,
-            "exactly one settle timer per burst (no per-event reinsert)",
-        );
+        assert_eq!(settle_timers, 1, "exactly one settle timer per burst (no per-event reinsert)");
 
         let initial_settle_timer = match burst.phase {
             PreFirePhase::Batching { settle_timer } => settle_timer,
@@ -2005,11 +1867,7 @@ mod tests {
         // settle`. The phase stays Batching with the new id.
         let expiry_now = t0 + SETTLE; // initial timer's deadline
         let _ = e.step(
-            Input::TimerExpired {
-                profile: pid,
-                kind: TimerKind::Settle,
-                id: initial_settle_timer,
-            },
+            Input::TimerExpired { profile: pid, kind: TimerKind::Settle, id: initial_settle_timer },
             expiry_now,
         );
 
@@ -2046,11 +1904,7 @@ mod tests {
         // on_settle_expired transitions to Verifying — the cycle completes.
         let final_expiry = last_event + SETTLE;
         let _ = e.step(
-            Input::TimerExpired {
-                profile: pid,
-                kind: TimerKind::Settle,
-                id: rescheduled_timer,
-            },
+            Input::TimerExpired { profile: pid, kind: TimerKind::Settle, id: rescheduled_timer },
             final_expiry,
         );
         let final_phase = match e.profiles.get(pid).unwrap().state() {
@@ -2077,10 +1931,7 @@ mod tests {
 
         e.finish_burst_to_idle(pid, &mut out);
 
-        assert!(matches!(
-            e.profiles.get(pid).unwrap().state(),
-            ProfileState::Idle,
-        ));
+        assert!(matches!(e.profiles.get(pid).unwrap().state(), ProfileState::Idle));
     }
 
     #[test]
@@ -2155,10 +2006,7 @@ mod tests {
 
         e.transition_to_verifying(pid, &mut out);
 
-        assert!(
-            out.probe_ops().is_empty(),
-            "helper bails before any probe-side side effects",
-        );
+        assert!(out.probe_ops().is_empty(), "helper bails before any probe-side side effects");
         let saw = out.diagnostics.iter().any(|d| {
             matches!(
                 d,
@@ -2262,15 +2110,9 @@ mod tests {
         let mut e = Engine::new();
         let root = e.tree.ensure_root("/root", ResourceRole::User);
         e.tree.set_kind(root, ResourceKind::Dir);
-        let a = e
-            .tree
-            .ensure_child(root, "a", ResourceRole::User)
-            .expect("test live parent");
+        let a = e.tree.ensure_child(root, "a", ResourceRole::User).expect("test live parent");
         e.tree.set_kind(a, ResourceKind::Dir);
-        let b = e
-            .tree
-            .ensure_child(root, "b", ResourceRole::User)
-            .expect("test live parent");
+        let b = e.tree.ensure_child(root, "b", ResourceRole::User).expect("test live parent");
         e.tree.set_kind(b, ResourceKind::Dir);
         let pid = e.profiles.attach(
             &mut e.tree,
@@ -2305,9 +2147,7 @@ mod tests {
     /// slots only name what an event can land on: the target rule reads graftability off the listing
     /// alone.
     fn engine_listing(
-        config: SubtreeScan,
-        listing: Arc<DirSnapshot>,
-        slots: &[&str],
+        config: SubtreeScan, listing: Arc<DirSnapshot>, slots: &[&str],
     ) -> (Engine, specter_core::ProfileId, ResourceId, Vec<ResourceId>) {
         let mut e = Engine::new();
         let root = e.tree.ensure_root("/root", ResourceRole::User);
@@ -2340,10 +2180,7 @@ mod tests {
     fn pre_fire_burst_for_test(intent: BurstIntent, dirty: DirtyProvenance) -> PreFireBurst {
         PreFireBurst::new(
             TimerId::default(),
-            PreFirePhase::Verifying {
-                slot: ProbeSlot::empty(),
-                target: ResourceId::default(),
-            },
+            PreFirePhase::Verifying { slot: ProbeSlot::empty(), target: ResourceId::default() },
             intent,
             dirty,
             None,
@@ -2360,19 +2197,14 @@ mod tests {
 
     /// The target `pre_fire_target` computes for an events-complete Standard burst over `dirty`.
     fn standard_target(
-        e: &Engine,
-        pid: specter_core::ProfileId,
-        dirty: DirtyProvenance,
+        e: &Engine, pid: specter_core::ProfileId, dirty: DirtyProvenance,
     ) -> ResourceId {
         let pre = pre_fire_burst_for_test(BurstIntent::Standard, dirty);
         pre_fire_target(e.profiles.get(pid).unwrap(), &pre, &e.tree)
     }
 
     #[test]
-    #[cfg_attr(
-        not(debug_assertions),
-        ignore = "debug_assert! is compiled out in release"
-    )]
+    #[cfg_attr(not(debug_assertions), ignore = "debug_assert! is compiled out in release")]
     #[should_panic(expected = "Standard burst with empty")]
     fn pre_fire_target_standard_empty_dirty_panics_in_debug() {
         // Standard intent, no captured paths: the empty-`dirty` arm is a should-never (a Standard
@@ -2385,10 +2217,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        not(debug_assertions),
-        ignore = "debug_assert! is compiled out in release"
-    )]
+    #[cfg_attr(not(debug_assertions), ignore = "debug_assert! is compiled out in release")]
     #[should_panic(expected = "Standard burst with no listing")]
     fn pre_fire_target_standard_without_listing_panics_in_debug() {
         // The twin should-never: a Standard burst on a Profile that holds no listing. A Standard
@@ -2438,10 +2267,7 @@ mod tests {
     fn pre_fire_target_standard_two_siblings_resolve_to_parent() {
         // Two captured sibling paths: their component-LCA is the parent (`/root` here), the anchor.
         let (e, pid, root, a, b) = engine_with_two_children();
-        assert_eq!(
-            standard_target(&e, pid, dirty_at(&[(a, "/root/a"), (b, "/root/b")])),
-            root,
-        );
+        assert_eq!(standard_target(&e, pid, dirty_at(&[(a, "/root/a"), (b, "/root/b")])), root);
     }
 
     #[test]
@@ -2502,10 +2328,7 @@ mod tests {
             dir_snap(&[("a", EntryKind::Dir, 1)]),
             &["a"],
         );
-        assert_eq!(
-            standard_target(&e, pid, dirty_at(&[(slots[0], "/root/a")])),
-            root
-        );
+        assert_eq!(standard_target(&e, pid, dirty_at(&[(slots[0], "/root/a")])), root);
     }
 
     #[test]
@@ -2605,24 +2428,15 @@ mod tests {
             BurstIntent::Standard,
             dirty_at(&[(file_anchor, "/parentdir/main.rs")]),
         );
-        assert_eq!(
-            pre_fire_target(e.profiles.get(pid).unwrap(), &pre, &e.tree),
-            file_anchor,
-        );
+        assert_eq!(pre_fire_target(e.profiles.get(pid).unwrap(), &pre, &e.tree), file_anchor);
 
         // Same conclusion even if dirty is empty.
         let pre_empty = pre_fire_burst_for_test(BurstIntent::Standard, DirtyProvenance::new());
-        assert_eq!(
-            pre_fire_target(e.profiles.get(pid).unwrap(), &pre_empty, &e.tree),
-            file_anchor,
-        );
+        assert_eq!(pre_fire_target(e.profiles.get(pid).unwrap(), &pre_empty, &e.tree), file_anchor);
 
         // And under Seed intent.
         let pre_seed = pre_fire_burst_for_test(BurstIntent::Seed, DirtyProvenance::new());
-        assert_eq!(
-            pre_fire_target(e.profiles.get(pid).unwrap(), &pre_seed, &e.tree),
-            file_anchor,
-        );
+        assert_eq!(pre_fire_target(e.profiles.get(pid).unwrap(), &pre_seed, &e.tree), file_anchor);
     }
 
     #[test]
@@ -2633,17 +2447,11 @@ mod tests {
         let (e, pid, root, a, _b) = engine_with_two_children();
 
         let pre = pre_fire_burst_for_test(BurstIntent::Seed, dirty_at(&[(a, "/root/a")]));
-        assert_eq!(
-            pre_fire_target(e.profiles.get(pid).unwrap(), &pre, &e.tree),
-            root,
-        );
+        assert_eq!(pre_fire_target(e.profiles.get(pid).unwrap(), &pre, &e.tree), root);
 
         // Same with empty dirty.
         let pre_empty = pre_fire_burst_for_test(BurstIntent::Seed, DirtyProvenance::new());
-        assert_eq!(
-            pre_fire_target(e.profiles.get(pid).unwrap(), &pre_empty, &e.tree),
-            root,
-        );
+        assert_eq!(pre_fire_target(e.profiles.get(pid).unwrap(), &pre_empty, &e.tree), root);
     }
 
     #[test]
@@ -2667,19 +2475,13 @@ mod tests {
     /// production `attach_sub` flow's anchor-classification step by stamping `Profile.kind =
     /// Some(File)` post-attach — without it the typed dispatch in `transition_to_verifying` defaults
     /// to Subtree.
-    fn engine_with_file_anchor() -> (
-        Engine,
-        specter_core::ProfileId,
-        specter_core::ResourceId,
-        specter_core::ResourceId,
-    ) {
+    fn engine_with_file_anchor()
+    -> (Engine, specter_core::ProfileId, specter_core::ResourceId, specter_core::ResourceId) {
         let mut e = Engine::new();
         let parent = e.tree.ensure_root("/parentdir", ResourceRole::User);
         e.tree.set_kind(parent, ResourceKind::Dir);
-        let file_anchor = e
-            .tree
-            .ensure_child(parent, "main.rs", ResourceRole::User)
-            .expect("test live parent");
+        let file_anchor =
+            e.tree.ensure_child(parent, "main.rs", ResourceRole::User).expect("test live parent");
         e.tree.set_kind(file_anchor, ResourceKind::File);
         let pid = e.profiles.attach(
             &mut e.tree,
@@ -2799,11 +2601,7 @@ mod tests {
         // Dir-anchored Profile produces `Chains`.
         let anchor_path = e.tree.path_of(root).expect("anchor path resolves");
         match req {
-            ProbeRequest::Subtree {
-                target_path,
-                obligation,
-                ..
-            } => {
+            ProbeRequest::Subtree { target_path, obligation, .. } => {
                 assert_eq!(
                     *target_path, anchor_path,
                     "sibling component-LCA resolves to the anchor",
@@ -2849,11 +2647,7 @@ mod tests {
             .expect("Standard probe emitted");
         let anchor_path = e.tree.path_of(root).expect("anchor path resolves");
         match req {
-            ProbeRequest::Subtree {
-                target_path,
-                obligation,
-                ..
-            } => {
+            ProbeRequest::Subtree { target_path, obligation, .. } => {
                 assert_eq!(
                     *target_path, anchor_path,
                     "events-incomplete Standard roots the sample at the anchor, \
@@ -2882,20 +2676,11 @@ mod tests {
         let mut e = Engine::new();
         let root = e.tree.ensure_root("/root", ResourceRole::User);
         e.tree.set_kind(root, ResourceKind::Dir);
-        let sub = e
-            .tree
-            .ensure_child(root, "sub", ResourceRole::User)
-            .expect("live parent");
+        let sub = e.tree.ensure_child(root, "sub", ResourceRole::User).expect("live parent");
         e.tree.set_kind(sub, ResourceKind::Dir);
-        let a = e
-            .tree
-            .ensure_child(sub, "a", ResourceRole::User)
-            .expect("live parent");
+        let a = e.tree.ensure_child(sub, "a", ResourceRole::User).expect("live parent");
         e.tree.set_kind(a, ResourceKind::Dir);
-        let b = e
-            .tree
-            .ensure_child(sub, "b", ResourceRole::User)
-            .expect("live parent");
+        let b = e.tree.ensure_child(sub, "b", ResourceRole::User).expect("live parent");
         e.tree.set_kind(b, ResourceKind::Dir);
         let pid = e.profiles.attach(
             &mut e.tree,
@@ -2937,11 +2722,7 @@ mod tests {
         let sub_path = e.tree.path_of(sub).expect("sub path resolves");
         let root_path = e.tree.path_of(root).expect("anchor path resolves");
         match req {
-            ProbeRequest::Subtree {
-                target_path,
-                anchor_path,
-                ..
-            } => {
+            ProbeRequest::Subtree { target_path, anchor_path, .. } => {
                 assert_eq!(
                     *target_path, sub_path,
                     "recursion root is the dirty grandchildren's LCA",
@@ -2985,19 +2766,9 @@ mod tests {
             .expect("Standard probe emitted");
         let anchor_path = e.tree.path_of(root).expect("anchor path resolves");
         match req {
-            ProbeRequest::Subtree {
-                target_path,
-                anchor_path: emitted_anchor,
-                ..
-            } => {
-                assert_eq!(
-                    *target_path, anchor_path,
-                    "sibling-LCA resolves to the anchor",
-                );
-                assert_eq!(
-                    *emitted_anchor, anchor_path,
-                    "anchor_path field carries the anchor",
-                );
+            ProbeRequest::Subtree { target_path, anchor_path: emitted_anchor, .. } => {
+                assert_eq!(*target_path, anchor_path, "sibling-LCA resolves to the anchor");
+                assert_eq!(*emitted_anchor, anchor_path, "anchor_path field carries the anchor");
                 assert!(
                     Arc::ptr_eq(target_path, emitted_anchor),
                     "target == anchor takes the Arc::clone fast path (one allocation)",

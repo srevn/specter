@@ -214,10 +214,7 @@ impl InotifyConfigWatcher {
         let parent_path = canonical
             .parent()
             .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "config path has no parent directory",
-                )
+                io::Error::new(io::ErrorKind::InvalidInput, "config path has no parent directory")
             })?
             .to_path_buf();
         let config_basename = canonical
@@ -456,11 +453,7 @@ mod tests {
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             let timeout_ms = i32::try_from(remaining.as_millis()).unwrap_or(i32::MAX);
-            let mut pfd = libc::pollfd {
-                fd: fd.as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            };
+            let mut pfd = libc::pollfd { fd: fd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
             // SAFETY: `pfd` is a stack binding holding one valid `pollfd`; the pointer is live for
             // the duration of the syscall. `1` matches the slice length.
             let n = unsafe { libc::poll(std::ptr::from_mut(&mut pfd), 1, timeout_ms) };
@@ -571,19 +564,13 @@ mod tests {
         // Drain any trailing fragments so subsequent state reflects the watcher's settled post-save
         // view.
         drain_quiet(&mut w);
-        assert!(
-            w.file_wd.is_some(),
-            "post-loop reopen must restore the file wd on the new inode"
-        );
+        assert!(w.file_wd.is_some(), "post-loop reopen must restore the file wd on the new inode");
 
         // In-place edit on the recreated file pulses iff the file wd points at the new inode (rather
         // than the unlinked old one or being null).
         fs::write(&cfg, b"c").expect("in-place edit on recreated file");
         let r = fire_drain(&mut w, watchdog()).expect("drain ok");
-        assert!(
-            r,
-            "in-place edit on recreated file must wake the watcher (Ok(true))"
-        );
+        assert!(r, "in-place edit on recreated file must wake the watcher (Ok(true))");
     }
 
     #[test]
@@ -606,10 +593,7 @@ mod tests {
         // Drain any trailing events (notably IN_IGNORED on file_wd if not in the prior batch) so
         // the post-condition is observable.
         drain_quiet(&mut w);
-        assert!(
-            w.file_wd.is_none(),
-            "file_wd dropped after kernel IN_IGNORED"
-        );
+        assert!(w.file_wd.is_none(), "file_wd dropped after kernel IN_IGNORED");
 
         // Phase 2: recreate. Parent IN_CREATE(specter.toml) pulses; basename match → try_reopen runs
         // after the drain loop.
@@ -618,10 +602,7 @@ mod tests {
             fire_drain(&mut w, watchdog()).expect("drain ok"),
             "recreate must wake the watcher (Ok(true))"
         );
-        assert!(
-            w.file_wd.is_some(),
-            "file_wd reattached by try_reopen on parent event"
-        );
+        assert!(w.file_wd.is_some(), "file_wd reattached by try_reopen on parent event");
 
         // Phase 3: post-reopen edit pulses through the new file_wd — proves the re-add actually
         // rebound the inotify watch.
@@ -651,10 +632,7 @@ mod tests {
         // dropped it.
         let deadline = Instant::now() + Duration::from_millis(200);
         let r = fire_drain(&mut w, deadline).expect("drain ok");
-        assert!(
-            !r,
-            "sibling write must NOT wake the watcher (basename filter)"
-        );
+        assert!(!r, "sibling write must NOT wake the watcher (basename filter)");
     }
 
     #[test]
@@ -682,10 +660,7 @@ mod tests {
                 Ok(false) => panic!("drain returned Ok(false) before parent IN_IGNORED"),
                 Err(e) => {
                     let msg = format!("{e}");
-                    assert!(
-                        msg.contains("parent dir watch lost"),
-                        "unexpected error: {msg}"
-                    );
+                    assert!(msg.contains("parent dir watch lost"), "unexpected error: {msg}");
                     return;
                 }
             }

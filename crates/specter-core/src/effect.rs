@@ -66,11 +66,7 @@ pub enum EffectTarget {
     Subtree { diff: Option<Arc<Diff>> },
     /// Per-stable-file fire. `target_path == anchor_path.join(segment)`. `diff` is mandatory: the
     /// type guarantees the `PerStableFile ⇒ needs_diff` invariant.
-    PerFile {
-        resource: ResourceId,
-        segment: CompactString,
-        diff: Arc<Diff>,
-    },
+    PerFile { resource: ResourceId, segment: CompactString, diff: Arc<Diff> },
 }
 
 /// Constructor input for [`Effect`]: what [`Effect::subtree`] and [`Effect::per_file`] share,
@@ -100,19 +96,9 @@ impl Effect {
     /// Per-stable-file Effect. `diff` is mandatory.
     #[must_use]
     pub fn per_file(
-        common: EffectCommon,
-        resource: ResourceId,
-        segment: CompactString,
-        diff: Arc<Diff>,
+        common: EffectCommon, resource: ResourceId, segment: CompactString, diff: Arc<Diff>,
     ) -> Self {
-        Self::from_common(
-            common,
-            EffectTarget::PerFile {
-                resource,
-                segment,
-                diff,
-            },
-        )
+        Self::from_common(common, EffectTarget::PerFile { resource, segment, diff })
     }
 
     /// Single construction choke: destructure the parameter struct into the flat fields and attach
@@ -139,15 +125,12 @@ impl Effect {
     #[must_use]
     pub const fn key(&self) -> DedupKey {
         match &self.target {
-            EffectTarget::Subtree { .. } => DedupKey::Subtree {
-                sub: self.sub,
-                profile: self.profile,
-            },
-            EffectTarget::PerFile { resource, .. } => DedupKey::PerFile {
-                sub: self.sub,
-                profile: self.profile,
-                resource: *resource,
-            },
+            EffectTarget::Subtree { .. } => {
+                DedupKey::Subtree { sub: self.sub, profile: self.profile }
+            }
+            EffectTarget::PerFile { resource, .. } => {
+                DedupKey::PerFile { sub: self.sub, profile: self.profile, resource: *resource }
+            }
         }
     }
 
@@ -212,15 +195,8 @@ impl Effect {
 /// nothing in the engine asks for.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
 pub enum DedupKey {
-    PerFile {
-        sub: SubId,
-        profile: ProfileId,
-        resource: ResourceId,
-    },
-    Subtree {
-        sub: SubId,
-        profile: ProfileId,
-    },
+    PerFile { sub: SubId, profile: ProfileId, resource: ResourceId },
+    Subtree { sub: SubId, profile: ProfileId },
 }
 
 impl DedupKey {
@@ -250,10 +226,7 @@ impl Default for DedupKey {
     /// Not a `SmallVec` sentinel: `DedupKey` is stored inside `Effect`, not directly in
     /// `StepOutput.effects`.
     fn default() -> Self {
-        Self::Subtree {
-            sub: SubId::default(),
-            profile: ProfileId::default(),
-        }
+        Self::Subtree { sub: SubId::default(), profile: ProfileId::default() }
     }
 }
 
@@ -344,21 +317,9 @@ mod dedup_key_tests {
         let p = ProfileId::from(KeyData::from_ffi(7));
         let s = SubId::from(KeyData::from_ffi(11));
         let r = ResourceId::from(KeyData::from_ffi(13));
-        let perfile = DedupKey::PerFile {
-            sub: s,
-            profile: p,
-            resource: r,
-        };
+        let perfile = DedupKey::PerFile { sub: s, profile: p, resource: r };
         let subtree = DedupKey::Subtree { sub: s, profile: p };
-        assert_eq!(
-            perfile.profile(),
-            p,
-            "PerFile.profile() returns the owning Profile",
-        );
-        assert_eq!(
-            subtree.profile(),
-            p,
-            "Subtree.profile() returns the owning Profile",
-        );
+        assert_eq!(perfile.profile(), p, "PerFile.profile() returns the owning Profile");
+        assert_eq!(subtree.profile(), p, "Subtree.profile() returns the owning Profile");
     }
 }

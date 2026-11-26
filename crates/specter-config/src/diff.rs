@@ -68,19 +68,11 @@ pub fn diff(old: &Config, new: &Config) -> SubRegistryDiff {
     // buckets are built from source-order `active_watches()` and are the load-bearing sort: replay
     // stability keys on config content, never slotmap mint order. Names are unique by validation,
     // so `sort_unstable_by` is observably indistinguishable from a stable sort and strictly cheaper.
-    debug_assert!(
-        removed.is_sorted(),
-        "removed must inherit BTreeMap key order",
-    );
+    debug_assert!(removed.is_sorted(), "removed must inherit BTreeMap key order");
     modified_identity.sort_unstable_by(|a, b| a.name.cmp(&b.name));
     modified_params.sort_unstable_by(|a, b| a.name.cmp(&b.name));
 
-    SubRegistryDiff {
-        added,
-        removed,
-        modified_identity,
-        modified_params,
-    }
+    SubRegistryDiff { added, removed, modified_identity, modified_params }
 }
 
 #[cfg(test)]
@@ -277,11 +269,7 @@ mod tests {
         let d = diff(&old, &new);
         assert_eq!(
             d.removed,
-            vec![
-                CompactString::from("a"),
-                CompactString::from("b"),
-                CompactString::from("c"),
-            ]
+            vec![CompactString::from("a"), CompactString::from("b"), CompactString::from("c"),]
         );
     }
 
@@ -315,10 +303,7 @@ mod tests {
         assert!(d.modified_params.is_empty());
         assert_eq!(d.modified_identity.len(), 1);
         assert_eq!(d.modified_identity[0].name, "a");
-        assert_eq!(
-            d.modified_identity[0].events,
-            specter_core::ClassSet::CONTENT
-        );
+        assert_eq!(d.modified_identity[0].events, specter_core::ClassSet::CONTENT);
     }
 
     #[test]
@@ -333,16 +318,8 @@ mod tests {
         let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
         let new = cfg(&new_blocks.iter().map(String::as_str).collect::<Vec<_>>());
         let d = diff(&old, &new);
-        assert!(
-            d.modified_identity.is_empty(),
-            "identity bucket: {:?}",
-            d.modified_identity,
-        );
-        assert!(
-            d.modified_params.is_empty(),
-            "params bucket: {:?}",
-            d.modified_params,
-        );
+        assert!(d.modified_identity.is_empty(), "identity bucket: {:?}", d.modified_identity);
+        assert!(d.modified_params.is_empty(), "params bucket: {:?}", d.modified_params);
     }
 
     #[test]
@@ -360,16 +337,8 @@ mod tests {
         let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
         let new = cfg(&new_blocks.iter().map(String::as_str).collect::<Vec<_>>());
         let d = diff(&old, &new);
-        assert!(
-            d.modified_identity.is_empty(),
-            "identity bucket: {:?}",
-            d.modified_identity,
-        );
-        assert!(
-            d.modified_params.is_empty(),
-            "params bucket: {:?}",
-            d.modified_params,
-        );
+        assert!(d.modified_identity.is_empty(), "identity bucket: {:?}", d.modified_identity);
+        assert!(d.modified_params.is_empty(), "params bucket: {:?}", d.modified_params);
     }
 
     /// `scan` (recursive flag) folds into `ProfileIdentity::config_hash` ⇒ `modified_identity`. Same
@@ -400,10 +369,8 @@ mod tests {
     #[test]
     fn discovery_added_populates_added_in_source_order() {
         let old = cfg(&[]);
-        let new_blocks = [
-            dyn_block("logs", "/srv/log/*", "echo"),
-            dyn_block("sites", "/srv/*/site", "fmt"),
-        ];
+        let new_blocks =
+            [dyn_block("logs", "/srv/log/*", "echo"), dyn_block("sites", "/srv/*/site", "fmt")];
         let refs: Vec<&str> = new_blocks.iter().map(String::as_str).collect();
         let new = cfg(&refs);
 
@@ -411,11 +378,7 @@ mod tests {
         assert_eq!(d.added.len(), 2);
         assert_eq!(d.added[0].name, "logs");
         assert_eq!(d.added[1].name, "sites");
-        assert!(
-            d.added
-                .iter()
-                .all(|r| matches!(r.target, SubAttachTarget::Pattern(_)))
-        );
+        assert!(d.added.iter().all(|r| matches!(r.target, SubAttachTarget::Pattern(_))));
         assert_eq!(d.removed, [] as [CompactString; 0]);
         assert!(d.modified_identity.is_empty());
         assert!(d.modified_params.is_empty());
@@ -493,10 +456,8 @@ mod tests {
     #[test]
     fn discovery_scan_change_lands_in_modified_identity() {
         let old_blocks = [dyn_block("logs", "/srv/log/*", "echo")];
-        let new_blocks = [format!(
-            "{}\nrecursive = false\n",
-            dyn_block("logs", "/srv/log/*", "echo")
-        )];
+        let new_blocks =
+            [format!("{}\nrecursive = false\n", dyn_block("logs", "/srv/log/*", "echo"))];
         let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
         let new = cfg(&new_blocks.iter().map(String::as_str).collect::<Vec<_>>());
 
@@ -541,10 +502,7 @@ mod tests {
         assert!(d.modified_params.is_empty());
         assert_eq!(d.modified_identity.len(), 1);
         assert_eq!(d.modified_identity[0].name, "foo");
-        assert!(matches!(
-            d.modified_identity[0].target,
-            SubAttachTarget::Pattern(_)
-        ));
+        assert!(matches!(d.modified_identity[0].target, SubAttachTarget::Pattern(_)));
     }
 
     /// Reverse direction: dynamic → static via path edit — the same `modified_identity` bucket, the
@@ -563,10 +521,7 @@ mod tests {
         assert!(d.modified_params.is_empty());
         assert_eq!(d.modified_identity.len(), 1);
         assert_eq!(d.modified_identity[0].name, "foo");
-        assert!(matches!(
-            d.modified_identity[0].target,
-            SubAttachTarget::At(_)
-        ));
+        assert!(matches!(d.modified_identity[0].target, SubAttachTarget::At(_)));
     }
 
     /// Mixed reload: one static modify, one discovery add, one of each removed. Static and discovery

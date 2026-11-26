@@ -40,9 +40,7 @@ fn poll_for(w: &InotifyWatcher) -> Poll {
 }
 
 fn drain_until<F: Fn(&(ResourceId, FsEvent)) -> bool>(
-    w: &mut InotifyWatcher,
-    pred: F,
-    overall: Duration,
+    w: &mut InotifyWatcher, pred: F, overall: Duration,
 ) -> Vec<(ResourceId, FsEvent)> {
     let deadline = Instant::now() + overall;
     let mut poll = poll_for(w);
@@ -124,17 +122,14 @@ fn in_place_edit_fires_content_changed_on_per_file_wd() {
         Duration::from_secs(2),
     );
     assert!(
-        out.iter()
-            .any(|(r, e)| *r == r_file && *e == FsEvent::ContentChanged),
+        out.iter().any(|(r, e)| *r == r_file && *e == FsEvent::ContentChanged),
         "per-file wd must fire ContentChanged on in-place edit (E2E #3 closure); got {out:?}",
     );
 
     // Bonus: per-batch dedup should collapse the kernel's `IN_MODIFY + IN_CLOSE_WRITE` pair to one
     // `ContentChanged` per write — count and assert.
-    let modified_count = out
-        .iter()
-        .filter(|(r, e)| *r == r_file && *e == FsEvent::ContentChanged)
-        .count();
+    let modified_count =
+        out.iter().filter(|(r, e)| *r == r_file && *e == FsEvent::ContentChanged).count();
     assert!(
         modified_count <= 2,
         "per-batch dedup should keep duplicates low (got {modified_count}); \
@@ -156,8 +151,7 @@ fn in_place_edit_does_not_fire_on_structure_only_dir_watch() {
     let mut w = InotifyWatcher::new().unwrap();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r_dir = sm.insert(());
-    w.watch(r_dir, tmp.path(), ResourceKind::Dir, ClassSet::STRUCTURE)
-        .expect("watch dir");
+    w.watch(r_dir, tmp.path(), ResourceKind::Dir, ClassSet::STRUCTURE).expect("watch dir");
 
     // Drain any registration noise.
     let mut warmup: Vec<WatcherEvent> = Vec::new();

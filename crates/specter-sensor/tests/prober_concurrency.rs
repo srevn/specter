@@ -27,9 +27,7 @@ struct TestProberSink {
 
 impl ProberResponseSender for TestProberSink {
     fn send(&self, response: ProbeResponse) -> Result<(), SendError> {
-        self.tx
-            .send(Input::ProbeResponse(response))
-            .map_err(|_| SendError::Disconnected)
+        self.tx.send(Input::ProbeResponse(response)).map_err(|_| SendError::Disconnected)
     }
 }
 

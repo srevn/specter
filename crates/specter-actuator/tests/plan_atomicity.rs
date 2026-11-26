@@ -14,11 +14,7 @@
 //! subprocesses.
 
 #![cfg(unix)]
-#![allow(
-    clippy::redundant_clone,
-    clippy::similar_names,
-    clippy::useless_conversion
-)]
+#![allow(clippy::redundant_clone, clippy::similar_names, clippy::useless_conversion)]
 
 mod common;
 
@@ -53,10 +49,7 @@ fn pending_submit_during_running_plan_does_not_replace_in_flight_steps() {
         vec![
             "/bin/sh".into(),
             "-c".into(),
-            format!(
-                "touch {}/{marker} && /bin/sleep {sleep_secs}",
-                dir.path().display(),
-            ),
+            format!("touch {}/{marker} && /bin/sleep {sleep_secs}", dir.path().display()),
         ]
     };
     // plan_a step 0 sleeps long enough that submit-2 is comfortably queued into pending before step
@@ -104,22 +97,13 @@ fn pending_submit_during_running_plan_does_not_replace_in_flight_steps() {
     let a1 = dir.path().join("a1");
     let b0 = dir.path().join("b0");
     assert!(a0.exists(), "plan_a step 0 must run");
-    assert!(
-        a1.exists(),
-        "plan_a step 1 must run (was the in-flight plan)"
-    );
-    assert!(
-        b0.exists(),
-        "plan_b step 0 must run after plan_a terminates"
-    );
+    assert!(a1.exists(), "plan_a step 1 must run (was the in-flight plan)");
+    assert!(b0.exists(), "plan_b step 0 must run after plan_a terminates");
 
     // Order: a0 < a1 < b0. mtime granularity is finite (HFS+/APFS ~1ns, ext4 ~1ns with `noatime`;
     // tmpfs ~1ns), so the ~50ms gaps we built in are safely above the floor.
     let mtime = |p: &std::path::Path| {
-        std::fs::metadata(p)
-            .expect("marker stat")
-            .modified()
-            .expect("modified")
+        std::fs::metadata(p).expect("marker stat").modified().expect("modified")
     };
     let plan_a_step0 = mtime(&a0);
     let plan_a_step1 = mtime(&a1);

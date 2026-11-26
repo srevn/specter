@@ -121,10 +121,9 @@ impl From<ConfigError> for PatternError {
     fn from(e: ConfigError) -> Self {
         match e {
             ConfigError::InvalidGlob { source, message } => Self::InvalidGlob { source, message },
-            ConfigError::UnreachableGlob { source, reason } => Self::InvalidGlob {
-                source,
-                message: reason,
-            },
+            ConfigError::UnreachableGlob { source, reason } => {
+                Self::InvalidGlob { source, message: reason }
+            }
         }
     }
 }
@@ -213,11 +212,7 @@ impl PatternSpec {
             components.push(comp.clone());
         }
 
-        Self {
-            source: CompactString::from(source),
-            components,
-            literal_prefix_len,
-        }
+        Self { source: CompactString::from(source), components, literal_prefix_len }
     }
 
     /// The literal-prefix anchor path: `/` plus the leading consecutive `Literal` segments — where
@@ -329,10 +324,8 @@ impl PatternSpec {
             }
         }
 
-        let literal_prefix_len = components
-            .iter()
-            .take_while(|c| matches!(c, PatternComponent::Literal(_)))
-            .count();
+        let literal_prefix_len =
+            components.iter().take_while(|c| matches!(c, PatternComponent::Literal(_))).count();
 
         // Pure-literal source ⇒ every component a `Literal` ⇒ the leading run spans the whole vec.
         // Rejecting here upholds the `literal_prefix_len < components.len()` invariant callers rely
@@ -342,11 +335,7 @@ impl PatternSpec {
             return Err(PatternError::NotDynamic);
         }
 
-        Ok(Self {
-            source: CompactString::from(source),
-            components,
-            literal_prefix_len,
-        })
+        Ok(Self { source: CompactString::from(source), components, literal_prefix_len })
     }
 }
 
@@ -433,58 +422,37 @@ mod tests {
 
     #[test]
     fn parse_rejects_non_absolute() {
-        assert_eq!(
-            PatternSpec::parse("var/log/*"),
-            Err(PatternError::NonAbsolute),
-        );
+        assert_eq!(PatternSpec::parse("var/log/*"), Err(PatternError::NonAbsolute));
     }
 
     #[test]
     fn parse_rejects_globstar() {
-        assert_eq!(
-            PatternSpec::parse("/var/log/**/x"),
-            Err(PatternError::GlobstarUnsupported),
-        );
+        assert_eq!(PatternSpec::parse("/var/log/**/x"), Err(PatternError::GlobstarUnsupported));
     }
 
     #[test]
     fn parse_rejects_double_slash_as_empty_segment() {
-        assert_eq!(
-            PatternSpec::parse("//var/log/*"),
-            Err(PatternError::EmptySegment),
-        );
+        assert_eq!(PatternSpec::parse("//var/log/*"), Err(PatternError::EmptySegment));
     }
 
     #[test]
     fn parse_rejects_trailing_slash_as_empty_segment() {
-        assert_eq!(
-            PatternSpec::parse("/var/log/*/"),
-            Err(PatternError::EmptySegment),
-        );
+        assert_eq!(PatternSpec::parse("/var/log/*/"), Err(PatternError::EmptySegment));
     }
 
     #[test]
     fn parse_rejects_dot_segment() {
-        assert_eq!(
-            PatternSpec::parse("/var/./log/*"),
-            Err(PatternError::NonCanonical),
-        );
+        assert_eq!(PatternSpec::parse("/var/./log/*"), Err(PatternError::NonCanonical));
     }
 
     #[test]
     fn parse_rejects_dotdot_segment() {
-        assert_eq!(
-            PatternSpec::parse("/var/../log/*"),
-            Err(PatternError::NonCanonical),
-        );
+        assert_eq!(PatternSpec::parse("/var/../log/*"), Err(PatternError::NonCanonical));
     }
 
     #[test]
     fn parse_rejects_windows_prefix() {
-        assert_eq!(
-            PatternSpec::parse("/c:/Users/*"),
-            Err(PatternError::WindowsPrefix),
-        );
+        assert_eq!(PatternSpec::parse("/c:/Users/*"), Err(PatternError::WindowsPrefix));
     }
 
     #[test]
@@ -540,10 +508,7 @@ mod tests {
     /// `debug_assert!`.
     #[test]
     fn parse_returns_not_dynamic_err() {
-        assert_eq!(
-            PatternSpec::parse("/var/log/myapp"),
-            Err(PatternError::NotDynamic),
-        );
+        assert_eq!(PatternSpec::parse("/var/log/myapp"), Err(PatternError::NotDynamic));
     }
 
     /// `literal_prefix_path` renders the leading `Literal` run as an absolute anchor path: the
@@ -552,10 +517,7 @@ mod tests {
     #[test]
     fn literal_prefix_path_renders_anchor_for_each_prefix_shape() {
         let nested = PatternSpec::parse("/srv/staging/*/data/*/log").expect("valid pattern");
-        assert_eq!(
-            nested.literal_prefix_path(),
-            std::path::PathBuf::from("/srv/staging"),
-        );
+        assert_eq!(nested.literal_prefix_path(), std::path::PathBuf::from("/srv/staging"));
         let root = PatternSpec::parse("/*").expect("valid pattern");
         assert_eq!(root.literal_prefix_path(), std::path::PathBuf::from("/"));
     }
@@ -581,10 +543,7 @@ mod tests {
         let spec = PatternSpec::parse(r"/srv/*/a\b").expect("valid pattern");
         // Depth 2 is the literal `a\b` component.
         assert!(spec.matches_at(2, r"a\b"));
-        assert!(
-            !spec.matches_at(2, "ab"),
-            r"`\` must stay a literal byte, never a glob escape",
-        );
+        assert!(!spec.matches_at(2, "ab"), r"`\` must stay a literal byte, never a glob escape");
         let plain = PatternSpec::parse("/srv/*/data").expect("valid pattern");
         assert!(plain.matches_at(2, "data"));
         assert!(!plain.matches_at(2, "Data"));
@@ -640,10 +599,7 @@ mod tests {
             (PatternError::NotDynamic, "pure-literal"),
         ] {
             let s = err.to_string();
-            assert!(
-                s.contains(needle),
-                "expected `{needle}` in display of {err:?}, got `{s}`",
-            );
+            assert!(s.contains(needle), "expected `{needle}` in display of {err:?}, got `{s}`");
         }
         let invalid = PatternError::InvalidGlob {
             source: "[bad".to_owned(),
@@ -663,10 +619,7 @@ mod tests {
         let re = spec.reanchor(std::path::Path::new("/private/srv"));
 
         assert_eq!(re.source(), "/private/srv/*/log");
-        assert_eq!(
-            re.literal_prefix_path(),
-            std::path::PathBuf::from("/private/srv"),
-        );
+        assert_eq!(re.literal_prefix_path(), std::path::PathBuf::from("/private/srv"));
         // Chain length below the (new) anchor is unchanged — only the prefix moved.
         assert_eq!(re.terminus_depth(), 2);
         assert!(re.matches_at(1, "anything")); // depth-1 glob still matches any segment
@@ -704,10 +657,7 @@ mod tests {
 
         assert_eq!(re.source(), "/weird[x]/real/*.log");
         // Anchor is the full canonical prefix — the `[x]` segment did not become a glob boundary.
-        assert_eq!(
-            re.literal_prefix_path(),
-            std::path::PathBuf::from("/weird[x]/real"),
-        );
+        assert_eq!(re.literal_prefix_path(), std::path::PathBuf::from("/weird[x]/real"));
         assert_eq!(re.terminus_depth(), 1);
         assert!(matches!(
             re.components[1],

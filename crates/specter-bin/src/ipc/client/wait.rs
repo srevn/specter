@@ -179,10 +179,7 @@ fn emit_matched(client: &ClientArgs, wire: &WireDiagnostic) -> ExitCode {
     let mut stdout = io::stdout().lock();
     let mut rendered = String::with_capacity(256);
     diag::render(&mut rendered, wire, sty);
-    if let Err(e) = stdout
-        .write_all(rendered.as_bytes())
-        .and_then(|()| stdout.flush())
-    {
+    if let Err(e) = stdout.write_all(rendered.as_bytes()).and_then(|()| stdout.flush()) {
         // A BrokenPipe on the confirmation line still represents a matched wait — operators piping
         // `wait` into something that closes early want the same `0` they'd get from a non-piped run.
         // Everything else is a write failure.
@@ -227,20 +224,13 @@ mod tests {
     }
 
     fn sub_rebound() -> WireDiagnostic {
-        WireDiagnostic::SubRebound {
-            at: WireTime::from(UNIX_EPOCH),
-            sub: TARGET,
-            minted_by: None,
-        }
+        WireDiagnostic::SubRebound { at: WireTime::from(UNIX_EPOCH), sub: TARGET, minted_by: None }
     }
 
     /// `--kind fire` against `SubFired` matches — the happy path.
     #[test]
     fn classify_fire_matches_subfired() {
-        assert!(matches!(
-            classify(WaitKind::Fire, &sub_fired(), TARGET),
-            Match::Matched,
-        ));
+        assert!(matches!(classify(WaitKind::Fire, &sub_fired(), TARGET), Match::Matched));
     }
 
     /// `--kind detach` against the target's `SubDetached` matches regardless of reason. Operators
@@ -267,11 +257,7 @@ mod tests {
     #[test]
     fn classify_fire_observes_detach_returns_detach_before_fire() {
         assert!(matches!(
-            classify(
-                WaitKind::Fire,
-                &sub_detached(WireDetachReason::IpcDisabled),
-                TARGET,
-            ),
+            classify(WaitKind::Fire, &sub_detached(WireDetachReason::IpcDisabled), TARGET),
             Match::DetachBeforeFire,
         ));
     }
@@ -296,23 +282,14 @@ mod tests {
     /// reading until the detach (or the deadline) arrives.
     #[test]
     fn classify_detach_observes_fire_skips() {
-        assert!(matches!(
-            classify(WaitKind::Detach, &sub_fired(), TARGET),
-            Match::Skip,
-        ));
+        assert!(matches!(classify(WaitKind::Detach, &sub_fired(), TARGET), Match::Skip));
     }
 
     /// `SubRebound` (a `modified_params` rebind, per-Sub but neither a fire nor a detach) is `Skip`
     /// for both kinds — the Sub is alive and in the engine, the operator's wait should continue.
     #[test]
     fn classify_subrebound_is_skip_for_both_kinds() {
-        assert!(matches!(
-            classify(WaitKind::Fire, &sub_rebound(), TARGET),
-            Match::Skip,
-        ));
-        assert!(matches!(
-            classify(WaitKind::Detach, &sub_rebound(), TARGET),
-            Match::Skip,
-        ));
+        assert!(matches!(classify(WaitKind::Fire, &sub_rebound(), TARGET), Match::Skip));
+        assert!(matches!(classify(WaitKind::Detach, &sub_rebound(), TARGET), Match::Skip));
     }
 }

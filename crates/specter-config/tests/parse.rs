@@ -8,9 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 fn fixtures_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("fixtures")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures")
 }
 
 fn fixture(name: &str) -> PathBuf {
@@ -58,14 +56,8 @@ fn full_fixture_round_trips_every_field() {
     assert_eq!(exec.argv().len(), 3);
     assert_eq!(exec.argv()[0].parts()[0], ArgPart::literal("make"));
     assert_eq!(exec.argv()[1].parts()[0], ArgPart::literal("--input="));
-    assert_eq!(
-        exec.argv()[1].parts()[1],
-        ArgPart::Placeholder(Placeholder::Path)
-    );
-    assert_eq!(
-        exec.argv()[2].parts()[0],
-        ArgPart::Placeholder(Placeholder::Created)
-    );
+    assert_eq!(exec.argv()[1].parts()[1], ArgPart::Placeholder(Placeholder::Path));
+    assert_eq!(exec.argv()[2].parts()[0], ArgPart::Placeholder(Placeholder::Created));
 }
 
 #[test]
@@ -112,11 +104,7 @@ fn invalid_glob_fixture_yields_validate_error() {
 fn unknown_placeholder_fixture_yields_validate_error() {
     let err = Config::from_path(&fixture("unknown-placeholder.toml")).unwrap_err();
     let errors = validation_errors(err);
-    assert!(
-        errors
-            .iter()
-            .any(|e| e.kind == IssueKind::UnknownPlaceholder)
-    );
+    assert!(errors.iter().any(|e| e.kind == IssueKind::UnknownPlaceholder));
 }
 
 #[test]
@@ -184,11 +172,7 @@ fn exec_timeout_threads_per_action() {
         .collect();
     assert_eq!(
         timeouts,
-        vec![
-            Some(Duration::from_millis(500)),
-            None,
-            Some(Duration::from_secs(30)),
-        ],
+        vec![Some(Duration::from_millis(500)), None, Some(Duration::from_secs(30)),],
     );
 }
 
@@ -200,10 +184,7 @@ fn exec_zero_timeout_is_validation_error() {
                 actions = [{ exec = [\"echo\"], timeout = \"0s\" }]";
     let err = Config::from_str(toml).unwrap_err();
     let errors = validation_errors(err);
-    assert!(
-        errors.iter().any(|e| e.kind == IssueKind::TimeoutZero),
-        "got {errors:?}"
-    );
+    assert!(errors.iter().any(|e| e.kind == IssueKind::TimeoutZero), "got {errors:?}");
 }
 
 /// `${env.HOME:-/tmp}` lowers through validation into [`ArgPart::EnvVar`] inside the program.
@@ -342,12 +323,7 @@ fn conditional_when_without_then_is_rejected() {
                 actions = [{ when = { exec = [\"check\"] } }]";
     let err = Config::from_str(toml).unwrap_err();
     let errors = validation_errors(err);
-    assert!(
-        errors
-            .iter()
-            .any(|e| e.kind == IssueKind::ConditionalIncomplete),
-        "got {errors:?}",
-    );
+    assert!(errors.iter().any(|e| e.kind == IssueKind::ConditionalIncomplete), "got {errors:?}");
 }
 
 /// `then` without `when` is the symmetric case — also flagged as
@@ -358,12 +334,7 @@ fn conditional_then_without_when_is_rejected() {
                 actions = [{ then = [{ exec = [\"y\"] }] }]";
     let err = Config::from_str(toml).unwrap_err();
     let errors = validation_errors(err);
-    assert!(
-        errors
-            .iter()
-            .any(|e| e.kind == IssueKind::ConditionalIncomplete),
-        "got {errors:?}",
-    );
+    assert!(errors.iter().any(|e| e.kind == IssueKind::ConditionalIncomplete), "got {errors:?}");
 }
 
 /// Conditional with empty `then` and no `else` (or empty `else`) is pointless — the predicate would
@@ -374,10 +345,7 @@ fn conditional_empty_then_and_no_else_is_rejected() {
                 actions = [{ when = { exec = [\"check\"] }, then = [] }]";
     let err = Config::from_str(toml).unwrap_err();
     let errors = validation_errors(err);
-    assert!(
-        errors.iter().any(|e| e.kind == IssueKind::EmptyConditional),
-        "got {errors:?}",
-    );
+    assert!(errors.iter().any(|e| e.kind == IssueKind::EmptyConditional), "got {errors:?}");
 }
 
 /// Empty `then` with non-empty `else` is allowed — operationally equivalent to a negated predicate
@@ -421,12 +389,7 @@ fn exec_and_conditional_together_is_rejected() {
                 ]";
     let err = Config::from_str(toml).unwrap_err();
     let errors = validation_errors(err);
-    assert!(
-        errors
-            .iter()
-            .any(|e| e.kind == IssueKind::ActionAmbiguousVariant),
-        "got {errors:?}",
-    );
+    assert!(errors.iter().any(|e| e.kind == IssueKind::ActionAmbiguousVariant), "got {errors:?}");
 }
 
 /// Top-level `timeout` on a conditional action is rejected — the predicate carries its own per-step
@@ -441,12 +404,7 @@ fn conditional_top_level_timeout_is_rejected() {
                 ]";
     let err = Config::from_str(toml).unwrap_err();
     let errors = validation_errors(err);
-    assert!(
-        errors
-            .iter()
-            .any(|e| e.kind == IssueKind::TimeoutNotApplicable),
-        "got {errors:?}",
-    );
+    assert!(errors.iter().any(|e| e.kind == IssueKind::TimeoutNotApplicable), "got {errors:?}");
 }
 
 /// Nested conditional inside `then` lowers recursively — each nesting level produces its own
@@ -534,14 +492,8 @@ fn pipe_two_stages_lowers_to_single_op() {
             assert_eq!(stages.stages().len(), 2);
             assert_eq!(stages.stages()[0].argv().len(), 2);
             assert_eq!(stages.stages()[1].argv().len(), 1);
-            assert_eq!(
-                stages.stages()[0].argv()[0].parts()[0],
-                ArgPart::literal("grep")
-            );
-            assert_eq!(
-                stages.stages()[1].argv()[0].parts()[0],
-                ArgPart::literal("sort")
-            );
+            assert_eq!(stages.stages()[0].argv()[0].parts()[0], ArgPart::literal("grep"));
+            assert_eq!(stages.stages()[1].argv()[0].parts()[0], ArgPart::literal("sort"));
         }
         other @ SpawnBody::Exec(_) => panic!("expected SpawnBody::Pipe; got {other:?}"),
     }
@@ -566,10 +518,7 @@ fn pipe_stage_timeouts_threaded_per_stage() {
     let SpawnBody::Pipe(stages) = &cfg.watches[0].program.ops()[0].body() else {
         panic!("expected SpawnBody::Pipe");
     };
-    assert_eq!(
-        stages.stages()[0].timeout(),
-        Some(Duration::from_millis(500))
-    );
+    assert_eq!(stages.stages()[0].timeout(), Some(Duration::from_millis(500)));
     assert_eq!(stages.stages()[1].timeout(), None);
     assert_eq!(stages.stages()[2].timeout(), Some(Duration::from_secs(2)));
 }
@@ -615,9 +564,7 @@ fn pipe_top_level_timeout_rejected() {
     let err = Config::from_str(toml).unwrap_err();
     let errors = validation_errors(err);
     assert!(
-        errors
-            .iter()
-            .any(|e| e.kind == IssueKind::TimeoutNotApplicable),
+        errors.iter().any(|e| e.kind == IssueKind::TimeoutNotApplicable),
         "expected TimeoutNotApplicable; got {errors:?}",
     );
 }
@@ -635,9 +582,7 @@ fn pipe_with_exec_simultaneously_rejected() {
     let err = Config::from_str(toml).unwrap_err();
     let errors = validation_errors(err);
     assert!(
-        errors
-            .iter()
-            .any(|e| e.kind == IssueKind::ActionAmbiguousVariant),
+        errors.iter().any(|e| e.kind == IssueKind::ActionAmbiguousVariant),
         "expected ActionAmbiguousVariant; got {errors:?}",
     );
 }

@@ -65,14 +65,9 @@ impl fmt::Display for ProgramError {
             Self::BackwardEdge { origin, target } => {
                 write!(f, "backward edge from op {origin} to op {target}")
             }
-            Self::OutOfBoundsEdge {
-                origin,
-                target,
-                len,
-            } => write!(
-                f,
-                "out-of-bounds edge from op {origin} to op {target} (bound: {len})"
-            ),
+            Self::OutOfBoundsEdge { origin, target, len } => {
+                write!(f, "out-of-bounds edge from op {origin} to op {target} (bound: {len})")
+            }
             Self::StaleHandle { handle, len } => {
                 write!(f, "stale op handle {handle} (builder holds {len} ops)")
             }

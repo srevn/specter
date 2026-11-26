@@ -50,11 +50,7 @@ impl Spawner for OsSpawner {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "argv is empty"));
         };
         let (pid, waiter, signaler) = build_pair(build_command(head, tail, env, cwd).spawn()?);
-        Ok(SpawnHandles {
-            pid,
-            waiter: Box::new(waiter),
-            signaler: Arc::new(signaler),
-        })
+        Ok(SpawnHandles { pid, waiter: Box::new(waiter), signaler: Arc::new(signaler) })
     }
 
     fn spawn_pipe(&self, stages: &[StageSpec<'_>], cwd: &Path) -> io::Result<PipeSpawnHandles> {
@@ -145,12 +141,7 @@ impl Spawner for OsSpawner {
         let waiter: Box<dyn ChildWaiter> =
             Box::new(PipeWaiter::new(stage_waiters, Arc::clone(&stage_signalers)));
 
-        Ok(PipeSpawnHandles {
-            last_pid,
-            waiter,
-            combined_signaler: combined,
-            stage_signalers,
-        })
+        Ok(PipeSpawnHandles { last_pid, waiter, combined_signaler: combined, stage_signalers })
     }
 }
 
@@ -233,14 +224,7 @@ const fn disqualify_posix_spawn(_cmd: &mut Command) {}
 fn build_pair(child: Child) -> (u32, OsChildWaiter, OsChildSignaler) {
     let pid = child.id();
     let dead = DeadFlag::new();
-    (
-        pid,
-        OsChildWaiter {
-            child,
-            dead: dead.clone(),
-        },
-        OsChildSignaler { pid, dead },
-    )
+    (pid, OsChildWaiter { child, dead: dead.clone() }, OsChildSignaler { pid, dead })
 }
 
 /// Create one pipe with both ends CLOEXEC.
@@ -435,9 +419,7 @@ mod recovery_tests {
         drop(handles.waiter);
 
         signaler.signal_kill().expect("SIGKILL the orphan");
-        signaler
-            .reap_blocking()
-            .expect("synchronously reap the orphan");
+        signaler.reap_blocking().expect("synchronously reap the orphan");
 
         // After successful reap, a follow-up `kill(pid, 0)` must observe `ESRCH` (collapsed to
         // `Ok(())` by our signaler at the protocol layer because `reap_blocking` set the `dead` flag
@@ -471,9 +453,7 @@ mod recovery_tests {
         signaler.reap_blocking().expect("first reap");
         // Second call must short-circuit at the `dead`-flag check — the kernel slot is already gone,
         // so a real waitpid would ECHILD; our fast-path returns Ok without syscall.
-        signaler
-            .reap_blocking()
-            .expect("second reap must be a no-op (idempotent)");
+        signaler.reap_blocking().expect("second reap must be a no-op (idempotent)");
     }
 }
 
@@ -502,14 +482,8 @@ mod pipe_tests {
         let stage1_argv = vec!["/bin/cat".into()];
         let empty_env: Vec<EnvVar<'_>> = Vec::new();
         let stages = [
-            StageSpec {
-                argv: &stage0_argv,
-                env: &empty_env,
-            },
-            StageSpec {
-                argv: &stage1_argv,
-                env: &empty_env,
-            },
+            StageSpec { argv: &stage0_argv, env: &empty_env },
+            StageSpec { argv: &stage1_argv, env: &empty_env },
         ];
         let cwd = Path::new("/tmp");
 
@@ -531,13 +505,9 @@ mod pipe_tests {
             "-c".into(),
             "for fd in 3 4 5 6 7 8 9; do [ -e /dev/fd/$fd ] && exit 1; done; cat >/dev/null".into(),
         ];
-        let stages: [StageSpec<'_>; 3] = std::array::from_fn(|_| StageSpec {
-            argv: &argv,
-            env: &[],
-        });
-        let handles = OsSpawner::new()
-            .spawn_pipe(&stages, Path::new("/tmp"))
-            .expect("spawn_pipe");
+        let stages: [StageSpec<'_>; 3] =
+            std::array::from_fn(|_| StageSpec { argv: &argv, env: &[] });
+        let handles = OsSpawner::new().spawn_pipe(&stages, Path::new("/tmp")).expect("spawn_pipe");
         assert_eq!(handles.waiter.wait().expect("wait"), EffectOutcome::Ok);
     }
 
@@ -560,14 +530,8 @@ mod pipe_tests {
         let stage1_argv = vec!["/no/such/binary/specter-pipe-test".into()];
         let empty_env: Vec<EnvVar<'_>> = Vec::new();
         let stages = [
-            StageSpec {
-                argv: &stage0_argv,
-                env: &empty_env,
-            },
-            StageSpec {
-                argv: &stage1_argv,
-                env: &empty_env,
-            },
+            StageSpec { argv: &stage0_argv, env: &empty_env },
+            StageSpec { argv: &stage1_argv, env: &empty_env },
         ];
         let cwd = Path::new("/tmp");
 
@@ -611,13 +575,9 @@ mod stdio_tests {
     #[test]
     fn spawn_puts_stdin_stdout_and_stderr_on_dev_null() {
         stdin_from_pipe();
-        let argv = sh(
-            "[ /dev/stdin -ef /dev/null ] && [ /dev/stdout -ef /dev/null ] \
-             && [ /dev/stderr -ef /dev/null ]",
-        );
-        let handles = OsSpawner::new()
-            .spawn(&argv, &[], Path::new("/tmp"))
-            .expect("spawn");
+        let argv = sh("[ /dev/stdin -ef /dev/null ] && [ /dev/stdout -ef /dev/null ] \
+             && [ /dev/stderr -ef /dev/null ]");
+        let handles = OsSpawner::new().spawn(&argv, &[], Path::new("/tmp")).expect("spawn");
         assert_eq!(handles.waiter.wait().expect("wait"), EffectOutcome::Ok);
     }
 
@@ -632,15 +592,11 @@ mod stdio_tests {
             sh(
                 "read l && [ \"$l\" = specter-link ] && [ /dev/stderr -ef /dev/null ] && echo \"$l\"",
             ),
-            sh(
-                "read l && [ \"$l\" = specter-link ] && [ /dev/stdout -ef /dev/null ] \
-                && [ /dev/stderr -ef /dev/null ]",
-            ),
+            sh("read l && [ \"$l\" = specter-link ] && [ /dev/stdout -ef /dev/null ] \
+                && [ /dev/stderr -ef /dev/null ]"),
         ];
         let stages = argvs.each_ref().map(|argv| StageSpec { argv, env: &[] });
-        let handles = OsSpawner::new()
-            .spawn_pipe(&stages, Path::new("/tmp"))
-            .expect("spawn_pipe");
+        let handles = OsSpawner::new().spawn_pipe(&stages, Path::new("/tmp")).expect("spawn_pipe");
         assert_eq!(handles.waiter.wait().expect("wait"), EffectOutcome::Ok);
     }
 }
@@ -710,10 +666,7 @@ mod tests {
             }
             fds.push(unsafe { <OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(raw) });
         }
-        assert!(
-            fds.len() >= FDS_TO_OPEN,
-            "must open enough fds to trip OPEN_MAX"
-        );
+        assert!(fds.len() >= FDS_TO_OPEN, "must open enough fds to trip OPEN_MAX");
 
         // The actual assertion: `OsSpawner::spawn` must succeed. Without the `pre_exec` hook, Rust
         // std would route through posix_spawn and fail with EBADF here. With the hook, fork+exec is
@@ -725,15 +678,8 @@ mod tests {
         let handles = spawner
             .spawn(&argv, &env, cwd)
             .expect("spawn must succeed under high fd pressure (fork+exec route)");
-        let outcome = handles
-            .waiter
-            .wait()
-            .expect("wait must succeed for a spawned child");
-        assert_eq!(
-            outcome,
-            EffectOutcome::Ok,
-            "child exited cleanly; outcome should be Ok",
-        );
+        let outcome = handles.waiter.wait().expect("wait must succeed for a spawned child");
+        assert_eq!(outcome, EffectOutcome::Ok, "child exited cleanly; outcome should be Ok");
 
         // Drop the OwnedFds explicitly; closing 10k+ fds at end-of-test adds visible time to the
         // test runner output and we'd rather log the close-time once than have it linger in `Drop`.

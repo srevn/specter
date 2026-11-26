@@ -143,9 +143,7 @@ impl SubprocessActuator {
     /// otherwise be flagged as dead code under `cargo test --lib` (no features).
     #[cfg(all(test, feature = "testkit"))]
     pub(crate) fn new_with_grace_and_env(
-        concurrency: NonZeroUsize,
-        grace: Duration,
-        env: Arc<EnvSnapshot>,
+        concurrency: NonZeroUsize, grace: Duration, env: Arc<EnvSnapshot>,
     ) -> Self {
         Self::new_with_grace_and_env_and_tmp(
             concurrency,
@@ -161,11 +159,8 @@ impl SubprocessActuator {
     /// asserts `DiffTmpFile::create` reads from `ActuatorState.temp_dir`, not `std::env::temp_dir()`.
     #[cfg(all(test, feature = "testkit"))]
     pub(crate) fn new_with_grace_and_env_and_tmp(
-        concurrency: NonZeroUsize,
-        grace: Duration,
-        env: Arc<EnvSnapshot>,
-        temp_dir: Arc<std::path::Path>,
-        actuator_pid: u32,
+        concurrency: NonZeroUsize, grace: Duration, env: Arc<EnvSnapshot>,
+        temp_dir: Arc<std::path::Path>, actuator_pid: u32,
     ) -> Self {
         let (reap_tx, reap_rx) = reap_channel(concurrency);
         Self {
@@ -204,17 +199,9 @@ impl SubprocessActuator {
     /// body" honestly.
     #[allow(clippy::needless_pass_by_value)]
     pub fn run(
-        &mut self,
-        wiring: RunWiring,
-        engine_in: &dyn EffectCompleteSender,
-        spawner: &dyn Spawner,
+        &mut self, wiring: RunWiring, engine_in: &dyn EffectCompleteSender, spawner: &dyn Spawner,
     ) {
-        let RunWiring {
-            effects_rx,
-            shutdown_rx,
-            hard_shutdown_rx,
-            hard_shutdown_done_tx,
-        } = wiring;
+        let RunWiring { effects_rx, shutdown_rx, hard_shutdown_rx, hard_shutdown_done_tx } = wiring;
         let mut hard = false;
         loop {
             crossbeam::select! {
@@ -255,11 +242,8 @@ impl SubprocessActuator {
     }
 
     fn shutdown(
-        &mut self,
-        engine_in: &dyn EffectCompleteSender,
-        hard: bool,
-        hard_shutdown_rx: &Receiver<()>,
-        hard_shutdown_done_tx: &Sender<()>,
+        &mut self, engine_in: &dyn EffectCompleteSender, hard: bool,
+        hard_shutdown_rx: &Receiver<()>, hard_shutdown_done_tx: &Sender<()>,
     ) {
         // Phase 1: SIGTERM all running.
         tracing::info!("shutdown phase 1: SIGTERM running children");
@@ -359,10 +343,10 @@ impl Drop for SubprocessActuator {
                 continue;
             };
             if let Err(e) = job.signaler.signal_term() {
-                tracing::debug!(pid = job.pid, ?e, "drop-fallback SIGTERM failed",);
+                tracing::debug!(pid = job.pid, ?e, "drop-fallback SIGTERM failed");
             }
             if let Err(e) = job.signaler.signal_kill() {
-                tracing::debug!(pid = job.pid, ?e, "drop-fallback SIGKILL failed",);
+                tracing::debug!(pid = job.pid, ?e, "drop-fallback SIGKILL failed");
             }
         }
     }
@@ -408,9 +392,7 @@ mod tests {
     struct TestEngineIn(Sender<Input>);
     impl EffectCompleteSender for TestEngineIn {
         fn send(&self, completion: EffectCompletion) -> Result<(), SendError> {
-            self.0
-                .send(Input::EffectComplete(completion))
-                .map_err(|_| SendError::Disconnected)
+            self.0.send(Input::EffectComplete(completion)).map_err(|_| SendError::Disconnected)
         }
     }
 
@@ -465,11 +447,7 @@ mod tests {
     }
 
     fn make_effect_perfile_with_program(
-        sub_seed: u64,
-        profile_seed: u64,
-        res_seed: u64,
-        corr: u64,
-        program: Arc<ActionProgram>,
+        sub_seed: u64, profile_seed: u64, res_seed: u64, corr: u64, program: Arc<ActionProgram>,
     ) -> Effect {
         let resource = unique_resource_id(res_seed);
         let common = EffectCommon {
@@ -484,12 +462,7 @@ mod tests {
             anchor_kind: ResourceKind::Dir,
             exclude: Arc::from(Vec::<CompactString>::new()),
         };
-        Effect::per_file(
-            common,
-            resource,
-            CompactString::new(""),
-            Arc::new(Diff::default()),
-        )
+        Effect::per_file(common, resource, CompactString::new(""), Arc::new(Diff::default()))
     }
 
     fn make_effect_subtree(sub_seed: u64, profile_seed: u64, corr: u64) -> Effect {
@@ -540,9 +513,7 @@ mod tests {
         }
 
         fn new_with_grace_and_env(
-            concurrency: NonZeroUsize,
-            grace: Duration,
-            env: Arc<EnvSnapshot>,
+            concurrency: NonZeroUsize, grace: Duration, env: Arc<EnvSnapshot>,
         ) -> Self {
             Self::spawn_controller(move || {
                 SubprocessActuator::new_with_grace_and_env(concurrency, grace, env)
@@ -553,10 +524,7 @@ mod tests {
         /// pins `start_plan` reading from `ActuatorState.temp_dir` rather than calling
         /// `std::env::temp_dir()` per Effect.
         fn new_with_grace_and_env_and_tmp(
-            concurrency: NonZeroUsize,
-            grace: Duration,
-            env: Arc<EnvSnapshot>,
-            temp_dir: Arc<Path>,
+            concurrency: NonZeroUsize, grace: Duration, env: Arc<EnvSnapshot>, temp_dir: Arc<Path>,
         ) -> Self {
             let pid = std::process::id();
             Self::spawn_controller(move || {
@@ -638,11 +606,7 @@ mod tests {
                 if s.len() >= n {
                     return s;
                 }
-                assert!(
-                    Instant::now() < deadline,
-                    "expected {n} spawns; saw {}",
-                    s.len()
-                );
+                assert!(Instant::now() < deadline, "expected {n} spawns; saw {}", s.len());
                 thread::sleep(Duration::from_millis(5));
             }
         }
@@ -653,18 +617,11 @@ mod tests {
             let mut received = Vec::new();
             while received.len() < n {
                 let now = Instant::now();
-                assert!(
-                    now < deadline,
-                    "expected {n} EffectCompletes; saw {}",
-                    received.len()
-                );
+                assert!(now < deadline, "expected {n} EffectCompletes; saw {}", received.len());
                 match self.engine_in.recv_timeout(deadline - now) {
                     Ok(i) => received.push(i),
                     Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
-                        panic!(
-                            "timeout waiting for EffectCompletes; saw {}",
-                            received.len()
-                        )
+                        panic!("timeout waiting for EffectCompletes; saw {}", received.len())
                     }
                     Err(crossbeam::channel::RecvTimeoutError::Disconnected) => break,
                 }
@@ -689,9 +646,7 @@ mod tests {
         h.submit(make_effect_perfile(1, 1, 1, 1));
         let s = h.wait_for_spawns(1, Duration::from_secs(1));
         assert_eq!(s.len(), 1);
-        h.spawner
-            .complete(s[0].pid, EffectOutcome::Ok)
-            .expect("complete");
+        h.spawner.complete(s[0].pid, EffectOutcome::Ok).expect("complete");
         h.wait_for_effect_completes(1, Duration::from_secs(1));
         h.shutdown();
     }
@@ -748,11 +703,7 @@ mod tests {
         assert_eq!(h.spawner.spawns().len(), 2, "third blocked");
         h.spawner.complete(s[0].pid, EffectOutcome::Ok).unwrap();
         let s3 = h.wait_for_spawns(3, Duration::from_secs(1));
-        assert_eq!(
-            s3.len(),
-            3,
-            "third spawned after first reap released permit"
-        );
+        assert_eq!(s3.len(), 3, "third spawned after first reap released permit");
         h.spawner.complete(s3[1].pid, EffectOutcome::Ok).unwrap();
         h.spawner.complete(s3[2].pid, EffectOutcome::Ok).unwrap();
         h.wait_for_effect_completes(3, Duration::from_secs(1));
@@ -767,11 +718,7 @@ mod tests {
         h.submit(make_effect_perfile(7, 7, 2, 2));
         let s = h.wait_for_spawns(1, Duration::from_secs(1));
         thread::sleep(Duration::from_millis(50));
-        assert_eq!(
-            h.spawner.spawns().len(),
-            1,
-            "per-Sub gate forces serialization"
-        );
+        assert_eq!(h.spawner.spawns().len(), 1, "per-Sub gate forces serialization");
         h.spawner.complete(s[0].pid, EffectOutcome::Ok).unwrap();
         let s2 = h.wait_for_spawns(2, Duration::from_secs(1));
         assert_eq!(s2.len(), 2, "second spawn after first reap");
@@ -801,11 +748,7 @@ mod tests {
         h.submit(make_effect_perfile(5, 5, 2, 2));
         let s = h.wait_for_spawns(1, Duration::from_secs(1));
         thread::sleep(Duration::from_millis(50));
-        assert_eq!(
-            h.spawner.spawns().len(),
-            1,
-            "Subtree and PerFile for the same Sub serialize"
-        );
+        assert_eq!(h.spawner.spawns().len(), 1, "Subtree and PerFile for the same Sub serialize");
         h.spawner.complete(s[0].pid, EffectOutcome::Ok).unwrap();
         let s2 = h.wait_for_spawns(2, Duration::from_secs(1));
         assert_eq!(s2.len(), 2);
@@ -820,10 +763,7 @@ mod tests {
     fn shutdown_with_no_running_returns_immediately() {
         let mut h = Harness::new(nz(4));
         h.shutdown();
-        assert!(
-            h.spawner.signals().is_empty(),
-            "no signals when nothing is running"
-        );
+        assert!(h.spawner.signals().is_empty(), "no signals when nothing is running");
     }
 
     // ---------- effects_rx disconnect (engine-thread-exit path) ----------
@@ -858,22 +798,14 @@ mod tests {
             // After shutdown trigger, briefly wait, then complete the child (mock waiters block until
             // told). This simulates the child responding to SIGTERM gracefully.
             thread::sleep(Duration::from_millis(50));
-            spawner
-                .complete(pid, EffectOutcome::Failed(Termination::Signal(15)))
-                .unwrap();
+            spawner.complete(pid, EffectOutcome::Failed(Termination::Signal(15))).unwrap();
         });
         shutdown_tx.send(()).unwrap();
-        h.join
-            .take()
-            .unwrap()
-            .join()
-            .expect("controller join after graceful shutdown");
+        h.join.take().unwrap().join().expect("controller join after graceful shutdown");
         waiter_thread.join().unwrap();
         let signals = h.spawner.take_signals();
         assert!(
-            signals
-                .iter()
-                .any(|s| matches!(s, SignalRecord::Term(p) if *p == pid)),
+            signals.iter().any(|s| matches!(s, SignalRecord::Term(p) if *p == pid)),
             "SIGTERM delivered: {signals:?}"
         );
     }
@@ -893,29 +825,19 @@ mod tests {
         let waiter_thread = thread::spawn(move || {
             thread::sleep(Duration::from_millis(300));
             // Complete with signal=9 (the result of SIGKILL).
-            spawner
-                .complete(pid, EffectOutcome::Failed(Termination::Signal(9)))
-                .unwrap();
+            spawner.complete(pid, EffectOutcome::Failed(Termination::Signal(9))).unwrap();
         });
         shutdown_tx.send(()).unwrap();
-        h.join
-            .take()
-            .unwrap()
-            .join()
-            .expect("controller join after forced shutdown");
+        h.join.take().unwrap().join().expect("controller join after forced shutdown");
         waiter_thread.join().unwrap();
 
         let signals = h.spawner.take_signals();
         assert!(
-            signals
-                .iter()
-                .any(|s| matches!(s, SignalRecord::Term(p) if *p == pid)),
+            signals.iter().any(|s| matches!(s, SignalRecord::Term(p) if *p == pid)),
             "SIGTERM first: {signals:?}"
         );
         assert!(
-            signals
-                .iter()
-                .any(|s| matches!(s, SignalRecord::Kill(p) if *p == pid)),
+            signals.iter().any(|s| matches!(s, SignalRecord::Kill(p) if *p == pid)),
             "SIGKILL after grace: {signals:?}"
         );
     }
@@ -939,32 +861,22 @@ mod tests {
         // assertion below catches a regression (5-second grace not bypassed).
         let waiter_thread = thread::spawn(move || {
             thread::sleep(Duration::from_millis(300));
-            spawner
-                .complete(pid, EffectOutcome::Failed(Termination::Signal(9)))
-                .unwrap();
+            spawner.complete(pid, EffectOutcome::Failed(Termination::Signal(9))).unwrap();
         });
 
         let t0 = Instant::now();
         hard_tx.send(()).unwrap();
-        h.join
-            .take()
-            .unwrap()
-            .join()
-            .expect("controller join after hard shutdown");
+        h.join.take().unwrap().join().expect("controller join after hard shutdown");
         let elapsed = t0.elapsed();
         waiter_thread.join().unwrap();
 
         let signals = h.spawner.take_signals();
         assert!(
-            signals
-                .iter()
-                .any(|s| matches!(s, SignalRecord::Term(p) if *p == pid)),
+            signals.iter().any(|s| matches!(s, SignalRecord::Term(p) if *p == pid)),
             "phase 1 SIGTERM still runs: {signals:?}"
         );
         assert!(
-            signals
-                .iter()
-                .any(|s| matches!(s, SignalRecord::Kill(p) if *p == pid)),
+            signals.iter().any(|s| matches!(s, SignalRecord::Kill(p) if *p == pid)),
             "phase 3 SIGKILL after hard-shutdown: {signals:?}"
         );
         assert!(
@@ -988,11 +900,7 @@ mod tests {
         // Submit a second effect on the same key — it becomes pending.
         h.submit(make_effect_perfile(1, 1, 1, 2));
         thread::sleep(Duration::from_millis(50));
-        assert_eq!(
-            h.spawner.spawns().len(),
-            1,
-            "pending stays pending while running"
-        );
+        assert_eq!(h.spawner.spawns().len(), 1, "pending stays pending while running");
 
         // Trigger shutdown; complete the running child.
         let shutdown_tx = h.shutdown_tx.clone();
@@ -1027,10 +935,7 @@ mod tests {
         let completions = h.wait_for_effect_completes(1, Duration::from_secs(1));
         match &completions[0] {
             Input::EffectComplete(c) => {
-                assert!(matches!(
-                    c.outcome,
-                    EffectOutcome::Failed(Termination::Internal)
-                ));
+                assert!(matches!(c.outcome, EffectOutcome::Failed(Termination::Internal)));
             }
             other => panic!("expected EffectComplete::Failed; got {other:?}"),
         }
@@ -1102,11 +1007,7 @@ mod tests {
         let mut e = make_effect_perfile(1, 1, 1, 7);
         let resource = e.sort_key().1;
         let segment = CompactString::from(e.relative());
-        e.target = EffectTarget::PerFile {
-            resource,
-            segment,
-            diff: Arc::clone(&diff),
-        };
+        e.target = EffectTarget::PerFile { resource, segment, diff: Arc::clone(&diff) };
         h.submit(e);
         let s = h.wait_for_spawns(1, Duration::from_secs(1));
         let env = &s[0].env;
@@ -1174,11 +1075,7 @@ mod tests {
         let mut e = make_effect_perfile(1, 1, 1, 7);
         let resource = e.sort_key().1;
         let segment = CompactString::from(e.relative());
-        e.target = EffectTarget::PerFile {
-            resource,
-            segment,
-            diff: Arc::clone(&diff),
-        };
+        e.target = EffectTarget::PerFile { resource, segment, diff: Arc::clone(&diff) };
         h.submit(e);
 
         let s = h.wait_for_spawns(1, Duration::from_secs(1));
@@ -1219,11 +1116,7 @@ mod tests {
         h.spawner.complete(s2[2].pid, EffectOutcome::Ok).unwrap();
 
         let completions = h.wait_for_effect_completes(1, Duration::from_secs(1));
-        assert_eq!(
-            completions.len(),
-            1,
-            "exactly one EffectComplete per Effect"
-        );
+        assert_eq!(completions.len(), 1, "exactly one EffectComplete per Effect");
         match &completions[0] {
             Input::EffectComplete(c) => {
                 assert!(matches!(c.outcome, EffectOutcome::Ok));
@@ -1232,10 +1125,7 @@ mod tests {
         }
         // Verify no extra EffectCompletes are queued.
         thread::sleep(Duration::from_millis(50));
-        assert!(
-            h.engine_in.try_recv().is_err(),
-            "no extra EffectComplete after terminal",
-        );
+        assert!(h.engine_in.try_recv().is_err(), "no extra EffectComplete after terminal");
         h.shutdown();
     }
 
@@ -1250,9 +1140,7 @@ mod tests {
         let s0 = h.wait_for_spawns(1, Duration::from_secs(1));
         h.spawner.complete(s0[0].pid, EffectOutcome::Ok).unwrap();
         let s1 = h.wait_for_spawns(2, Duration::from_secs(1));
-        h.spawner
-            .complete(s1[1].pid, EffectOutcome::Failed(Termination::Exit(7)))
-            .unwrap();
+        h.spawner.complete(s1[1].pid, EffectOutcome::Failed(Termination::Exit(7))).unwrap();
 
         // No third spawn — the plan halted on step 1's failure.
         thread::sleep(Duration::from_millis(50));
@@ -1260,10 +1148,9 @@ mod tests {
 
         let completions = h.wait_for_effect_completes(1, Duration::from_secs(1));
         match &completions[0] {
-            Input::EffectComplete(c) => assert!(matches!(
-                c.outcome,
-                EffectOutcome::Failed(Termination::Exit(7))
-            )),
+            Input::EffectComplete(c) => {
+                assert!(matches!(c.outcome, EffectOutcome::Failed(Termination::Exit(7))));
+            }
             other => panic!("expected EffectComplete::Failed; got {other:?}"),
         }
         h.shutdown();
@@ -1290,11 +1177,7 @@ mod tests {
         let mut e = make_effect_perfile_with_program(3, 3, 3, 7, plan);
         let resource = e.sort_key().1;
         let segment = CompactString::from(e.relative());
-        e.target = EffectTarget::PerFile {
-            resource,
-            segment,
-            diff: Arc::clone(&diff),
-        };
+        e.target = EffectTarget::PerFile { resource, segment, diff: Arc::clone(&diff) };
         h.submit(e);
 
         let s0 = h.wait_for_spawns(1, Duration::from_secs(1));
@@ -1305,10 +1188,7 @@ mod tests {
             .expect("SPECTER_DIFF_PATH set on step 0")
             .1
             .clone();
-        assert!(
-            std::path::Path::new(&path0).exists(),
-            "tmp file exists during step 0",
-        );
+        assert!(std::path::Path::new(&path0).exists(), "tmp file exists during step 0");
         h.spawner.complete(s0[0].pid, EffectOutcome::Ok).unwrap();
 
         let s1 = h.wait_for_spawns(2, Duration::from_secs(1));
@@ -1321,10 +1201,7 @@ mod tests {
             .clone();
         assert_eq!(path0, path1, "step 1 sees the same tmp path as step 0");
         // Mid-plan: the file MUST still exist (cleanup is at terminal).
-        assert!(
-            std::path::Path::new(&path0).exists(),
-            "tmp file persists across steps",
-        );
+        assert!(std::path::Path::new(&path0).exists(), "tmp file persists across steps");
         h.spawner.complete(s1[1].pid, EffectOutcome::Ok).unwrap();
         h.wait_for_effect_completes(1, Duration::from_secs(1));
 
@@ -1332,10 +1209,7 @@ mod tests {
         // controller thread post-reap).
         let deadline = Instant::now() + Duration::from_secs(1);
         while std::path::Path::new(&path0).exists() {
-            assert!(
-                Instant::now() < deadline,
-                "tmp file not cleaned up: {path0}",
-            );
+            assert!(Instant::now() < deadline, "tmp file not cleaned up: {path0}");
             thread::sleep(Duration::from_millis(5));
         }
         h.shutdown();
@@ -1362,11 +1236,7 @@ mod tests {
         h.submit(effect_c);
 
         thread::sleep(Duration::from_millis(50));
-        assert_eq!(
-            h.spawner.spawns().len(),
-            1,
-            "no second spawn while plan_a's step 0 is running",
-        );
+        assert_eq!(h.spawner.spawns().len(), 1, "no second spawn while plan_a's step 0 is running");
 
         // Reap step 0. plan_a advances to step 1.
         h.spawner.complete(s0[0].pid, EffectOutcome::Ok).unwrap();
@@ -1405,11 +1275,7 @@ mod tests {
         // Sub B: 1-step plan submitted concurrently. Has to wait for the permit.
         h.submit(make_effect_perfile(6, 6, 6, 2));
         thread::sleep(Duration::from_millis(50));
-        assert_eq!(
-            h.spawner.spawns().len(),
-            1,
-            "B is blocked on the only permit",
-        );
+        assert_eq!(h.spawner.spawns().len(), 1, "B is blocked on the only permit");
 
         // Reap A's step 0. The wait thread releases the permit, then sends Reaped. The controller's
         // reap handler is already on the call stack and re-acquires the permit before pump runs —
@@ -1417,11 +1283,7 @@ mod tests {
         h.spawner.complete(s0[0].pid, EffectOutcome::Ok).unwrap();
         let s1 = h.wait_for_spawns(2, Duration::from_secs(1));
         thread::sleep(Duration::from_millis(50));
-        assert_eq!(
-            h.spawner.spawns().len(),
-            2,
-            "A step 1 took the freed permit; B still blocked",
-        );
+        assert_eq!(h.spawner.spawns().len(), 2, "A step 1 took the freed permit; B still blocked");
 
         // Reap A's step 1. Plan A terminates; permit released; pump runs B's step 0.
         h.spawner.complete(s1[1].pid, EffectOutcome::Ok).unwrap();
@@ -1460,11 +1322,7 @@ mod tests {
         while let Ok(i) = h.engine_in.try_recv() {
             received.push(i);
         }
-        assert_eq!(
-            received.len(),
-            1,
-            "exactly one EffectComplete from drained step 0"
-        );
+        assert_eq!(received.len(), 1, "exactly one EffectComplete from drained step 0");
         match &received[0] {
             Input::EffectComplete(c) => {
                 assert!(matches!(c.outcome, EffectOutcome::Ok));
@@ -1500,17 +1358,13 @@ mod tests {
         ));
         let completions = h.wait_for_effect_completes(1, Duration::from_secs(1));
         match &completions[0] {
-            Input::EffectComplete(c) => assert!(matches!(
-                c.outcome,
-                EffectOutcome::Failed(Termination::Internal)
-            )),
+            Input::EffectComplete(c) => {
+                assert!(matches!(c.outcome, EffectOutcome::Failed(Termination::Internal)));
+            }
             other => panic!("expected EffectComplete::Failed; got {other:?}"),
         }
         // Resolver failed before the spawner was reached.
-        assert!(
-            h.spawner.spawns().is_empty(),
-            "no spawn recorded for unresolved env",
-        );
+        assert!(h.spawner.spawns().is_empty(), "no spawn recorded for unresolved env");
         h.shutdown();
     }
 
@@ -1528,9 +1382,7 @@ mod tests {
         ));
         let spawns = h.wait_for_spawns(1, Duration::from_secs(1));
         assert_eq!(spawns[0].argv, vec!["/tmp".to_string()]);
-        h.spawner
-            .complete(spawns[0].pid, EffectOutcome::Ok)
-            .unwrap();
+        h.spawner.complete(spawns[0].pid, EffectOutcome::Ok).unwrap();
         h.wait_for_effect_completes(1, Duration::from_secs(1));
         h.shutdown();
     }
@@ -1553,9 +1405,7 @@ mod tests {
         ));
         let spawns = h.wait_for_spawns(1, Duration::from_secs(1));
         assert_eq!(spawns[0].argv, vec!["value-x".to_string()]);
-        h.spawner
-            .complete(spawns[0].pid, EffectOutcome::Ok)
-            .unwrap();
+        h.spawner.complete(spawns[0].pid, EffectOutcome::Ok).unwrap();
         h.wait_for_effect_completes(1, Duration::from_secs(1));
         h.shutdown();
     }
@@ -1595,11 +1445,7 @@ mod tests {
         // a detached thread.
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
-            if h.spawner
-                .signals()
-                .iter()
-                .any(|s| matches!(s, SignalRecord::Term(p) if *p == pid))
-            {
+            if h.spawner.signals().iter().any(|s| matches!(s, SignalRecord::Term(p) if *p == pid)) {
                 break;
             }
             assert!(
@@ -1613,9 +1459,7 @@ mod tests {
         // Complete the child so the wait thread can shut down and reap. The signaler's
         // MockChildSignaler::signal_term path recorded `Term`; completing here drains the engine
         // channel so the harness's shutdown drop is clean.
-        h.spawner
-            .complete(pid, EffectOutcome::Failed(Termination::Signal(15)))
-            .unwrap();
+        h.spawner.complete(pid, EffectOutcome::Failed(Termination::Signal(15))).unwrap();
         h.wait_for_effect_completes(1, Duration::from_secs(1));
         h.shutdown();
     }
@@ -1634,9 +1478,7 @@ mod tests {
             timeout_program(Duration::from_mins(1)),
         ));
         let spawns = h.wait_for_spawns(1, Duration::from_secs(1));
-        h.spawner
-            .complete(spawns[0].pid, EffectOutcome::Ok)
-            .unwrap();
+        h.spawner.complete(spawns[0].pid, EffectOutcome::Ok).unwrap();
         h.wait_for_effect_completes(1, Duration::from_secs(1));
 
         // Allow the controller a moment in case the timer thread is still in flight (sleep racing
@@ -1672,9 +1514,7 @@ mod tests {
     /// - op 1: then-Exec `T` — `on_ok = Escape` (skip else), `on_failed = Terminate`.
     /// - op 2: else-Exec `E` — `on_ok = Escape`, `on_failed = Terminate`.
     fn predicate_then_else(
-        when_label: &str,
-        then_label: &str,
-        else_label: &str,
+        when_label: &str, then_label: &str, else_label: &str,
     ) -> Arc<ActionProgram> {
         let mut b = ProgramBuilder::new();
         let pred = b.emit(SpawnBody::Exec(ExecAction::new(
@@ -1729,11 +1569,7 @@ mod tests {
         ));
         // Else-exec was never spawned.
         thread::sleep(Duration::from_millis(50));
-        assert_eq!(
-            h.spawner.spawns().len(),
-            2,
-            "else-exec must not run when predicate Ok",
-        );
+        assert_eq!(h.spawner.spawns().len(), 2, "else-exec must not run when predicate Ok");
         h.shutdown();
     }
 
@@ -1747,9 +1583,7 @@ mod tests {
         h.submit(make_effect_perfile_with_program(2, 2, 2, 1, program));
 
         let s0 = h.wait_for_spawns(1, Duration::from_secs(1));
-        h.spawner
-            .complete(s0[0].pid, EffectOutcome::Failed(Termination::Exit(99)))
-            .unwrap();
+        h.spawner.complete(s0[0].pid, EffectOutcome::Failed(Termination::Exit(99))).unwrap();
 
         // Predicate Failed → jump to else_start. Else-exec spawns; then-exec is skipped.
         let s1 = h.wait_for_spawns(2, Duration::from_secs(1));
@@ -1778,9 +1612,7 @@ mod tests {
         h.submit(make_effect_perfile_with_program(3, 3, 3, 1, program));
 
         let s0 = h.wait_for_spawns(1, Duration::from_secs(1));
-        h.spawner
-            .complete(s0[0].pid, EffectOutcome::Failed(Termination::Exit(7)))
-            .unwrap();
+        h.spawner.complete(s0[0].pid, EffectOutcome::Failed(Termination::Exit(7))).unwrap();
 
         let completions = h.wait_for_effect_completes(1, Duration::from_secs(1));
         assert!(
@@ -1792,11 +1624,7 @@ mod tests {
             completions[0],
         );
         thread::sleep(Duration::from_millis(50));
-        assert_eq!(
-            h.spawner.spawns().len(),
-            1,
-            "then-exec must not run when predicate Failed",
-        );
+        assert_eq!(h.spawner.spawns().len(), 1, "then-exec must not run when predicate Failed");
         h.shutdown();
     }
 
@@ -1986,16 +1814,10 @@ mod tests {
             let s0 = h.wait_for_spawns(1, Duration::from_secs(1));
             h.spawner.complete(s0[0].pid, EffectOutcome::Ok).unwrap();
             let s1 = h.wait_for_spawns(2, Duration::from_secs(1));
-            h.spawner
-                .complete(s1[1].pid, EffectOutcome::Failed(Termination::Exit(1)))
-                .unwrap();
+            h.spawner.complete(s1[1].pid, EffectOutcome::Failed(Termination::Exit(1))).unwrap();
             // C must not spawn.
             thread::sleep(Duration::from_millis(50));
-            assert_eq!(
-                h.spawner.spawns().len(),
-                2,
-                "C must not run when predicate B fails",
-            );
+            assert_eq!(h.spawner.spawns().len(), 2, "C must not run when predicate B fails");
             let completions = h.wait_for_effect_completes(1, Duration::from_secs(1));
             assert!(
                 matches!(
@@ -2018,9 +1840,7 @@ mod tests {
     /// Build a single-op program wrapping a pipe body. `on_ok = Escape`, `on_failed = Terminate`.
     fn pipe_program(stages: Arc<[ExecAction]>) -> Arc<ActionProgram> {
         let mut b = ProgramBuilder::new();
-        let h = b.emit(SpawnBody::Pipe(
-            MultiStage::new(stages).expect("test pipe has >=2 stages"),
-        ));
+        let h = b.emit(SpawnBody::Pipe(MultiStage::new(stages).expect("test pipe has >=2 stages")));
         b.patch_on_ok(h, BranchTarget::Escape).unwrap();
         b.patch_on_failed(h, BranchTarget::Terminate).unwrap();
         Arc::new(b.build().unwrap())
@@ -2045,12 +1865,8 @@ mod tests {
         assert_eq!(spawns[1].argv, vec!["/bin/b".to_string()]);
         // The mock's per-stage completion channels are independent; the aggregating waiter drains
         // in spawn order, so completing stage 0 first matches the production sequence.
-        h.spawner
-            .complete(spawns[0].pid, EffectOutcome::Ok)
-            .unwrap();
-        h.spawner
-            .complete(spawns[1].pid, EffectOutcome::Ok)
-            .unwrap();
+        h.spawner.complete(spawns[0].pid, EffectOutcome::Ok).unwrap();
+        h.spawner.complete(spawns[1].pid, EffectOutcome::Ok).unwrap();
         let completions = h.wait_for_effect_completes(1, Duration::from_secs(1));
         assert_eq!(completions.len(), 1, "exactly one EffectComplete per pipe");
         assert!(matches!(
@@ -2079,9 +1895,7 @@ mod tests {
 
         // Complete stage 0 Failed; the aggregating waiter will observe this and cascade SIGTERM to
         // stage 1.
-        h.spawner
-            .complete(stage0_pid, EffectOutcome::Failed(Termination::Exit(7)))
-            .unwrap();
+        h.spawner.complete(stage0_pid, EffectOutcome::Failed(Termination::Exit(7))).unwrap();
         // Wait for the cascade SIGTERM to land. The mock signaler records Term(pid) on `signal_term`.
         // Poll briefly.
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -2098,9 +1912,7 @@ mod tests {
         }
         // Complete stage 1 (as if SIGTERM took effect) so the aggregator's wait finishes and the
         // EffectComplete arrives.
-        h.spawner
-            .complete(stage1_pid, EffectOutcome::Failed(Termination::Signal(15)))
-            .unwrap();
+        h.spawner.complete(stage1_pid, EffectOutcome::Failed(Termination::Signal(15))).unwrap();
         let completions = h.wait_for_effect_completes(1, Duration::from_secs(1));
         match &completions[0] {
             Input::EffectComplete(c) => {
@@ -2139,11 +1951,7 @@ mod tests {
         ));
         // No stages recorded — the inject_spawn_error path short-circuits MockSpawner::spawn_pipe
         // before allocate_spawn.
-        assert_eq!(
-            h.spawner.spawns().len(),
-            0,
-            "no stages recorded when pipe spawn fails",
-        );
+        assert_eq!(h.spawner.spawns().len(), 0, "no stages recorded when pipe spawn fails");
         h.shutdown();
     }
 
@@ -2168,33 +1976,20 @@ mod tests {
                 None,
             )));
             b.patch_on_ok(exec_after, BranchTarget::Escape).unwrap();
-            b.patch_on_failed(exec_after, BranchTarget::Terminate)
-                .unwrap();
+            b.patch_on_failed(exec_after, BranchTarget::Terminate).unwrap();
             Arc::new(b.build().unwrap())
         };
 
         // Path 1: pipe Ok → /bin/after runs.
         {
             let mut h = Harness::new(nz(4));
-            h.submit(make_effect_perfile_with_program(
-                53,
-                53,
-                53,
-                1,
-                Arc::clone(&program),
-            ));
+            h.submit(make_effect_perfile_with_program(53, 53, 53, 1, Arc::clone(&program)));
             let pipe_spawns = h.wait_for_spawns(2, Duration::from_secs(1));
-            h.spawner
-                .complete(pipe_spawns[0].pid, EffectOutcome::Ok)
-                .unwrap();
-            h.spawner
-                .complete(pipe_spawns[1].pid, EffectOutcome::Ok)
-                .unwrap();
+            h.spawner.complete(pipe_spawns[0].pid, EffectOutcome::Ok).unwrap();
+            h.spawner.complete(pipe_spawns[1].pid, EffectOutcome::Ok).unwrap();
             let after_spawns = h.wait_for_spawns(3, Duration::from_secs(1));
             assert_eq!(after_spawns[2].argv, vec!["/bin/after".to_string()]);
-            h.spawner
-                .complete(after_spawns[2].pid, EffectOutcome::Ok)
-                .unwrap();
+            h.spawner.complete(after_spawns[2].pid, EffectOutcome::Ok).unwrap();
             let completions = h.wait_for_effect_completes(1, Duration::from_secs(1));
             assert!(matches!(
                 &completions[0],
@@ -2209,14 +2004,9 @@ mod tests {
             h.submit(make_effect_perfile_with_program(54, 54, 54, 1, program));
             let pipe_spawns = h.wait_for_spawns(2, Duration::from_secs(1));
             h.spawner
-                .complete(
-                    pipe_spawns[0].pid,
-                    EffectOutcome::Failed(Termination::Exit(1)),
-                )
+                .complete(pipe_spawns[0].pid, EffectOutcome::Failed(Termination::Exit(1)))
                 .unwrap();
-            h.spawner
-                .complete(pipe_spawns[1].pid, EffectOutcome::Ok)
-                .unwrap();
+            h.spawner.complete(pipe_spawns[1].pid, EffectOutcome::Ok).unwrap();
             let completions = h.wait_for_effect_completes(1, Duration::from_secs(1));
             assert!(matches!(
                 &completions[0],
@@ -2242,10 +2032,7 @@ mod tests {
         let timeout = Duration::from_millis(60);
         let stages: Arc<[ExecAction]> = Arc::from(vec![
             ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/a")])], None),
-            ExecAction::new(
-                [ArgTemplate::new([ArgPart::literal("/bin/b")])],
-                Some(timeout),
-            ),
+            ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/b")])], Some(timeout)),
         ]);
         let program = pipe_program(stages);
 
@@ -2281,9 +2068,7 @@ mod tests {
 
         // Complete both stages so the aggregator finishes. Stage 1 reports as Failed-by-signal (the
         // timeout took effect).
-        h.spawner
-            .complete(stage1_pid, EffectOutcome::Failed(Termination::Signal(15)))
-            .unwrap();
+        h.spawner.complete(stage1_pid, EffectOutcome::Failed(Termination::Signal(15))).unwrap();
         // The aggregator on stage 1's failure cascades SIGTERM to *later* siblings (none here), then
         // continues draining. Stage 0 hasn't completed yet — drain it so the wait finishes.
         h.spawner.complete(stage0_pid, EffectOutcome::Ok).unwrap();

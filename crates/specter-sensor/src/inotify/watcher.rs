@@ -158,11 +158,7 @@ impl InotifyWatcher {
     /// the cached / observed value is the source of truth). The split makes this explicit at the
     /// call boundary — [`Self::rewatch_inner`] does not take `kind`.
     fn watch_inner(
-        &mut self,
-        r: ResourceId,
-        path: &Path,
-        kind: ResourceKind,
-        events: ClassSet,
+        &mut self, r: ResourceId, path: &Path, kind: ResourceKind, events: ClassSet,
     ) -> io::Result<()> {
         if self.by_resource.contains_key(r) {
             self.rewatch_inner(r, path, events)
@@ -203,11 +199,8 @@ impl InotifyWatcher {
     /// `by_resource[r]` must be populated. The dispatcher [`Self::watch_inner`] enforces this;
     /// calling this directly with an empty entry panics.
     fn rewatch_inner(&mut self, r: ResourceId, path: &Path, events: ClassSet) -> io::Result<()> {
-        let prior = self
-            .by_resource
-            .get(r)
-            .copied()
-            .expect("rewatch_inner invoked without existing entry");
+        let prior =
+            self.by_resource.get(r).copied().expect("rewatch_inner invoked without existing entry");
         let cached_kind = prior.kind;
 
         if matches!(cached_kind, ResourceKind::Unknown) {
@@ -220,11 +213,7 @@ impl InotifyWatcher {
     /// short-circuits with zero syscalls on no diff. See [`Self::rewatch_inner`] for the branch's
     /// structural invariants.
     fn rewatch_fast_known(
-        &mut self,
-        r: ResourceId,
-        path: &Path,
-        events: ClassSet,
-        prior: InotifyEntry,
+        &mut self, r: ResourceId, path: &Path, events: ClassSet, prior: InotifyEntry,
     ) -> io::Result<()> {
         let cached_kind = prior.kind;
         let install_mask = compute_install_mask(events, cached_kind);
@@ -267,11 +256,7 @@ impl InotifyWatcher {
     /// install mask from the live inode shape; refreshes the cached kind on commit. See
     /// [`Self::rewatch_inner`] for why the fast-path optimization is unsound here.
     fn rewatch_slow_unknown(
-        &mut self,
-        r: ResourceId,
-        path: &Path,
-        events: ClassSet,
-        prior: InotifyEntry,
+        &mut self, r: ResourceId, path: &Path, events: ClassSet, prior: InotifyEntry,
     ) -> io::Result<()> {
         let fd = ffi::open_o_path(path)?;
         let observed_kind = ffi::fstat_kind(&fd)?;
@@ -306,11 +291,7 @@ impl InotifyWatcher {
     /// which restores the aliased resource's mask and clears `r`'s entry — the engine sees a clean
     /// unwatched state for `r`.
     fn commit_rewatch(
-        &mut self,
-        r: ResourceId,
-        fd: &OwnedFd,
-        install_mask: u32,
-        kind: ResourceKind,
+        &mut self, r: ResourceId, fd: &OwnedFd, install_mask: u32, kind: ResourceKind,
         prior: InotifyEntry,
     ) -> io::Result<()> {
         let wd = ffi::inotify_add_watch_fd(&self.inotify_fd, fd, install_mask)?;
@@ -352,14 +333,7 @@ impl InotifyWatcher {
         }
 
         // Commit the new (wd, mask, kind) triple atomically.
-        self.by_resource.insert(
-            r,
-            InotifyEntry {
-                wd,
-                mask: install_mask,
-                kind,
-            },
-        );
+        self.by_resource.insert(r, InotifyEntry { wd, mask: install_mask, kind });
         self.by_wd.insert(wd, r);
         tracing::debug!(
             ?r,
@@ -389,11 +363,7 @@ impl InotifyWatcher {
     ///
     /// `by_resource[r]` must be empty. The dispatcher [`Self::watch_inner`] enforces this.
     fn fresh_watch_inner(
-        &mut self,
-        r: ResourceId,
-        path: &Path,
-        kind: ResourceKind,
-        events: ClassSet,
+        &mut self, r: ResourceId, path: &Path, kind: ResourceKind, events: ClassSet,
     ) -> io::Result<()> {
         // 1) Open with `O_PATH | O_NOFOLLOW`. The fd binds to a specific inode regardless of
         //    subsequent renames at `path`. `O_PATH` permits `fstat` even without read permission
@@ -442,14 +412,7 @@ impl InotifyWatcher {
         // 7) Commit the (wd, mask, kind) triple atomically. `fd` drops at end of scope; the kernel
         //    watches the inode the fd resolved to at `add_watch` time, independent of fd lifetime
         //    (per `inotify(7)`).
-        self.by_resource.insert(
-            r,
-            InotifyEntry {
-                wd,
-                mask: install_mask,
-                kind: observed_kind,
-            },
-        );
+        self.by_resource.insert(r, InotifyEntry { wd, mask: install_mask, kind: observed_kind });
         self.by_wd.insert(wd, r);
         tracing::debug!(
             ?r,
@@ -486,11 +449,7 @@ impl InotifyWatcher {
     /// across this call (the kernel resolves the magic-symlink path at syscall time inside
     /// [`ffi::inotify_add_watch_fd`], and a closed fd would surface as `ENOENT`).
     fn reject_aliased_install(
-        &mut self,
-        existing: ResourceId,
-        r: ResourceId,
-        wd: libc::c_int,
-        fd: &OwnedFd,
+        &mut self, existing: ResourceId, r: ResourceId, wd: libc::c_int, fd: &OwnedFd,
     ) {
         match self.by_resource.get(existing).copied() {
             Some(existing_entry) => {
@@ -532,14 +491,9 @@ impl FsWatcher for InotifyWatcher {
     /// values. The errno-name match lives in [`crate::WatchFailureExt::from_io`]; the
     /// inotify-specific vocabulary stops at this seam.
     fn watch(
-        &mut self,
-        r: ResourceId,
-        path: &Path,
-        kind: ResourceKind,
-        events: ClassSet,
+        &mut self, r: ResourceId, path: &Path, kind: ResourceKind, events: ClassSet,
     ) -> Result<(), WatchFailure> {
-        self.watch_inner(r, path, kind, events)
-            .map_err(|e| WatchFailure::from_io(&e))
+        self.watch_inner(r, path, kind, events).map_err(|e| WatchFailure::from_io(&e))
     }
 
     /// Tear down `r`'s kernel-side registration with the wd-reuse race mitigation: the wd is marked
@@ -646,9 +600,7 @@ impl FsWatcher for InotifyWatcher {
             for rec in record::parse(&self.read_buf[..n_bytes]) {
                 // 1. IN_Q_OVERFLOW: queue-wide kernel-side overflow signal.
                 if rec.mask & libc::IN_Q_OVERFLOW != 0 {
-                    out.push(WatcherEvent::Overflow {
-                        scope: OverflowScope::Global,
-                    });
+                    out.push(WatcherEvent::Overflow { scope: OverflowScope::Global });
                     total_emitted += 1;
                     continue;
                 }
@@ -699,10 +651,7 @@ impl FsWatcher for InotifyWatcher {
                 // defensive routing for events on a resource whose entry was cleared between the
                 // kernel's queue-add and our drain (e.g., a spontaneous IN_IGNORED arm earlier in
                 // the same batch).
-                let kind = self
-                    .by_resource
-                    .get(r)
-                    .map_or(ResourceKind::Unknown, |e| e.kind);
+                let kind = self.by_resource.get(r).map_or(ResourceKind::Unknown, |e| e.kind);
                 let Some(fs_event) = normalize::mask_to_fs_event(rec.mask, kind) else {
                     // No actionable bit — registration ack with only orientation flags (IN_ISDIR),
                     // or a defensive IN_IGNORED slip the case-2 branch should have caught. Drop
@@ -723,10 +672,7 @@ impl FsWatcher for InotifyWatcher {
                 // Stale-event passthrough: `r` may already have been removed from `by_resource`
                 // between kernel queue-up and our drain. Emit anyway — engine's
                 // `EventOnUnwatchedResource` Diagnostic handles the race.
-                out.push(WatcherEvent::Fs {
-                    resource: r,
-                    event: fs_event,
-                });
+                out.push(WatcherEvent::Fs { resource: r, event: fs_event });
                 total_emitted += 1;
             }
         }

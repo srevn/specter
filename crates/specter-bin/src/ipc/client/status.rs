@@ -37,13 +37,7 @@ pub(crate) fn run(args: &StatusArgs) -> ExitCode {
         return connect::fail_response(&args.client, "status", resp);
     };
 
-    connect::render_response(
-        &args.client,
-        "status",
-        args.output,
-        &status,
-        |buf, resp, sty| {
-            status::render(buf, resp, args.wide, sty);
-        },
-    )
+    connect::render_response(&args.client, "status", args.output, &status, |buf, resp, sty| {
+        status::render(buf, resp, args.wide, sty);
+    })
 }

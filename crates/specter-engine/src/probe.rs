@@ -101,10 +101,7 @@ pub(crate) enum ProofOutcome {
     /// on this arm.
     AnchorOk(LeafEntry),
     /// `Subtree` request returned a directory observation plus the walker-stamped [`ProofAuthority`].
-    SubtreeProven {
-        snapshot: Arc<DirSnapshot>,
-        authority: ProofAuthority,
-    },
+    SubtreeProven { snapshot: Arc<DirSnapshot>, authority: ProofAuthority },
     /// Anchor absent (`ENOENT`) or kind mismatch — routed to the caller's per-route `*_vanished`
     /// cleanup.
     Vanished,
@@ -148,13 +145,9 @@ impl TryFrom<ProbeOutcome> for ProofOutcome {
     fn try_from(outcome: ProbeOutcome) -> Result<Self, Self::Error> {
         match outcome {
             ProbeOutcome::AnchorOk(leaf) => Ok(Self::AnchorOk(leaf)),
-            ProbeOutcome::SubtreeProven {
-                snapshot,
-                authority,
-            } => Ok(Self::SubtreeProven {
-                snapshot,
-                authority,
-            }),
+            ProbeOutcome::SubtreeProven { snapshot, authority } => {
+                Ok(Self::SubtreeProven { snapshot, authority })
+            }
             ProbeOutcome::Vanished => Ok(Self::Vanished),
             ProbeOutcome::Failed(failure) => Ok(Self::Failed(failure)),
             ProbeOutcome::SegmentObserved { .. } => Err(WalkerContractViolation),
@@ -235,9 +228,7 @@ impl Engine {
     /// assertions.
     #[must_use]
     pub fn pending_probe_for(&self, owner: ProfileId) -> Option<ProbeCorrelation> {
-        self.profiles
-            .get(owner)
-            .and_then(|p| p.state().probe_correlation())
+        self.profiles.get(owner).and_then(|p| p.state().probe_correlation())
     }
 
     /// The response-path gate: a Profile's in-flight probe correlation **and** routing class, from
@@ -266,18 +257,16 @@ impl Engine {
     /// [`Self::emit_owner_probe`]): the same one-`profiles`-resolution shape, resolving the owner's
     /// state into the outgoing `ProbeRequest` rather than this response-demux route.
     pub(crate) fn profile_probe_gate(
-        &self,
-        profile_id: ProfileId,
+        &self, profile_id: ProfileId,
     ) -> Option<(ProbeCorrelation, ProfileProbeRoute)> {
         let state = self.profiles.get(profile_id)?.state();
         let correlation = state.probe_correlation()?;
         let route = match state {
             ProfileState::Pending(_) => Some(ProfileProbeRoute::Descent),
             ProfileState::Active(ActiveBurst::PreFire(pre), _) => match &pre.phase {
-                PreFirePhase::Verifying { .. } => Some(ProfileProbeRoute::Verifying {
-                    intent: pre.intent,
-                    forced: pre.forced,
-                }),
+                PreFirePhase::Verifying { .. } => {
+                    Some(ProfileProbeRoute::Verifying { intent: pre.intent, forced: pre.forced })
+                }
                 PreFirePhase::Batching { .. } | PreFirePhase::Draining => None,
             },
             ProfileState::Active(ActiveBurst::PostFire(post), _) => match &post.phase {
@@ -457,10 +446,7 @@ impl Engine {
             /// resolution (tied to the stable `&Profile`) and frozen for the armed slot's lifetime
             /// — every head mutation re-arms with a fresh correlation. No proof obligation (a
             /// structural query is not a quiescence observation).
-            Descent {
-                prefix: ResourceId,
-                segment: &'a CompactString,
-            },
+            Descent { prefix: ResourceId, segment: &'a CompactString },
             /// Profile `Verifying`. `target` = the variant payload's `target` (the live id
             /// `pre_fire_target` resolved, immutable for the Verifying variant's lifetime),
             /// `forced` = `pre.forced`, `intent` feeds the obligation predicate
@@ -537,18 +523,13 @@ impl Engine {
         // / rebase carriers kind-dispatch.
         let target_path = self.tree.path_of(target).unwrap_or_else(empty_path);
         Some(match carrier {
-            Carrier::Descent { segment, .. } => ProbeRequest::Descent {
-                owner,
-                correlation,
-                target_path,
-                segment: segment.clone(),
-            },
+            Carrier::Descent { segment, .. } => {
+                ProbeRequest::Descent { owner, correlation, target_path, segment: segment.clone() }
+            }
             Carrier::PreFire { .. } | Carrier::Rebase => match p.kind() {
-                Some(ResourceKind::File) => ProbeRequest::AnchorFile {
-                    owner,
-                    correlation,
-                    target_path,
-                },
+                Some(ResourceKind::File) => {
+                    ProbeRequest::AnchorFile { owner, correlation, target_path }
+                }
                 // Dir or still-unclassified ⇒ the kind-agnostic Subtree walk; the walker returns
                 // `Vanished` on a kind mismatch and the engine recovers via descent. The proof
                 // obligation is materialized here — lazily (never for a File anchor) and per carrier.
@@ -683,12 +664,8 @@ mod tests {
     #[test]
     fn descent_outcome_try_from_accepts_structural_shapes_rejects_proof() {
         assert!(matches!(
-            DescentOutcome::try_from(ProbeOutcome::SegmentObserved {
-                kind: Some(EntryKind::Dir),
-            }),
-            Ok(DescentOutcome::SegmentObserved {
-                kind: Some(EntryKind::Dir),
-            }),
+            DescentOutcome::try_from(ProbeOutcome::SegmentObserved { kind: Some(EntryKind::Dir) }),
+            Ok(DescentOutcome::SegmentObserved { kind: Some(EntryKind::Dir) }),
         ));
         assert!(matches!(
             DescentOutcome::try_from(ProbeOutcome::Vanished),

@@ -54,13 +54,7 @@ impl Sandbox {
         let socket = dir.join("specter.sock");
         // Minimal valid config — no watches. Tests that need watches write a richer TOML themselves.
         fs::write(&cfg, "").expect("write empty config");
-        Self {
-            _tmp: tmp,
-            dir,
-            cfg,
-            log,
-            socket,
-        }
+        Self { _tmp: tmp, dir, cfg, log, socket }
     }
 
     /// Full daemon log contents, for failure messages. A timeline-bearing assert that dumps the
@@ -180,10 +174,7 @@ fn await_exit(child: &mut Child) -> io::Result<std::process::ExitStatus> {
     let pid = Pid::from_raw(child.id().cast_signed());
     let _ = kill(pid, Signal::SIGKILL);
     let _ = child.wait();
-    Err(io::Error::new(
-        io::ErrorKind::TimedOut,
-        "child did not exit on SIGTERM",
-    ))
+    Err(io::Error::new(io::ErrorKind::TimedOut, "child did not exit on SIGTERM"))
 }
 
 /// SIGTERM the daemon and await clean exit. Defuses the kill-on-drop guard: from here the child is
@@ -305,16 +296,9 @@ enum DisabledSourceSnap {
 #[serde(tag = "status", rename_all = "snake_case")]
 #[allow(dead_code)]
 enum ShowResponseSnap {
-    Active {
-        name: String,
-    },
-    Disabled {
-        name: String,
-        source: DisabledSourceSnap,
-    },
-    Unknown {
-        name: String,
-    },
+    Active { name: String },
+    Disabled { name: String, source: DisabledSourceSnap },
+    Unknown { name: String },
 }
 
 // ---------- status round-trip ----------------------------------------
@@ -326,10 +310,7 @@ enum ShowResponseSnap {
 fn status_round_trip() {
     let sb = Sandbox::new();
     let child = spawn_specter(&sb, std::iter::empty::<&str>());
-    assert!(
-        wait_for_socket(&sb.socket, STARTUP_DEADLINE),
-        "daemon never bound its socket",
-    );
+    assert!(wait_for_socket(&sb.socket, STARTUP_DEADLINE), "daemon never bound its socket");
 
     let line = one_shot(&sb.socket, r#"{"op":"status"}"#).expect("status request");
     let resp: ResponseSnap = serde_json::from_str(line.trim_end()).expect("parse response");
@@ -377,18 +358,12 @@ fn stale_socket_recovery() {
     assert!(sb.socket.exists());
 
     let child = spawn_specter(&sb, std::iter::empty::<&str>());
-    assert!(
-        wait_for_socket(&sb.socket, STARTUP_DEADLINE),
-        "daemon failed to recover stale path",
-    );
+    assert!(wait_for_socket(&sb.socket, STARTUP_DEADLINE), "daemon failed to recover stale path");
 
     // Connect to confirm the new listener is live (not the orphan).
     let line = one_shot(&sb.socket, r#"{"op":"status"}"#).expect("status against recovered socket");
     let resp: ResponseSnap = serde_json::from_str(line.trim_end()).expect("parse response");
-    assert!(
-        matches!(resp, ResponseSnap::Status(_)),
-        "expected Status, got {resp:?}",
-    );
+    assert!(matches!(resp, ResponseSnap::Status(_)), "expected Status, got {resp:?}");
 
     let exit = terminate(child);
     assert!(exit.success(), "clean exit; got {exit:?}");
@@ -403,19 +378,13 @@ fn stale_socket_recovery() {
 fn live_socket_conflict() {
     let sb = Sandbox::new();
     let first = spawn_specter(&sb, std::iter::empty::<&str>());
-    assert!(
-        wait_for_socket(&sb.socket, STARTUP_DEADLINE),
-        "first daemon failed to come up",
-    );
+    assert!(wait_for_socket(&sb.socket, STARTUP_DEADLINE), "first daemon failed to come up");
 
     // Spawn a second daemon on the same sandbox (same --socket ⇒ same socket path). It must exit
     // non-zero.
     let mut second = spawn_specter(&sb, std::iter::empty::<&str>());
     let second_exit = await_exit(second.child_mut()).expect("second daemon exited");
-    assert!(
-        !second_exit.success(),
-        "second daemon must NOT have succeeded; got {second_exit:?}",
-    );
+    assert!(!second_exit.success(), "second daemon must NOT have succeeded; got {second_exit:?}");
 
     let first_exit = terminate(first);
     assert!(first_exit.success(), "first clean exit; got {first_exit:?}");
@@ -429,17 +398,11 @@ fn live_socket_conflict() {
 fn socket_mode_is_0600() {
     let sb = Sandbox::new();
     let child = spawn_specter(&sb, std::iter::empty::<&str>());
-    assert!(
-        wait_for_socket(&sb.socket, STARTUP_DEADLINE),
-        "daemon never bound its socket",
-    );
+    assert!(wait_for_socket(&sb.socket, STARTUP_DEADLINE), "daemon never bound its socket");
 
     let meta = fs::metadata(&sb.socket).expect("lstat bound socket");
     let mode = meta.permissions().mode() & 0o777;
-    assert_eq!(
-        mode, 0o600,
-        "socket must be owner-only (0o600); got {mode:o}"
-    );
+    assert_eq!(mode, 0o600, "socket must be owner-only (0o600); got {mode:o}");
 
     let exit = terminate(child);
     assert!(exit.success(), "clean exit; got {exit:?}");
@@ -454,18 +417,12 @@ fn socket_mode_is_0600() {
 fn unlink_guard_clears_on_graceful_shutdown() {
     let sb = Sandbox::new();
     let child = spawn_specter(&sb, std::iter::empty::<&str>());
-    assert!(
-        wait_for_socket(&sb.socket, STARTUP_DEADLINE),
-        "daemon never bound its socket",
-    );
+    assert!(wait_for_socket(&sb.socket, STARTUP_DEADLINE), "daemon never bound its socket");
 
     let exit = terminate(child);
     assert!(exit.success(), "clean exit; got {exit:?}");
 
-    assert!(
-        !sb.socket.exists(),
-        "socket file persisted after graceful shutdown",
-    );
+    assert!(!sb.socket.exists(), "socket file persisted after graceful shutdown");
 }
 
 // ---------- malformed / unknown request ------------------------------
@@ -476,10 +433,7 @@ fn unlink_guard_clears_on_graceful_shutdown() {
 fn malformed_request_returns_err() {
     let sb = Sandbox::new();
     let child = spawn_specter(&sb, std::iter::empty::<&str>());
-    assert!(
-        wait_for_socket(&sb.socket, STARTUP_DEADLINE),
-        "daemon never bound its socket",
-    );
+    assert!(wait_for_socket(&sb.socket, STARTUP_DEADLINE), "daemon never bound its socket");
 
     let line = one_shot(&sb.socket, "not json").expect("send malformed");
     let resp: ResponseSnap = serde_json::from_str(line.trim_end()).expect("parse response");
@@ -502,10 +456,7 @@ fn malformed_request_returns_err() {
 fn unknown_op_returns_err() {
     let sb = Sandbox::new();
     let child = spawn_specter(&sb, std::iter::empty::<&str>());
-    assert!(
-        wait_for_socket(&sb.socket, STARTUP_DEADLINE),
-        "daemon never bound its socket",
-    );
+    assert!(wait_for_socket(&sb.socket, STARTUP_DEADLINE), "daemon never bound its socket");
 
     let line = one_shot(&sb.socket, r#"{"op":"frobnicate"}"#).expect("send unknown op");
     let resp: ResponseSnap = serde_json::from_str(line.trim_end()).expect("parse response");
@@ -529,10 +480,7 @@ fn unknown_op_returns_err() {
 fn reload_via_ipc_increments_counters() {
     let sb = Sandbox::new();
     let child = spawn_specter(&sb, std::iter::empty::<&str>());
-    assert!(
-        wait_for_socket(&sb.socket, STARTUP_DEADLINE),
-        "daemon never bound its socket",
-    );
+    assert!(wait_for_socket(&sb.socket, STARTUP_DEADLINE), "daemon never bound its socket");
 
     // First snapshot: reload_count == 0.
     let first = one_shot(&sb.socket, r#"{"op":"status"}"#).expect("first status");
@@ -551,16 +499,10 @@ fn reload_via_ipc_increments_counters() {
     // Wait for the reload to be observed (the engine thread processes the IPC drain on its tick,
     // and `record_reload` bumps `reload_count` inside `handle_reload`). One short retry loop covers
     // the tick latency; the polled status carries the full post-reload attribution.
-    let final_status = poll_status_until(
-        &sb.socket,
-        |s| s.reload_count > initial_reloads,
-        Duration::from_secs(5),
-    )
-    .unwrap_or_else(|| panic!("reload_count never advanced beyond {initial_reloads}"));
-    let lr = final_status
-        .last_reload
-        .as_ref()
-        .expect("successful reload stamps `last_reload`");
+    let final_status =
+        poll_status_until(&sb.socket, |s| s.reload_count > initial_reloads, Duration::from_secs(5))
+            .unwrap_or_else(|| panic!("reload_count never advanced beyond {initial_reloads}"));
+    let lr = final_status.last_reload.as_ref().expect("successful reload stamps `last_reload`");
     assert_eq!(
         lr.last_reload_via,
         ReloadTriggerSnap::Ipc,
@@ -618,10 +560,7 @@ enabled   = false
     fs::write(&sb.cfg, &cfg).expect("write config");
 
     let child = spawn_specter(&sb, std::iter::empty::<&str>());
-    assert!(
-        wait_for_socket(&sb.socket, STARTUP_DEADLINE),
-        "daemon never bound its socket",
-    );
+    assert!(wait_for_socket(&sb.socket, STARTUP_DEADLINE), "daemon never bound its socket");
 
     let line = one_shot(&sb.socket, r#"{"op":"list"}"#).expect("list request");
     let resp: ResponseSnap = serde_json::from_str(line.trim_end()).expect("parse response");
@@ -633,10 +572,7 @@ enabled   = false
             assert_eq!(list.rows[0].name, "alpha_off");
             assert_eq!(list.rows[0].disabled, Some(DisabledSourceSnap::Toml));
             assert_eq!(list.rows[1].name, "zebra");
-            assert!(
-                list.rows[1].disabled.is_none(),
-                "attached row carries no disabled tag",
-            );
+            assert!(list.rows[1].disabled.is_none(), "attached row carries no disabled tag");
         }
         other => panic!("expected List, got {other:?}"),
     }
@@ -663,10 +599,7 @@ actions   = [{{ exec = ["true"] }}]
     fs::write(&sb.cfg, &cfg).expect("write config");
 
     let child = spawn_specter(&sb, std::iter::empty::<&str>());
-    assert!(
-        wait_for_socket(&sb.socket, STARTUP_DEADLINE),
-        "daemon never bound its socket",
-    );
+    assert!(wait_for_socket(&sb.socket, STARTUP_DEADLINE), "daemon never bound its socket");
 
     let line = one_shot(&sb.socket, r#"{"op":"show","name":"watched"}"#).expect("show request");
     let resp: ResponseSnap = serde_json::from_str(line.trim_end()).expect("parse response");
@@ -691,10 +624,7 @@ actions   = [{{ exec = ["true"] }}]
 fn show_round_trip_unknown_exit_code() {
     let sb = Sandbox::new();
     let child = spawn_specter(&sb, std::iter::empty::<&str>());
-    assert!(
-        wait_for_socket(&sb.socket, STARTUP_DEADLINE),
-        "daemon never bound its socket",
-    );
+    assert!(wait_for_socket(&sb.socket, STARTUP_DEADLINE), "daemon never bound its socket");
 
     let bin = env!("CARGO_BIN_EXE_specter");
     let client = Command::new(bin)
@@ -764,9 +694,7 @@ actions   = [{{ exec = ["true"] }}]
 /// via `recv_timeout`. The thread exits cleanly on child stdout EOF, which happens on the child's
 /// clean exit or when the test calls [`Child::kill`].
 fn spawn_client_stream(
-    sb: &Sandbox,
-    verb: &str,
-    extra: &[&str],
+    sb: &Sandbox, verb: &str, extra: &[&str],
 ) -> (Child, mpsc::Receiver<String>) {
     let bin = env!("CARGO_BIN_EXE_specter");
     let mut child = Command::new(bin)
@@ -804,8 +732,7 @@ fn spawn_client_stream(
 /// verbs have their own per-test deadlines (small for `wait --timeout`, large for the happy-path
 /// tests).
 fn await_client_exit(
-    child: &mut Child,
-    deadline: Duration,
+    child: &mut Child, deadline: Duration,
 ) -> io::Result<std::process::ExitStatus> {
     let stop = Instant::now() + deadline;
     while Instant::now() < stop {
@@ -817,10 +744,7 @@ fn await_client_exit(
     let pid = Pid::from_raw(child.id().cast_signed());
     let _ = kill(pid, Signal::SIGKILL);
     let _ = child.wait();
-    Err(io::Error::new(
-        io::ErrorKind::TimedOut,
-        format!("client did not exit within {deadline:?}"),
-    ))
+    Err(io::Error::new(io::ErrorKind::TimedOut, format!("client did not exit within {deadline:?}")))
 }
 
 /// Touch (create + close) a fresh file under the watch anchor to drive a burst. The path is unique
@@ -834,9 +758,7 @@ fn touch_unique(anchor: &Path, label: &str) {
 /// Wait until `rx` yields a line matching `pred`, or `deadline` is reached. Returns the matching
 /// line on success, `None` on timeout.
 fn wait_for_line<F: Fn(&str) -> bool>(
-    rx: &mpsc::Receiver<String>,
-    pred: F,
-    deadline: Duration,
+    rx: &mpsc::Receiver<String>, pred: F, deadline: Duration,
 ) -> Option<String> {
     let stop = Instant::now() + deadline;
     loop {
@@ -891,21 +813,10 @@ fn tail_unknown_filter_exits_two() {
         .stderr(Stdio::piped())
         .output()
         .expect("spawn tail client");
-    assert_eq!(
-        out.status.code(),
-        Some(2),
-        "unknown --filter must exit 2; got {:?}",
-        out.status,
-    );
+    assert_eq!(out.status.code(), Some(2), "unknown --filter must exit 2; got {:?}", out.status);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("unknown filter"),
-        "stderr must explain the rejection: {stderr}",
-    );
-    assert!(
-        stderr.contains("Known filters:"),
-        "stderr must list the wire vocabulary: {stderr}",
-    );
+    assert!(stderr.contains("unknown filter"), "stderr must explain the rejection: {stderr}");
+    assert!(stderr.contains("Known filters:"), "stderr must list the wire vocabulary: {stderr}");
 }
 
 // ---------- subscribe arm shares the dial connect seam --------------
@@ -980,10 +891,7 @@ fn tail_streams_sub_fired_after_touch() {
     fs::write(&sb.cfg, one_watch_config("watcher", &anchor, 50)).expect("write config");
 
     let daemon = spawn_specter(&sb, std::iter::empty::<&str>());
-    assert!(
-        wait_for_socket(&sb.socket, STARTUP_DEADLINE),
-        "daemon never bound its socket",
-    );
+    assert!(wait_for_socket(&sb.socket, STARTUP_DEADLINE), "daemon never bound its socket");
     // Engine attach pass ran ⇒ Sub is in the registry.
     assert!(
         wait_for_log(&sb.log, |s| s.contains("sub attached"), STARTUP_DEADLINE).is_some(),
@@ -998,15 +906,8 @@ fn tail_streams_sub_fired_after_touch() {
 
     touch_unique(&anchor, "tail2");
 
-    let line = wait_for_line(
-        &rx,
-        |l| l.contains(r#""diag":"sub_fired""#),
-        Duration::from_secs(8),
-    );
-    assert!(
-        line.is_some(),
-        "tail never observed a SubFired line within the deadline",
-    );
+    let line = wait_for_line(&rx, |l| l.contains(r#""diag":"sub_fired""#), Duration::from_secs(8));
+    assert!(line.is_some(), "tail never observed a SubFired line within the deadline");
 
     // Kill the indefinite stream cleanly.
     let _ = tail.kill();
@@ -1035,12 +936,8 @@ fn tail_json_output_round_trips_via_serde() {
     thread::sleep(Duration::from_millis(400));
     touch_unique(&anchor, "tail3");
 
-    let line = wait_for_line(
-        &rx,
-        |l| l.contains(r#""diag":"sub_fired""#),
-        Duration::from_secs(8),
-    )
-    .expect("tail observed a SubFired line");
+    let line = wait_for_line(&rx, |l| l.contains(r#""diag":"sub_fired""#), Duration::from_secs(8))
+        .expect("tail observed a SubFired line");
 
     // Parse as a generic JSON value so the test does not duplicate the bin's pub(crate)
     // WireDiagnostic shape.
@@ -1052,9 +949,7 @@ fn tail_json_output_round_trips_via_serde() {
         "SubFired line carries a numeric sub id: {line}",
     );
     assert!(
-        v.get("profile")
-            .and_then(serde_json::Value::as_u64)
-            .is_some(),
+        v.get("profile").and_then(serde_json::Value::as_u64).is_some(),
         "SubFired line carries a numeric profile id: {line}",
     );
     assert!(
@@ -1096,19 +991,14 @@ fn subscribe_ack_precedes_first_diagnostic_on_wire() {
     let anchor = watched_anchor(&sb);
     fs::write(&sb.cfg, one_watch_config("orderwatch", &anchor, 300)).expect("write config");
     let daemon = spawn_specter(&sb, std::iter::empty::<&str>());
-    assert!(
-        wait_for_socket(&sb.socket, STARTUP_DEADLINE),
-        "daemon never bound its socket",
-    );
+    assert!(wait_for_socket(&sb.socket, STARTUP_DEADLINE), "daemon never bound its socket");
     assert!(
         wait_for_log(&sb.log, |s| s.contains("sub attached"), STARTUP_DEADLINE).is_some(),
         "daemon never logged the initial attach",
     );
 
     let stream = UnixStream::connect(&sb.socket).expect("connect");
-    stream
-        .set_read_timeout(Some(Duration::from_secs(8)))
-        .expect("set_read_timeout");
+    stream.set_read_timeout(Some(Duration::from_secs(8))).expect("set_read_timeout");
     let mut writer = stream.try_clone().expect("try_clone for writer");
     let mut reader = BufReader::new(stream);
 
@@ -1117,9 +1007,7 @@ fn subscribe_ack_precedes_first_diagnostic_on_wire() {
     // the ack returns. B3 says the ack must reach the wire first in every case.
     let toucher = thread::spawn(move || touch_unique(&anchor, "race"));
 
-    writer
-        .write_all(br#"{"op":"subscribe","name":"orderwatch"}"#)
-        .expect("write subscribe");
+    writer.write_all(br#"{"op":"subscribe","name":"orderwatch"}"#).expect("write subscribe");
     writer.write_all(b"\n").expect("write newline");
 
     let mut first = String::new();
@@ -1138,9 +1026,7 @@ fn subscribe_ack_precedes_first_diagnostic_on_wire() {
     // races are in play). A back-pressure `_missed` cannot appear either: the channel is drained
     // synchronously line-by-line.
     let mut second = String::new();
-    reader
-        .read_line(&mut second)
-        .expect("read second line (SubFired from racing touch)");
+    reader.read_line(&mut second).expect("read second line (SubFired from racing touch)");
     let second_v: serde_json::Value =
         serde_json::from_str(second.trim_end()).expect("second line is valid JSON");
     assert_eq!(
@@ -1179,17 +1065,10 @@ fn wait_kind_fire_happy_path_exits_zero() {
 
     let exit = await_client_exit(&mut wait_child, Duration::from_secs(8))
         .expect("wait client must exit within deadline");
-    assert_eq!(
-        exit.code(),
-        Some(0),
-        "wait --kind fire must exit 0 on a fire; got {exit:?}",
-    );
+    assert_eq!(exit.code(), Some(0), "wait --kind fire must exit 0 on a fire; got {exit:?}");
 
     let daemon_exit = terminate(daemon);
-    assert!(
-        daemon_exit.success(),
-        "clean daemon exit; got {daemon_exit:?}"
-    );
+    assert!(daemon_exit.success(), "clean daemon exit; got {daemon_exit:?}");
 }
 
 // ---------- wait --timeout exits 124 ---------------------------------
@@ -1206,25 +1085,15 @@ fn wait_kind_fire_timeout_exits_124() {
     assert!(wait_for_socket(&sb.socket, STARTUP_DEADLINE));
     assert!(wait_for_log(&sb.log, |s| s.contains("sub attached"), STARTUP_DEADLINE).is_some());
 
-    let (mut wait_child, _rx) = spawn_client_stream(
-        &sb,
-        "wait",
-        &["idletarget", "--kind", "fire", "--timeout", "300ms"],
-    );
+    let (mut wait_child, _rx) =
+        spawn_client_stream(&sb, "wait", &["idletarget", "--kind", "fire", "--timeout", "300ms"]);
 
     let exit = await_client_exit(&mut wait_child, Duration::from_secs(5))
         .expect("wait --timeout must exit within the test deadline");
-    assert_eq!(
-        exit.code(),
-        Some(124),
-        "wait --timeout must exit 124 on deadline; got {exit:?}",
-    );
+    assert_eq!(exit.code(), Some(124), "wait --timeout must exit 124 on deadline; got {exit:?}");
 
     let daemon_exit = terminate(daemon);
-    assert!(
-        daemon_exit.success(),
-        "clean daemon exit; got {daemon_exit:?}"
-    );
+    assert!(daemon_exit.success(), "clean daemon exit; got {daemon_exit:?}");
 }
 
 // ---------- wait <unknown> exits 1 -----------------------------------
@@ -1242,17 +1111,10 @@ fn wait_unknown_sub_exits_one() {
     let (mut wait_child, _rx) = spawn_client_stream(&sb, "wait", &["ghost"]);
     let exit = await_client_exit(&mut wait_child, Duration::from_secs(5))
         .expect("wait <ghost> must exit immediately");
-    assert_eq!(
-        exit.code(),
-        Some(1),
-        "wait <unknown> must exit 1; got {exit:?}",
-    );
+    assert_eq!(exit.code(), Some(1), "wait <unknown> must exit 1; got {exit:?}");
 
     let daemon_exit = terminate(daemon);
-    assert!(
-        daemon_exit.success(),
-        "clean daemon exit; got {daemon_exit:?}"
-    );
+    assert!(daemon_exit.success(), "clean daemon exit; got {daemon_exit:?}");
 }
 
 // ---------- wait race-window closed ----------------------------------
@@ -1279,29 +1141,17 @@ fn wait_race_window_closed_via_reload() {
     // Wait for the daemon to surface the detach in the log so we know the reload's prune pass ran
     // before we subscribe.
     assert!(
-        wait_for_log(
-            &sb.log,
-            |s| s.contains("sub detached"),
-            Duration::from_secs(5)
-        )
-        .is_some(),
+        wait_for_log(&sb.log, |s| s.contains("sub detached"), Duration::from_secs(5)).is_some(),
         "daemon never logged the detach following reload",
     );
 
     let (mut wait_child, _rx) = spawn_client_stream(&sb, "wait", &["gone"]);
     let exit = await_client_exit(&mut wait_child, Duration::from_secs(5))
         .expect("wait must exit immediately on unknown_sub");
-    assert_eq!(
-        exit.code(),
-        Some(1),
-        "wait on a removed name must exit 1; got {exit:?}",
-    );
+    assert_eq!(exit.code(), Some(1), "wait on a removed name must exit 1; got {exit:?}");
 
     let daemon_exit = terminate(daemon);
-    assert!(
-        daemon_exit.success(),
-        "clean daemon exit; got {daemon_exit:?}"
-    );
+    assert!(daemon_exit.success(), "clean daemon exit; got {daemon_exit:?}");
 }
 
 // ---------- wait --kind fire observes SubDetached exits 2 -----------
@@ -1344,10 +1194,7 @@ fn wait_fire_observing_detach_exits_two() {
     );
 
     let daemon_exit = terminate(daemon);
-    assert!(
-        daemon_exit.success(),
-        "clean daemon exit; got {daemon_exit:?}"
-    );
+    assert!(daemon_exit.success(), "clean daemon exit; got {daemon_exit:?}");
 }
 
 // ---------- wait on a dynamic watch returns at a minted fire --------
@@ -1402,10 +1249,7 @@ actions = [{{ exec = ["true"] }}]
     );
 
     let daemon_exit = terminate(daemon);
-    assert!(
-        daemon_exit.success(),
-        "clean daemon exit; got {daemon_exit:?}"
-    );
+    assert!(daemon_exit.success(), "clean daemon exit; got {daemon_exit:?}");
 }
 
 // ---------- Disable / enable / reload integration ------------------
@@ -1422,9 +1266,7 @@ actions = [{{ exec = ["true"] }}]
 /// operation (initial attach, reload settle) needs to propagate through the daemon's tick before
 /// the projection reflects it.
 fn poll_status_until<F: Fn(&StatusResponseSnap) -> bool>(
-    socket: &Path,
-    pred: F,
-    deadline: Duration,
+    socket: &Path, pred: F, deadline: Duration,
 ) -> Option<StatusResponseSnap> {
     let stop = Instant::now() + deadline;
     while Instant::now() < stop {
@@ -1443,9 +1285,7 @@ fn poll_status_until<F: Fn(&StatusResponseSnap) -> bool>(
 /// Helper: poll `list` until its rows match a predicate, or timeout — for a state the daemon reaches
 /// through its own ticks, such as a minted Sub's Seed pinning.
 fn poll_list_until<F: Fn(&[ListRowSnap]) -> bool>(
-    socket: &Path,
-    pred: F,
-    deadline: Duration,
+    socket: &Path, pred: F, deadline: Duration,
 ) -> Option<Vec<ListRowSnap>> {
     let stop = Instant::now() + deadline;
     while Instant::now() < stop {
@@ -1486,12 +1326,9 @@ fn disable_then_enable_cycle_round_trips_through_status() {
     let resp: ResponseSnap = serde_json::from_str(reply.trim_end()).expect("parse disable");
     assert!(matches!(resp, ResponseSnap::Ok), "got {resp:?}");
 
-    let post_disable = poll_status_until(
-        &sb.socket,
-        |s| s.sub_disabled_runtime == 1,
-        Duration::from_secs(5),
-    )
-    .expect("status reflects disable");
+    let post_disable =
+        poll_status_until(&sb.socket, |s| s.sub_disabled_runtime == 1, Duration::from_secs(5))
+            .expect("status reflects disable");
     assert_eq!(post_disable.sub_total, 0, "engine detached foo");
 
     // Enable.
@@ -1559,11 +1396,9 @@ fn disable_suppresses_fires_enable_restores_them() {
     // latency claim. On failure, the offending line plus the daemon's own log pin down WHEN the fire
     // happened — a `sub_fired` queued on the stream before the disable is a pre-existing fire (e.g.
     // a spurious one at attach), not a disable-suppression breach.
-    if let Some(line) = wait_for_line(
-        &rx,
-        |l| l.contains(r#""diag":"sub_fired""#),
-        Duration::from_secs(1),
-    ) {
+    if let Some(line) =
+        wait_for_line(&rx, |l| l.contains(r#""diag":"sub_fired""#), Duration::from_secs(1))
+    {
         panic!(
             "disabled Sub must not emit SubFired on a touch\noffending line: {line}\n\
              --- daemon log ---\n{}",
@@ -1590,12 +1425,8 @@ fn disable_suppresses_fires_enable_restores_them() {
 
     touch_unique(&anchor, "after-enable");
     assert!(
-        wait_for_line(
-            &rx,
-            |l| l.contains(r#""diag":"sub_fired""#),
-            Duration::from_secs(8),
-        )
-        .is_some(),
+        wait_for_line(&rx, |l| l.contains(r#""diag":"sub_fired""#), Duration::from_secs(8))
+            .is_some(),
         "re-enabled Sub must fire on the next operator-driven change",
     );
 
@@ -1631,14 +1462,7 @@ fn disable_streams_sub_detached_before_profile_reaped() {
     let (mut tail, rx) = spawn_client_stream(
         &sb,
         "tail",
-        &[
-            "--filter",
-            "sub_detached",
-            "--filter",
-            "profile_reaped",
-            "-o",
-            "json",
-        ],
+        &["--filter", "sub_detached", "--filter", "profile_reaped", "-o", "json"],
     );
     thread::sleep(Duration::from_millis(400));
 
@@ -1649,11 +1473,7 @@ fn disable_streams_sub_detached_before_profile_reaped() {
     ));
 
     let lines = collect_lines(&rx, 2, Duration::from_secs(5));
-    assert_eq!(
-        lines.len(),
-        2,
-        "expected SubDetached + ProfileReaped on the stream; got {lines:?}",
-    );
+    assert_eq!(lines.len(), 2, "expected SubDetached + ProfileReaped on the stream; got {lines:?}");
     let first: serde_json::Value =
         serde_json::from_str(lines[0].trim_end()).expect("first line is valid JSON");
     let second: serde_json::Value =
@@ -1699,17 +1519,9 @@ fn disable_client_unknown_name_exits_one() {
         .stderr(Stdio::piped())
         .output()
         .expect("spawn disable client");
-    assert_eq!(
-        output.status.code(),
-        Some(1),
-        "unknown name must exit 1; got {:?}",
-        output.status,
-    );
+    assert_eq!(output.status.code(), Some(1), "unknown name must exit 1; got {:?}", output.status);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("unknown_sub"),
-        "stderr must carry the structured code: {stderr}",
-    );
+    assert!(stderr.contains("unknown_sub"), "stderr must carry the structured code: {stderr}");
 
     let exit = terminate(child);
     assert!(exit.success(), "clean exit; got {exit:?}");
@@ -1789,10 +1601,7 @@ enabled   = false
     let post_reload =
         poll_status_until(&sb.socket, |s| s.reload_count >= 1, Duration::from_secs(5))
             .expect("reload propagated");
-    assert_eq!(
-        post_reload.sub_disabled_runtime, 1,
-        "TOML-disabled retention kept the override",
-    );
+    assert_eq!(post_reload.sub_disabled_runtime, 1, "TOML-disabled retention kept the override");
 
     // Step 3: enable returns toml_disabled.
     let reply = one_shot(&sb.socket, r#"{"op":"enable","name":"foo"}"#).expect("enable 1");
@@ -1851,10 +1660,7 @@ fn reload_prune_drops_disabled_runtime_when_name_leaves_toml() {
 
     let post = poll_status_until(&sb.socket, |s| s.reload_count >= 1, Duration::from_secs(5))
         .expect("reload propagated");
-    assert_eq!(
-        post.sub_disabled_runtime, 0,
-        "prune dropped the override whose TOML row vanished",
-    );
+    assert_eq!(post.sub_disabled_runtime, 0, "prune dropped the override whose TOML row vanished");
 
     // Sanity: subsequent enable returns not_disabled (proves the override is gone, not merely hidden
     // from the projection).
@@ -1917,10 +1723,7 @@ enabled   = false
         post.sub_disabled_runtime, 1,
         "TOML-disabled row anchors the override; prune retains it",
     );
-    assert_eq!(
-        post.sub_disabled_toml, 1,
-        "TOML carries foo as enabled=false"
-    );
+    assert_eq!(post.sub_disabled_toml, 1, "TOML carries foo as enabled=false");
 
     let exit = terminate(child);
     assert!(exit.success(), "clean exit; got {exit:?}");
@@ -1994,17 +1797,10 @@ fn wait_kind_detach_happy_path_exits_zero() {
 
     let exit = await_client_exit(&mut wait_child, Duration::from_secs(5))
         .expect("wait must exit on detach");
-    assert_eq!(
-        exit.code(),
-        Some(0),
-        "wait --kind detach on SubDetached must exit 0; got {exit:?}",
-    );
+    assert_eq!(exit.code(), Some(0), "wait --kind detach on SubDetached must exit 0; got {exit:?}");
 
     let daemon_exit = terminate(daemon);
-    assert!(
-        daemon_exit.success(),
-        "clean daemon exit; got {daemon_exit:?}"
-    );
+    assert!(daemon_exit.success(), "clean daemon exit; got {daemon_exit:?}");
 }
 
 // ---------- bounded shutdown under wedged subscribers ----------------
@@ -2043,9 +1839,7 @@ fn shutdown_with_wedged_subscribers_is_bounded() {
     for i in 0..WEDGED_CLIENTS {
         let stream = UnixStream::connect(&sb.socket)
             .unwrap_or_else(|e| panic!("connect subscriber {i}: {e}"));
-        stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .expect("set_read_timeout");
+        stream.set_read_timeout(Some(Duration::from_secs(2))).expect("set_read_timeout");
         let mut writer = stream.try_clone().expect("try_clone for writer");
         writer
             .write_all(b"{\"op\":\"subscribe\"}\n")
@@ -2054,9 +1848,7 @@ fn shutdown_with_wedged_subscribers_is_bounded() {
         // `wedged` for the rest of the test without ever consuming another byte off the socket.
         let mut reader = BufReader::new(stream.try_clone().expect("try_clone for reader"));
         let mut ack = String::new();
-        reader
-            .read_line(&mut ack)
-            .unwrap_or_else(|e| panic!("read ack {i}: {e}"));
+        reader.read_line(&mut ack).unwrap_or_else(|e| panic!("read ack {i}: {e}"));
         let v: serde_json::Value = serde_json::from_str(ack.trim_end()).expect("ack is valid JSON");
         assert_eq!(
             v.get("kind").and_then(serde_json::Value::as_str),

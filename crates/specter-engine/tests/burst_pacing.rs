@@ -56,13 +56,7 @@ fn dense_event_storm_converges_naturally_below_burst_deadline() {
     let storm_count = 8;
     for k in 0..storm_count {
         let t = storm_start + storm_step * k;
-        let _ = e.step(
-            Input::FsEvent {
-                resource: r,
-                event: FsEvent::ContentChanged,
-            },
-            t,
-        );
+        let _ = e.step(Input::FsEvent { resource: r, event: FsEvent::ContentChanged }, t);
     }
     let last_event = storm_start + storm_step * (storm_count - 1);
 
@@ -78,11 +72,7 @@ fn dense_event_storm_converges_naturally_below_burst_deadline() {
             )
         };
         let out = e.step(
-            Input::TimerExpired {
-                profile: entry.profile,
-                kind: entry.kind,
-                id: entry.id,
-            },
+            Input::TimerExpired { profile: entry.profile, kind: entry.kind, id: entry.id },
             probe_emit,
         );
         if let Some(c) = first_probe_correlation(&out) {
@@ -104,11 +94,7 @@ fn dense_event_storm_converges_naturally_below_burst_deadline() {
         }),
         resp_t,
     );
-    assert_eq!(
-        stable_out.effects().len(),
-        1,
-        "Authoritative stable verdict fires one Effect",
-    );
+    assert_eq!(stable_out.effects().len(), 1, "Authoritative stable verdict fires one Effect");
     assert!(
         !stable_out.effects()[0].forced,
         "post-fix burst converges before burst_deadline; \
@@ -169,13 +155,7 @@ fn sustained_undischarged_response_storm_paces_at_settle() {
 
     // Kick off a Standard burst with one event, rebased past the Seed-establishment window.
     let t_event = seed_settled + Duration::from_millis(10);
-    let _ = e.step(
-        Input::FsEvent {
-            resource: r,
-            event: FsEvent::ContentChanged,
-        },
-        t_event,
-    );
+    let _ = e.step(Input::FsEvent { resource: r, event: FsEvent::ContentChanged }, t_event);
 
     // Three consecutive `ProofAuthority::Undischarged` !terminal probe responses (each folding to
     // `QuiescenceVerdict::Retry`). After each, the next probe should fire at `last_response +
@@ -188,11 +168,7 @@ fn sustained_undischarged_response_storm_paces_at_settle() {
         let probe_correlation = loop {
             let entry = e.pop_expired(response_at).expect("settle timer pending");
             let out = e.step(
-                Input::TimerExpired {
-                    profile: entry.profile,
-                    kind: entry.kind,
-                    id: entry.id,
-                },
+                Input::TimerExpired { profile: entry.profile, kind: entry.kind, id: entry.id },
                 response_at,
             );
             if let Some(c) = first_probe_correlation(&out) {

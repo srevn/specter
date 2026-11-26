@@ -112,28 +112,19 @@ impl WalkContext<'_> {
 
     /// The earlier listing an unforced walk stands on without reading the directory.
     fn mtime_skip<'p>(
-        &self,
-        path: &Path,
-        root_meta: DirMeta,
-        prior: PriorDir<'p>,
+        &self, path: &Path, root_meta: DirMeta, prior: PriorDir<'p>,
     ) -> Option<&'p Arc<DirSnapshot>> {
         if self.forced {
             return None;
         }
-        prior
-            .listing()
-            .filter(|listing| !self.owes_read(path, root_meta, listing))
+        prior.listing().filter(|listing| !self.owes_read(path, root_meta, listing))
     }
 
     /// What stands in for the directory at `path`, which the walk could not read whole, and whether
     /// `denied` names it. Forcing a walk makes it read a directory, but gives it no cause to name
     /// one it owed no read.
     fn stand_in(
-        &self,
-        path: &Path,
-        root_meta: DirMeta,
-        prior: PriorDir<'_>,
-        errno: i32,
+        &self, path: &Path, root_meta: DirMeta, prior: PriorDir<'_>, errno: i32,
         denied: &mut BTreeSet<Arc<Path>>,
     ) -> Reached<Arc<DirSnapshot>> {
         match prior {
@@ -155,16 +146,10 @@ impl WalkContext<'_> {
     /// What a failed read says of the level it was reading — the one place a walk classifies an
     /// error. `read` is the path the read named: the level, or one of its children.
     fn level_fault(
-        &self,
-        read: &Path,
-        e: &io::Error,
-        prior: PriorDir<'_>,
+        &self, read: &Path, e: &io::Error, prior: PriorDir<'_>,
     ) -> Result<Reached<Level>, ProbeFailure> {
         let anchor = self.anchor_path;
-        if matches!(
-            e.raw_os_error(),
-            Some(libc::ENOENT | libc::ENOTDIR | libc::ELOOP)
-        ) {
+        if matches!(e.raw_os_error(), Some(libc::ENOENT | libc::ENOTDIR | libc::ELOOP)) {
             tracing::trace!(?anchor, ?read, ?e, "probe_subtree: the level is gone");
             return Ok(Reached::Gone);
         }
@@ -202,13 +187,8 @@ pub(super) fn probe_anchor_file(target_path: &Path) -> ProbeOutcome {
 /// The walk of the directory at `target_path` under `config`, measured from `anchor_path`, over
 /// `baseline`, the Profile's earlier listing of it.
 pub(super) fn probe_subtree(
-    target_path: &Path,
-    anchor_path: &Path,
-    config: &ScanConfig,
-    captured_with: u64,
-    baseline: Option<&Arc<DirSnapshot>>,
-    obligation: &ProofObligation,
-    forced: bool,
+    target_path: &Path, anchor_path: &Path, config: &ScanConfig, captured_with: u64,
+    baseline: Option<&Arc<DirSnapshot>>, obligation: &ProofObligation, forced: bool,
 ) -> ProbeOutcome {
     let root_meta = match std::fs::symlink_metadata(target_path) {
         Ok(meta) if meta.is_dir() => DirMeta::from_metadata(&meta),
@@ -227,10 +207,9 @@ pub(super) fn probe_subtree(
     let prior = PriorDir::root(baseline, root_meta.fs_id());
     let mut denied = BTreeSet::new();
     match snapshot_dir(&ctx, target_path, root_meta, prior, &mut denied) {
-        Ok(Reached::Listed(snapshot)) => ProbeOutcome::SubtreeProven {
-            snapshot,
-            authority: ProofAuthority::certify(denied),
-        },
+        Ok(Reached::Listed(snapshot)) => {
+            ProbeOutcome::SubtreeProven { snapshot, authority: ProofAuthority::certify(denied) }
+        }
         Ok(Reached::Gone) => ProbeOutcome::Vanished,
         Ok(Reached::Denied { errno }) => ProbeOutcome::Failed(ProbeFailure::Denied { errno }),
         Err(failure) => ProbeOutcome::Failed(failure),
@@ -244,16 +223,9 @@ pub(super) fn probe_subtree(
 /// saw.
 pub(super) fn probe_descent(prefix: &Path, segment: &str) -> ProbeOutcome {
     match std::fs::symlink_metadata(prefix.join(segment)) {
-        Ok(meta) => ProbeOutcome::SegmentObserved {
-            kind: Some(EntryKind::from(meta.file_type())),
-        },
+        Ok(meta) => ProbeOutcome::SegmentObserved { kind: Some(EntryKind::from(meta.file_type())) },
         // `ENOTDIR`: a component on the way stopped being a directory.
-        Err(e)
-            if matches!(
-                e.kind(),
-                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
-            ) =>
-        {
+        Err(e) if matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory) => {
             match std::fs::symlink_metadata(prefix) {
                 Ok(meta) if meta.is_dir() => ProbeOutcome::SegmentObserved { kind: None },
                 Ok(_) => ProbeOutcome::Vanished,
@@ -269,10 +241,7 @@ pub(super) fn probe_descent(prefix: &Path, segment: &str) -> ProbeOutcome {
 /// snapshot holds for it — naming in `denied` each directory the walk had cause to read and could
 /// not.
 fn snapshot_dir(
-    ctx: &WalkContext<'_>,
-    path: &Path,
-    root_meta: DirMeta,
-    prior: PriorDir<'_>,
+    ctx: &WalkContext<'_>, path: &Path, root_meta: DirMeta, prior: PriorDir<'_>,
     denied: &mut BTreeSet<Arc<Path>>,
 ) -> Result<Reached<Arc<DirSnapshot>>, ProbeFailure> {
     if let Some(listing) = ctx.mtime_skip(path, root_meta, prior) {
@@ -281,28 +250,16 @@ fn snapshot_dir(
     Ok(match read_level(ctx, path, prior)? {
         // The level is known whole before any child is entered, so whatever a child answers can no
         // longer deny the level, and everything `denied` names is an entry of the snapshot.
-        Reached::Listed(Level {
-            mut entries,
-            subdirs,
-        }) => {
+        Reached::Listed(Level { mut entries, subdirs }) => {
             for sub in subdirs {
                 let fs_id = sub.meta.fs_id();
-                let reached = snapshot_dir(
-                    ctx,
-                    &sub.path,
-                    sub.meta,
-                    prior.child(&sub.name, fs_id),
-                    denied,
-                )?;
+                let reached =
+                    snapshot_dir(ctx, &sub.path, sub.meta, prior.child(&sub.name, fs_id), denied)?;
                 if let Some(child) = reached.into_dir_child(fs_id) {
                     entries.insert(sub.name, ChildEntry::Dir(child));
                 }
             }
-            Reached::Listed(Arc::new(DirSnapshot::new(
-                root_meta,
-                ctx.captured_with,
-                entries,
-            )))
+            Reached::Listed(Arc::new(DirSnapshot::new(root_meta, ctx.captured_with, entries)))
         }
         Reached::Gone => Reached::Gone,
         Reached::Denied { errno } => ctx.stand_in(path, root_meta, prior, errno, denied),
@@ -313,9 +270,7 @@ fn snapshot_dir(
 /// hash from `prior`'s listing where its identity matches. It takes no denial set, so it can enter
 /// no other directory. The directory is closed when it returns.
 fn read_level(
-    ctx: &WalkContext<'_>,
-    path: &Path,
-    prior: PriorDir<'_>,
+    ctx: &WalkContext<'_>, path: &Path, prior: PriorDir<'_>,
 ) -> Result<Reached<Level>, ProbeFailure> {
     let dirents = match std::fs::read_dir(path) {
         Ok(dirents) => dirents,
@@ -330,10 +285,7 @@ fn read_level(
         // No snapshot key, chain, pattern or attach path is anything but UTF-8, so nothing can name
         // this entry or what lies beneath it: it is out of scope, and the level stays whole.
         let Some(name) = child_path.file_name().and_then(OsStr::to_str) else {
-            tracing::debug!(
-                ?child_path,
-                "probe_subtree: a name that is not UTF-8 is out of scope"
-            );
+            tracing::debug!(?child_path, "probe_subtree: a name that is not UTF-8 is out of scope");
             continue;
         };
         let Ok(rel) = child_path.strip_prefix(ctx.anchor_path) else {
@@ -368,9 +320,7 @@ fn read_level(
         }
         let name = CompactString::new(name);
         if !meta.is_dir() {
-            let inherit = prior
-                .listing()
-                .and_then(|listing| listing.lookup_leaf(&name));
+            let inherit = prior.listing().and_then(|listing| listing.lookup_leaf(&name));
             let leaf = LeafEntry::from_metadata_or_inherit(&meta, inherit);
             level.entries.insert(name, ChildEntry::Leaf(leaf));
         } else if ctx.should_recurse(depth, meta.dev()) {
@@ -391,11 +341,7 @@ fn read_level(
 /// in a debug build; in release the walk stops with the answer a worker panic gives.
 fn walker_fault(child_path: &Path, fault: &str) -> ProbeFailure {
     debug_assert!(false, "walker fault: {fault}: {}", child_path.display());
-    tracing::warn!(
-        ?child_path,
-        fault,
-        "probe_subtree: a walker fault; the walk stops"
-    );
+    tracing::warn!(?child_path, fault, "probe_subtree: a walker fault; the walk stops");
     PROBER_FAULT
 }
 
@@ -438,12 +384,7 @@ mod tests {
 
         assert!(matches!(missing, Ok(Reached::Gone)));
         assert!(matches!(not_a_dir, Ok(Reached::Gone)));
-        assert!(matches!(
-            denied,
-            Ok(Reached::Denied {
-                errno: libc::EACCES
-            })
-        ));
+        assert!(matches!(denied, Ok(Reached::Denied { errno: libc::EACCES })));
     }
 
     /// Mounts cannot be built in a unit test, so the cross-device pin is the predicate composition:
@@ -464,20 +405,11 @@ mod tests {
             forced: false,
             root_dev: 1,
         };
-        assert!(
-            chain.should_recurse(1, 2),
-            "MatchChain is device-blind above the terminus",
-        );
-        assert!(
-            !chain.should_recurse(4, 2),
-            "the terminus depth never descends",
-        );
+        assert!(chain.should_recurse(1, 2), "MatchChain is device-blind above the terminus");
+        assert!(!chain.should_recurse(4, 2), "the terminus depth never descends");
 
         let subtree_cfg = ScanConfig::from(SubtreeScan::builder().build());
-        let subtree = WalkContext {
-            config: &subtree_cfg,
-            ..chain
-        };
+        let subtree = WalkContext { config: &subtree_cfg, ..chain };
         assert!(
             !subtree.should_recurse(1, 2),
             "an unbounded recursive walk refuses a cross-device child",

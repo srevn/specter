@@ -29,8 +29,6 @@ pub struct DisplayDuration(pub Duration);
 
 impl fmt::Display for DisplayDuration {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        PRINTER
-            .print_unsigned_duration(&self.0, StdFmtWrite(f))
-            .map_err(|_| fmt::Error)
+        PRINTER.print_unsigned_duration(&self.0, StdFmtWrite(f)).map_err(|_| fmt::Error)
     }
 }

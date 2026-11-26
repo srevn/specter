@@ -45,9 +45,7 @@ fn poll_for(w: &InotifyWatcher) -> Poll {
 }
 
 fn drain_until<F: Fn(&(ResourceId, FsEvent)) -> bool>(
-    w: &mut InotifyWatcher,
-    pred: F,
-    overall: Duration,
+    w: &mut InotifyWatcher, pred: F, overall: Duration,
 ) -> Vec<(ResourceId, FsEvent)> {
     let deadline = Instant::now() + overall;
     let mut poll = poll_for(w);
@@ -105,22 +103,17 @@ fn delete_self_then_in_ignored_clears_per_resource_state() {
     let r = sm.insert(());
 
     // EMPTY events suffice: `IN_DELETE_SELF` is in the identity floor.
-    w.watch(r, &path, ResourceKind::File, ClassSet::EMPTY)
-        .unwrap();
+    w.watch(r, &path, ResourceKind::File, ClassSet::EMPTY).unwrap();
 
     // Delete the file. The kernel queues `IN_DELETE_SELF` then `IN_IGNORED` on the wd in FIFO order.
     std::fs::remove_file(&path).unwrap();
 
     // Drain the `Removed` event. The drain loop also consumes the `IN_IGNORED` (case 2 in
     // `drain_ready`), which clears the `by_resource[r]` entry and removes the wd from `by_wd`.
-    let out = drain_until(
-        &mut w,
-        |(rid, e)| *rid == r && *e == FsEvent::Removed,
-        Duration::from_secs(2),
-    );
+    let out =
+        drain_until(&mut w, |(rid, e)| *rid == r && *e == FsEvent::Removed, Duration::from_secs(2));
     assert!(
-        out.iter()
-            .any(|(rid, e)| *rid == r && *e == FsEvent::Removed),
+        out.iter().any(|(rid, e)| *rid == r && *e == FsEvent::Removed),
         "expected Removed before IN_IGNORED cleanup; got {out:?}"
     );
 
@@ -139,8 +132,7 @@ fn delete_self_then_in_ignored_clears_per_resource_state() {
         Duration::from_secs(2),
     );
     assert!(
-        post.iter()
-            .any(|(rid, e)| *rid == r && *e == FsEvent::ContentChanged),
+        post.iter().any(|(rid, e)| *rid == r && *e == FsEvent::ContentChanged),
         "post-cleanup watch must deliver ContentChanged; got {post:?}"
     );
 
@@ -164,8 +156,7 @@ fn unwatch_then_redrain_clears_draining_flag() {
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r = sm.insert(());
 
-    w.watch(r, &p1, ResourceKind::File, ClassSet::CONTENT)
-        .unwrap();
+    w.watch(r, &p1, ResourceKind::File, ClassSet::CONTENT).unwrap();
     w.unwatch(r);
 
     // Allow the drain loop to consume the `IN_IGNORED` for the prior wd. A small deadline is enough;
@@ -175,8 +166,7 @@ fn unwatch_then_redrain_clears_draining_flag() {
     // Fresh watch on a different path. If draining state had leaked, the new wd would land in
     // `draining_wds` (silently dropping its events). This watch + write + drain proves the flag was
     // cleared.
-    w.watch(r, &p2, ResourceKind::File, ClassSet::CONTENT)
-        .unwrap();
+    w.watch(r, &p2, ResourceKind::File, ClassSet::CONTENT).unwrap();
     std::fs::write(&p2, "y").unwrap();
     let out = drain_until(
         &mut w,
@@ -184,8 +174,7 @@ fn unwatch_then_redrain_clears_draining_flag() {
         Duration::from_secs(2),
     );
     assert!(
-        out.iter()
-            .any(|(rid, e)| *rid == r && *e == FsEvent::ContentChanged),
+        out.iter().any(|(rid, e)| *rid == r && *e == FsEvent::ContentChanged),
         "post-IN_IGNORED-drain re-watch must deliver ContentChanged; got {out:?}"
     );
 

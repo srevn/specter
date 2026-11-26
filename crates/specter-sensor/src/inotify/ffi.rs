@@ -94,9 +94,7 @@ pub(super) fn inotify_add_watch(fd: &OwnedFd, path: &Path, mask: u32) -> io::Res
 /// error set is `EACCES` (no `inotify(7)` permission on the inode), `ENOSPC`
 /// (`/proc/sys/fs/inotify/max_user_watches` exceeded), `ENOMEM`.
 pub(super) fn inotify_add_watch_fd(
-    inotify_fd: &OwnedFd,
-    watched_fd: &OwnedFd,
-    mask: u32,
+    inotify_fd: &OwnedFd, watched_fd: &OwnedFd, mask: u32,
 ) -> io::Result<c_int> {
     let mut buf = [0u8; PROC_FD_PATH_BUF];
     let cstr = format_proc_fd_path(&mut buf, watched_fd.as_raw_fd());
@@ -218,12 +216,8 @@ pub(super) fn open_o_path(path: &Path) -> io::Result<OwnedFd> {
     let cstr = path_to_cstring(path)?;
     // SAFETY: `cstr` is a valid NUL-terminated C string; `flags` is a valid `O_*` bit set. `open`
     // returns a non-negative fd or -1.
-    let raw = unsafe {
-        libc::open(
-            cstr.as_ptr(),
-            libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-        )
-    };
+    let raw =
+        unsafe { libc::open(cstr.as_ptr(), libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
     if raw < 0 {
         return Err(Error::last_os_error());
     }

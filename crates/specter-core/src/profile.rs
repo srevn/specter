@@ -151,11 +151,7 @@ impl DirtyProvenance {
         for p in values {
             lca = common_prefix(lca, p);
         }
-        if lca == first.as_ref() {
-            Some(Arc::clone(first))
-        } else {
-            Some(Arc::from(lca))
-        }
+        if lca == first.as_ref() { Some(Arc::clone(first)) } else { Some(Arc::from(lca)) }
     }
 }
 
@@ -165,11 +161,7 @@ impl DirtyProvenance {
 /// prefix of `/ab`. Both inputs are absolute (materialised from the root chain) and share at least
 /// the root, so the result is never empty.
 fn common_prefix<'a>(a: &'a Path, b: &Path) -> &'a Path {
-    let shared = a
-        .components()
-        .zip(b.components())
-        .take_while(|(x, y)| x == y)
-        .count();
+    let shared = a.components().zip(b.components()).take_while(|(x, y)| x == y).count();
     let total = a.components().count();
     let mut prefix = a;
     for _ in shared..total {
@@ -588,7 +580,9 @@ pub enum PostFirePhase {
     /// `handle_post_fire_settle_expired` reschedules if events arrived since, otherwise drives
     /// `Settling → Rebasing` for the next sample. No [`ProbeSlot`]: a stray `EffectComplete` / probe
     /// response here is a late, untracked arrival (folded to the same routing as `Rebasing`).
-    Settling { settle_timer: TimerId },
+    Settling {
+        settle_timer: TimerId,
+    },
 }
 
 /// The rebase-loop ceiling lifecycle — three valid states.
@@ -753,18 +747,14 @@ pub enum QuiescenceVerdict {
 /// apart.
 #[must_use]
 pub fn quiescence_verdict(
-    authority: ProofAuthority,
-    forced: bool,
-    witness: QuiescenceWitness,
+    authority: ProofAuthority, forced: bool, witness: QuiescenceWitness,
 ) -> QuiescenceVerdict {
     match authority {
-        ProofAuthority::Undischarged { denied } if forced => QuiescenceVerdict::Abandon {
-            first_unread: Arc::clone(denied.first()),
-        },
+        ProofAuthority::Undischarged { denied } if forced => {
+            QuiescenceVerdict::Abandon { first_unread: Arc::clone(denied.first()) }
+        }
         // The walk observed nothing, so the streak holds.
-        ProofAuthority::Undischarged { .. } => QuiescenceVerdict::Retry {
-            observed_motion: false,
-        },
+        ProofAuthority::Undischarged { .. } => QuiescenceVerdict::Retry { observed_motion: false },
         ProofAuthority::Authoritative if forced => {
             // Ceiling bypass: fire / rebase against freshest observation. The diagnostic-selection
             // bit is the shared witness test — see `QuiescenceWitness::observed_disagreement`.
@@ -774,16 +764,15 @@ pub fn quiescence_verdict(
         }
         ProofAuthority::Authoritative => match witness {
             QuiescenceWitness::EventsReliable => QuiescenceVerdict::Stable(StableReason::Natural),
-            QuiescenceWitness::HashChannel {
-                prior: Some(p),
-                response,
-            } if p == response => QuiescenceVerdict::Stable(StableReason::Natural),
+            QuiescenceWitness::HashChannel { prior: Some(p), response } if p == response => {
+                QuiescenceVerdict::Stable(StableReason::Natural)
+            }
             // The unforced twin of the Forced arm's bit, computed by the same shared test: a concrete
             // `Some(prior) != response` is observed motion; the first-sample `None` is absence of
             // confirmation (the agree case was consumed by the arm above).
-            w @ QuiescenceWitness::HashChannel { .. } => QuiescenceVerdict::Retry {
-                observed_motion: w.observed_disagreement(),
-            },
+            w @ QuiescenceWitness::HashChannel { .. } => {
+                QuiescenceVerdict::Retry { observed_motion: w.observed_disagreement() }
+            }
         },
     }
 }
@@ -837,12 +826,8 @@ impl PreFireBurst {
     /// birth consult).
     #[must_use]
     pub const fn new(
-        burst_deadline: TimerId,
-        phase: PreFirePhase,
-        intent: BurstIntent,
-        dirty: DirtyProvenance,
-        last_event_time: Option<Instant>,
-        fold_latched: bool,
+        burst_deadline: TimerId, phase: PreFirePhase, intent: BurstIntent, dirty: DirtyProvenance,
+        last_event_time: Option<Instant>, fold_latched: bool,
     ) -> Self {
         Self {
             burst_deadline,
@@ -932,10 +917,7 @@ impl PreFireBurst {
         );
         PostFireBurst::new(
             self.intent,
-            PostFirePhase::Awaiting {
-                outstanding: outstanding.get(),
-                gate_deadline,
-            },
+            PostFirePhase::Awaiting { outstanding: outstanding.get(), gate_deadline },
             DirtyProvenance::new(),
         )
     }
@@ -996,9 +978,7 @@ impl PostFireBurst {
     /// Sole production caller: [`PreFireBurst::into_post_fire`] (the typed fire move).
     #[must_use]
     pub const fn new(
-        intent: BurstIntent,
-        phase: PostFirePhase,
-        final_window_residual: DirtyProvenance,
+        intent: BurstIntent, phase: PostFirePhase, final_window_residual: DirtyProvenance,
     ) -> Self {
         Self {
             intent,
@@ -1043,11 +1023,7 @@ impl PostFireBurst {
                      EffectCompletes than emitted Effects",
                 );
                 *outstanding = prev.saturating_sub(1);
-                if prev <= 1 {
-                    AwaitVerdict::LastReached
-                } else {
-                    AwaitVerdict::Decremented
-                }
+                if prev <= 1 { AwaitVerdict::LastReached } else { AwaitVerdict::Decremented }
             }
             PostFirePhase::Rebasing(_) | PostFirePhase::Settling { .. } => {
                 AwaitVerdict::NotAwaiting
@@ -1117,12 +1093,8 @@ impl PostFireBurst {
     /// Sole production caller: `restart_burst_from_fire_tail_residual` in `burst.rs`.
     #[must_use]
     pub fn into_pre_fire_residual(
-        self,
-        parked: DirtyProvenance,
-        burst_deadline: TimerId,
-        settle_timer: TimerId,
-        now: Instant,
-        fold_latched: bool,
+        self, parked: DirtyProvenance, burst_deadline: TimerId, settle_timer: TimerId,
+        now: Instant, fold_latched: bool,
     ) -> PreFireBurst {
         debug_assert!(
             !self.final_window_residual.is_empty(),
@@ -1856,9 +1828,7 @@ impl DescentState {
     /// sites for each one's).
     #[must_use]
     pub const fn new(
-        current_prefix: ResourceId,
-        remaining_components: DescentRemaining,
-        probe: ProbeSlot,
+        current_prefix: ResourceId, remaining_components: DescentRemaining, probe: ProbeSlot,
         witness: DescentWitness,
     ) -> Self {
         Self {
@@ -2371,20 +2341,14 @@ impl ProfileConfig {
     /// `has_per_file_fds` is true iff the event mask carries CONTENT or METADATA (covered Leaves
     /// then need their own FDs).
     fn new(identity: ProfileIdentity) -> Self {
-        let has_per_file_fds = identity
-            .events()
-            .intersects(ClassSet::CONTENT | ClassSet::METADATA);
+        let has_per_file_fds = identity.events().intersects(ClassSet::CONTENT | ClassSet::METADATA);
         let exclude_strings: Arc<[CompactString]> = identity
             .config()
             .exclude_globs()
             .iter()
             .map(|g| CompactString::from(g.source()))
             .collect();
-        Self {
-            identity,
-            exclude_strings,
-            has_per_file_fds,
-        }
+        Self { identity, exclude_strings, has_per_file_fds }
     }
 }
 
@@ -2582,9 +2546,7 @@ impl Profile {
     /// than panicking or constructing an illegal state.
     #[must_use]
     pub fn new(
-        resource: ResourceId,
-        identity: ProfileIdentity,
-        settle: Duration,
+        resource: ResourceId, identity: ProfileIdentity, settle: Duration,
         kind: Option<ResourceKind>,
     ) -> Self {
         debug_assert!(
@@ -2596,14 +2558,12 @@ impl Profile {
         );
         let anchor = match kind {
             None => AnchorClassification::Unclassified { witness: None },
-            Some(ResourceKind::Dir) => AnchorClassification::Dir {
-                current: None,
-                settled: SettledState::Unset,
-            },
-            Some(ResourceKind::File) => AnchorClassification::File {
-                current: None,
-                settled: SettledState::Unset,
-            },
+            Some(ResourceKind::Dir) => {
+                AnchorClassification::Dir { current: None, settled: SettledState::Unset }
+            }
+            Some(ResourceKind::File) => {
+                AnchorClassification::File { current: None, settled: SettledState::Unset }
+            }
             Some(ResourceKind::Unknown) => {
                 debug_assert!(
                     false,
@@ -2648,10 +2608,7 @@ impl Profile {
             }
             AnchorClassification::Unclassified { witness } => {
                 let settled = witness.map_or(SettledState::Unset, SettledState::Witness);
-                self.anchor = AnchorClassification::Dir {
-                    current: Some(snapshot),
-                    settled,
-                };
+                self.anchor = AnchorClassification::Dir { current: Some(snapshot), settled };
             }
             AnchorClassification::File { .. } => {
                 debug_assert!(
@@ -2678,10 +2635,7 @@ impl Profile {
             }
             AnchorClassification::Unclassified { witness } => {
                 let settled = witness.map_or(SettledState::Unset, SettledState::Witness);
-                self.anchor = AnchorClassification::File {
-                    current: Some(leaf),
-                    settled,
-                };
+                self.anchor = AnchorClassification::File { current: Some(leaf), settled };
             }
             AnchorClassification::Dir { .. } => {
                 debug_assert!(
@@ -3056,8 +3010,7 @@ impl Profile {
     /// through [`Self::config`]'s `Arc` deref.
     #[must_use]
     pub fn events_witness_quiescence(&self) -> bool {
-        self.events()
-            .contains(self.config().quiescence_witness_classes())
+        self.events().contains(self.config().quiescence_witness_classes())
     }
 
     /// True iff the event-dirty chains alone can carry this burst's quiescence proof: the burst
@@ -3134,9 +3087,7 @@ impl Profile {
     #[must_use]
     pub const fn current_dir(&self) -> Option<&Arc<crate::snapshot::tree::DirSnapshot>> {
         match &self.anchor {
-            AnchorClassification::Dir {
-                current: Some(arc), ..
-            } => Some(arc),
+            AnchorClassification::Dir { current: Some(arc), .. } => Some(arc),
             _ => None,
         }
     }
@@ -3146,10 +3097,7 @@ impl Profile {
     #[must_use]
     pub const fn baseline_dir(&self) -> Option<&Arc<crate::snapshot::tree::DirSnapshot>> {
         match &self.anchor {
-            AnchorClassification::Dir {
-                settled: SettledState::Snapshot(arc),
-                ..
-            } => Some(arc),
+            AnchorClassification::Dir { settled: SettledState::Snapshot(arc), .. } => Some(arc),
             _ => None,
         }
     }
@@ -3231,13 +3179,8 @@ impl Profile {
     pub const fn current_is_some(&self) -> bool {
         matches!(
             &self.anchor,
-            AnchorClassification::File {
-                current: Some(_),
-                ..
-            } | AnchorClassification::Dir {
-                current: Some(_),
-                ..
-            }
+            AnchorClassification::File { current: Some(_), .. }
+                | AnchorClassification::Dir { current: Some(_), .. }
         )
     }
 
@@ -3279,13 +3222,8 @@ impl Profile {
     pub const fn baseline_is_some(&self) -> bool {
         matches!(
             &self.anchor,
-            AnchorClassification::File {
-                settled: SettledState::Snapshot(_),
-                ..
-            } | AnchorClassification::Dir {
-                settled: SettledState::Snapshot(_),
-                ..
-            }
+            AnchorClassification::File { settled: SettledState::Snapshot(_), .. }
+                | AnchorClassification::Dir { settled: SettledState::Snapshot(_), .. }
         )
     }
 
@@ -3390,13 +3328,7 @@ impl Profile {
     /// bound at `u64::MAX` rather than wrap.
     pub const fn note_absorb_fold(&mut self) {
         self.absorb_count = self.absorb_count.saturating_add(1);
-        if matches!(
-            self.absorb,
-            Some(AbsorbWindow {
-                mode: AbsorbMode::ConsumeOnFirst,
-                ..
-            })
-        ) {
+        if matches!(self.absorb, Some(AbsorbWindow { mode: AbsorbMode::ConsumeOnFirst, .. })) {
             self.absorb = None;
         }
     }
@@ -3479,11 +3411,7 @@ impl ProfileMap {
     /// this resource matches the hash.
     #[must_use]
     pub fn find(&self, resource: ResourceId, config_hash: u64) -> Option<ProfileId> {
-        self.by_resource
-            .get(resource)?
-            .iter()
-            .find(|(h, _)| *h == config_hash)
-            .map(|(_, id)| *id)
+        self.by_resource.get(resource)?.iter().find(|(h, _)| *h == config_hash).map(|(_, id)| *id)
     }
 
     /// Insert a fresh Profile and write back-references on both the Tree (`Resource.profiles`) and
@@ -3590,9 +3518,7 @@ impl ProfileMap {
     /// the typed-move callers branch on. A missed reconcile is perf-only, caught by the debug
     /// full-scan tripwire in `Engine::classify_event_carriers`.
     pub fn map_state<R>(
-        &mut self,
-        id: ProfileId,
-        f: impl FnOnce(ProfileState) -> (ProfileState, R),
+        &mut self, id: ProfileId, f: impl FnOnce(ProfileState) -> (ProfileState, R),
     ) -> Option<R> {
         let p = self.profiles.get_mut(id)?;
         let before = p.is_nonsteady();
@@ -3633,11 +3559,7 @@ impl ProfileMap {
 
     /// Iterator over the Profiles attached at `resource`, in `Resource.profiles` insertion order.
     pub fn at(&self, resource: ResourceId) -> impl Iterator<Item = ProfileId> + '_ {
-        self.by_resource
-            .get(resource)
-            .into_iter()
-            .flatten()
-            .map(|(_, id)| *id)
+        self.by_resource.get(resource).into_iter().flatten().map(|(_, id)| *id)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (ProfileId, &Profile)> {
@@ -3674,10 +3596,7 @@ impl ProfileMap {
     pub fn active_count(&self) -> usize {
         self.iter()
             .filter(|(_, p)| {
-                matches!(
-                    p.state(),
-                    ProfileState::Pending(_) | ProfileState::Active(_, _)
-                )
+                matches!(p.state(), ProfileState::Pending(_) | ProfileState::Active(_, _))
             })
             .count()
     }
@@ -3721,19 +3640,10 @@ mod tests {
     /// max_settle, events)` into the [`ProfileIdentity`] the real [`Profile::new`] now takes by
     /// value, so every fixture's exact parameters survive the decomposition unchanged.
     fn mk_profile(
-        resource: ResourceId,
-        scan: SubtreeScan,
-        max_settle: Duration,
-        settle: Duration,
-        events: ClassSet,
-        kind: Option<ResourceKind>,
+        resource: ResourceId, scan: SubtreeScan, max_settle: Duration, settle: Duration,
+        events: ClassSet, kind: Option<ResourceKind>,
     ) -> Profile {
-        Profile::new(
-            resource,
-            ProfileIdentity::new(scan, max_settle, events),
-            settle,
-            kind,
-        )
+        Profile::new(resource, ProfileIdentity::new(scan, max_settle, events), settle, kind)
     }
 
     #[test]
@@ -3747,10 +3657,7 @@ mod tests {
         assert_eq!(p.max_settle(), MAX_SETTLE);
         assert_eq!(p.settle, SETTLE);
         // Absorb state initialises empty: no window armed, zero folds.
-        assert!(
-            p.absorb_window().is_none(),
-            "fresh Profile has no absorb window"
-        );
+        assert!(p.absorb_window().is_none(), "fresh Profile has no absorb window");
         assert_eq!(p.absorb_count(), 0, "fresh Profile has folded nothing");
     }
 
@@ -3761,24 +3668,15 @@ mod tests {
     /// max_settle` means a caller bypassed config validation — the constructor trips loudly in debug
     /// rather than silently shipping a Profile that forces every burst.
     #[test]
-    #[cfg_attr(
-        not(debug_assertions),
-        ignore = "debug_assert! is compiled out in release"
-    )]
+    #[cfg_attr(not(debug_assertions), ignore = "debug_assert! is compiled out in release")]
     #[should_panic(expected = "must not exceed max_settle")]
     fn profile_new_panics_when_settle_exceeds_max_settle() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
         // max_settle = 5s, settle = 10s — the rejected-but-representable combination the config layer
         // should have caught upstream.
-        let _ = mk_profile(
-            r,
-            cfg(),
-            Duration::from_secs(5),
-            Duration::from_secs(10),
-            NO_EVENTS,
-            None,
-        );
+        let _ =
+            mk_profile(r, cfg(), Duration::from_secs(5), Duration::from_secs(10), NO_EVENTS, None);
     }
 
     /// `has_per_file_fds` defaults to false when `events` excludes both CONTENT and METADATA. The
@@ -3853,14 +3751,7 @@ mod tests {
             "METADATA alone drops IN_PLACE_WRITES at the per-Profile class filter",
         );
 
-        let in_place = mk_profile(
-            r,
-            cfg(),
-            MAX_SETTLE,
-            SETTLE,
-            ClassSet::IN_PLACE_WRITES,
-            None,
-        );
+        let in_place = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, ClassSet::IN_PLACE_WRITES, None);
         assert!(
             in_place.events_witness_quiescence(),
             "IN_PLACE_WRITES subscribes to in-place writes — settle-silence proves quiescence",
@@ -3899,12 +3790,7 @@ mod tests {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
         let pattern = PatternSpec::parse("/srv/*/log").expect("test pattern parses");
-        let chain = Profile::new(
-            r,
-            ProfileIdentity::discovery(Arc::new(pattern)),
-            SETTLE,
-            None,
-        );
+        let chain = Profile::new(r, ProfileIdentity::discovery(Arc::new(pattern)), SETTLE, None);
         assert!(
             chain.events_witness_quiescence(),
             "STRUCTURE covers MEMBERSHIP_CHANGES — settle-silence witnesses the match set",
@@ -3949,10 +3835,8 @@ mod tests {
         let mut tree = Tree::new();
         let mut profiles = ProfileMap::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let _pid = profiles.attach(
-            &mut tree,
-            mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
-        );
+        let _pid =
+            profiles.attach(&mut tree, mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None));
 
         assert!(
             !tree.try_reap(r, &mut StepOutput::default()),
@@ -3980,10 +3864,8 @@ mod tests {
         let mut tree = Tree::new();
         let mut profiles = ProfileMap::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let pid = profiles.attach(
-            &mut tree,
-            mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
-        );
+        let pid =
+            profiles.attach(&mut tree, mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None));
 
         profiles.detach(&mut tree, pid);
         assert!(tree.try_reap(r, &mut StepOutput::default()));
@@ -4020,37 +3902,26 @@ mod tests {
         let r1 = tree.ensure_root("a", ResourceRole::User);
         let r2 = tree.ensure_root("b", ResourceRole::User);
 
-        let p1 = profiles.attach(
-            &mut tree,
-            mk_profile(r1, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
-        );
-        let p2 = profiles.attach(
-            &mut tree,
-            mk_profile(r2, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
-        );
+        let p1 =
+            profiles.attach(&mut tree, mk_profile(r1, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None));
+        let p2 =
+            profiles.attach(&mut tree, mk_profile(r2, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None));
         assert_ne!(p1, p2);
         assert_eq!(profiles.len(), 2);
     }
 
     #[test]
-    #[cfg_attr(
-        not(debug_assertions),
-        ignore = "debug_assert! is compiled out in release"
-    )]
+    #[cfg_attr(not(debug_assertions), ignore = "debug_assert! is compiled out in release")]
     #[should_panic(expected = "called twice")]
     fn attach_duplicate_panics_in_debug() {
         let mut tree = Tree::new();
         let mut profiles = ProfileMap::new();
         let r = tree.ensure_root("x", ResourceRole::User);
-        let _pid = profiles.attach(
-            &mut tree,
-            mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
-        );
+        let _pid =
+            profiles.attach(&mut tree, mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None));
         // Caller failed to `find` first; second attach hits debug_assert.
-        let _pid2 = profiles.attach(
-            &mut tree,
-            mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
-        );
+        let _pid2 =
+            profiles.attach(&mut tree, mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None));
     }
 
     /// [`ProfileMap::active_count`] reports the count of Profiles **not** in [`ProfileState::Idle`]
@@ -4065,17 +3936,11 @@ mod tests {
         assert_eq!(profiles.active_count(), 0, "empty ⇒ 0");
 
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let pid = profiles.attach(
-            &mut tree,
-            mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
-        );
+        let pid =
+            profiles.attach(&mut tree, mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None));
         // Fresh Profile is `Idle` ⇒ uncounted. Distinguishes the counter from `len()` (which would
         // report 1 here).
-        assert_eq!(
-            profiles.active_count(),
-            0,
-            "Idle Profile is excluded from active_count",
-        );
+        assert_eq!(profiles.active_count(), 0, "Idle Profile is excluded from active_count");
         assert_eq!(profiles.len(), 1, "len() counts every Profile");
 
         let pending = ProfileState::Pending(DescentState::new(
@@ -4084,18 +3949,11 @@ mod tests {
             ProbeSlot::empty(),
             DescentWitness::Unobserved,
         ));
-        let _prior = profiles
-            .transition_state(pid, pending)
-            .expect("known id transitions");
-        assert_eq!(
-            profiles.active_count(),
-            1,
-            "Pending Profile is counted by active_count",
-        );
+        let _prior = profiles.transition_state(pid, pending).expect("known id transitions");
+        assert_eq!(profiles.active_count(), 1, "Pending Profile is counted by active_count");
 
-        let _prior = profiles
-            .transition_state(pid, ProfileState::Idle)
-            .expect("known id transitions");
+        let _prior =
+            profiles.transition_state(pid, ProfileState::Idle).expect("known id transitions");
         assert_eq!(
             profiles.active_count(),
             0,
@@ -4212,11 +4070,7 @@ mod tests {
         p.install_dir_current(empty_dir_snapshot());
 
         assert_eq!(p.kind(), Some(crate::resource::ResourceKind::Dir));
-        assert_eq!(
-            p.settled_hash(),
-            settled,
-            "re-graft leaves the settled baseline untouched",
-        );
+        assert_eq!(p.settled_hash(), settled, "re-graft leaves the settled baseline untouched");
     }
 
     /// Grafting onto an `Unclassified` anchor that carries a survival witness (the post-loss recovery
@@ -4227,9 +4081,7 @@ mod tests {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
         let mut p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
-        p.anchor = AnchorClassification::Unclassified {
-            witness: Some(0x00c0_ffee),
-        };
+        p.anchor = AnchorClassification::Unclassified { witness: Some(0x00c0_ffee) };
 
         p.install_dir_current(empty_dir_snapshot());
 
@@ -4240,20 +4092,14 @@ mod tests {
             Some(0x00c0_ffee),
             "witness carried forward as Witness(settled)",
         );
-        assert!(
-            p.baseline().is_none(),
-            "a carried witness is not an active baseline",
-        );
+        assert!(p.baseline().is_none(), "a carried witness is not an active baseline");
     }
 
     /// Cross-arm misuse: grafting a `Dir` onto a `File`-classified Profile panics in debug builds.
     /// Production paths never reach this branch — the certifier's inline kind guard catches the
     /// routing breach at the verdict floor first.
     #[test]
-    #[cfg_attr(
-        not(debug_assertions),
-        ignore = "debug_assert! is compiled out in release"
-    )]
+    #[cfg_attr(not(debug_assertions), ignore = "debug_assert! is compiled out in release")]
     #[should_panic(expected = "install_dir_current: kind mismatch")]
     fn install_dir_current_panics_on_file_kinded_profile_in_debug() {
         let mut tree = Tree::new();
@@ -4266,10 +4112,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        not(debug_assertions),
-        ignore = "debug_assert! is compiled out in release"
-    )]
+    #[cfg_attr(not(debug_assertions), ignore = "debug_assert! is compiled out in release")]
     #[should_panic(expected = "install_file_current: kind mismatch")]
     fn install_file_current_panics_on_dir_kinded_profile_in_debug() {
         let mut tree = Tree::new();
@@ -4299,11 +4142,7 @@ mod tests {
 
         let p = mk_profile(r, cfg, MAX_SETTLE, SETTLE, NO_EVENTS, None);
 
-        let actual: Vec<&str> = p
-            .exclude_strings()
-            .iter()
-            .map(CompactString::as_str)
-            .collect();
+        let actual: Vec<&str> = p.exclude_strings().iter().map(CompactString::as_str).collect();
         assert_eq!(actual, vec!["a", "m", "z"]);
     }
 
@@ -4375,10 +4214,7 @@ mod tests {
     fn dirty_prov(entries: &[(ResourceId, &str)]) -> DirtyProvenance {
         let mut dirty = DirtyProvenance::new();
         for &(id, path) in entries {
-            debug_assert!(
-                path.starts_with('/'),
-                "dirty_prov: '{path}' must be an absolute path",
-            );
+            debug_assert!(path.starts_with('/'), "dirty_prov: '{path}' must be an absolute path");
             dirty.note(id, Arc::from(Path::new(path)));
         }
         dirty
@@ -4424,10 +4260,7 @@ mod tests {
         let mut dp = DirtyProvenance::new();
         dp.note(r[0], Arc::clone(&only));
         let lca = dp.lca_path().expect("non-empty");
-        assert!(
-            Arc::ptr_eq(&lca, &only),
-            "a lone path is returned, not reallocated",
-        );
+        assert!(Arc::ptr_eq(&lca, &only), "a lone path is returned, not reallocated");
 
         assert!(DirtyProvenance::new().lca_path().is_none(), "empty ⇒ None");
     }
@@ -4464,10 +4297,7 @@ mod tests {
 
         dp.note(r[0], Arc::from(Path::new("/w/a")));
         assert!(!dp.is_empty());
-        assert!(
-            !dp.chains().is_empty(),
-            "non-empty dirty must project to a non-empty chain set",
-        );
+        assert!(!dp.chains().is_empty(), "non-empty dirty must project to a non-empty chain set");
 
         dp.clear();
         assert!(dp.chains().is_empty(), "cleared dirty ⇒ empty chains");
@@ -4476,9 +4306,7 @@ mod tests {
     fn batching_burst(settle: TimerId, deadline: TimerId) -> PreFireBurst {
         PreFireBurst::new(
             deadline,
-            PreFirePhase::Batching {
-                settle_timer: settle,
-            },
+            PreFirePhase::Batching { settle_timer: settle },
             BurstIntent::Standard,
             DirtyProvenance::new(),
             None,
@@ -4511,13 +4339,8 @@ mod tests {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
         for phase in [
-            PreFirePhase::Batching {
-                settle_timer: tid(1),
-            },
-            PreFirePhase::Verifying {
-                slot: ProbeSlot::empty(),
-                target: r,
-            },
+            PreFirePhase::Batching { settle_timer: tid(1) },
+            PreFirePhase::Verifying { slot: ProbeSlot::empty(), target: r },
             PreFirePhase::Draining,
         ] {
             let pre = unit_pre(phase, tid(42));
@@ -4531,10 +4354,7 @@ mod tests {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
         for phase in [
-            PreFirePhase::Verifying {
-                slot: ProbeSlot::empty(),
-                target: r,
-            },
+            PreFirePhase::Verifying { slot: ProbeSlot::empty(), target: r },
             PreFirePhase::Draining,
         ] {
             let pre = unit_pre(phase, tid(42));
@@ -4554,16 +4374,10 @@ mod tests {
     fn timer_token_await_gate_on_awaiting_returns_gate_deadline() {
         let post = PostFireBurst::new(
             BurstIntent::Standard,
-            PostFirePhase::Awaiting {
-                outstanding: 1,
-                gate_deadline: tid(55),
-            },
+            PostFirePhase::Awaiting { outstanding: 1, gate_deadline: tid(55) },
             DirtyProvenance::new(),
         );
-        assert_eq!(
-            post.timer_token(TimerKind::AwaitGateDeadline),
-            Some(tid(55)),
-        );
+        assert_eq!(post.timer_token(TimerKind::AwaitGateDeadline), Some(tid(55)));
     }
 
     /// AwaitGateDeadline on Rebasing returns None — the field doesn't exist on that variant.
@@ -4581,14 +4395,9 @@ mod tests {
     #[test]
     fn timer_token_settle_and_burst_deadline_are_none_on_postfire() {
         for phase in [
-            PostFirePhase::Awaiting {
-                outstanding: 1,
-                gate_deadline: tid(99),
-            },
+            PostFirePhase::Awaiting { outstanding: 1, gate_deadline: tid(99) },
             PostFirePhase::Rebasing(ProbeSlot::empty()),
-            PostFirePhase::Settling {
-                settle_timer: tid(77),
-            },
+            PostFirePhase::Settling { settle_timer: tid(77) },
         ] {
             let post = PostFireBurst::new(BurstIntent::Standard, phase, DirtyProvenance::new());
             assert!(post.timer_token(TimerKind::Settle).is_none());
@@ -4602,21 +4411,13 @@ mod tests {
     fn timer_token_post_fire_settle_lives_only_on_settling() {
         let settling = PostFireBurst::new(
             BurstIntent::Standard,
-            PostFirePhase::Settling {
-                settle_timer: tid(31),
-            },
+            PostFirePhase::Settling { settle_timer: tid(31) },
             DirtyProvenance::new(),
         );
-        assert_eq!(
-            settling.timer_token(TimerKind::PostFireSettle),
-            Some(tid(31)),
-        );
+        assert_eq!(settling.timer_token(TimerKind::PostFireSettle), Some(tid(31)));
 
         for phase in [
-            PostFirePhase::Awaiting {
-                outstanding: 1,
-                gate_deadline: tid(1),
-            },
+            PostFirePhase::Awaiting { outstanding: 1, gate_deadline: tid(1) },
             PostFirePhase::Rebasing(ProbeSlot::empty()),
         ] {
             let post = PostFireBurst::new(BurstIntent::Standard, phase, DirtyProvenance::new());
@@ -4655,18 +4456,9 @@ mod tests {
             )
         };
         let er = QuiescenceWitness::EventsReliable;
-        let first = QuiescenceWitness::HashChannel {
-            prior: None,
-            response: 1,
-        };
-        let eq = QuiescenceWitness::HashChannel {
-            prior: Some(7),
-            response: 7,
-        };
-        let neq = QuiescenceWitness::HashChannel {
-            prior: Some(7),
-            response: 8,
-        };
+        let first = QuiescenceWitness::HashChannel { prior: None, response: 1 };
+        let eq = QuiescenceWitness::HashChannel { prior: Some(7), response: 7 };
+        let neq = QuiescenceWitness::HashChannel { prior: Some(7), response: 8 };
 
         // Authoritative + !forced — witness selects Stable vs Retry; on Retry, only a concrete
         // disagreement reports observed motion.
@@ -4676,9 +4468,7 @@ mod tests {
         );
         assert_eq!(
             quiescence_verdict(ProofAuthority::Authoritative, false, first),
-            QuiescenceVerdict::Retry {
-                observed_motion: false,
-            },
+            QuiescenceVerdict::Retry { observed_motion: false },
             "first-sample hash channel (prior=None) ⇒ Retry, not Natural; \
              absence of confirmation is not observed motion",
         );
@@ -4688,37 +4478,27 @@ mod tests {
         );
         assert_eq!(
             quiescence_verdict(ProofAuthority::Authoritative, false, neq),
-            QuiescenceVerdict::Retry {
-                observed_motion: true,
-            },
+            QuiescenceVerdict::Retry { observed_motion: true },
         );
 
         // Authoritative + forced — ceiling bypass. Disagreement bit reads the witness: `true` only
         // on Some(p) != response.
         assert_eq!(
             quiescence_verdict(ProofAuthority::Authoritative, true, er),
-            QuiescenceVerdict::Stable(StableReason::Forced {
-                hash_channel_disagreed: false,
-            }),
+            QuiescenceVerdict::Stable(StableReason::Forced { hash_channel_disagreed: false }),
         );
         assert_eq!(
             quiescence_verdict(ProofAuthority::Authoritative, true, first),
-            QuiescenceVerdict::Stable(StableReason::Forced {
-                hash_channel_disagreed: false,
-            }),
+            QuiescenceVerdict::Stable(StableReason::Forced { hash_channel_disagreed: false }),
             "first-sample channel on forced fold ⇒ absence of confirmation, not observed disagreement",
         );
         assert_eq!(
             quiescence_verdict(ProofAuthority::Authoritative, true, eq),
-            QuiescenceVerdict::Stable(StableReason::Forced {
-                hash_channel_disagreed: false,
-            }),
+            QuiescenceVerdict::Stable(StableReason::Forced { hash_channel_disagreed: false }),
         );
         assert_eq!(
             quiescence_verdict(ProofAuthority::Authoritative, true, neq),
-            QuiescenceVerdict::Stable(StableReason::Forced {
-                hash_channel_disagreed: true,
-            }),
+            QuiescenceVerdict::Stable(StableReason::Forced { hash_channel_disagreed: true }),
         );
 
         // Undischarged — witness ignored; forced selects Retry vs Abandon. A walk that could not
@@ -4726,9 +4506,7 @@ mod tests {
         // in path order.
         assert_eq!(
             quiescence_verdict(undischarged(), false, er),
-            QuiescenceVerdict::Retry {
-                observed_motion: false,
-            },
+            QuiescenceVerdict::Retry { observed_motion: false },
             "Undischarged + !forced ⇒ Retry (no motion observed)",
         );
         let v = quiescence_verdict(undischarged(), true, neq);
@@ -4749,10 +4527,7 @@ mod tests {
 
         let post = ActiveBurst::PostFire(PostFireBurst::new(
             BurstIntent::Standard,
-            PostFirePhase::Awaiting {
-                outstanding: 1,
-                gate_deadline: tid(9),
-            },
+            PostFirePhase::Awaiting { outstanding: 1, gate_deadline: tid(9) },
             DirtyProvenance::new(),
         ));
         assert_eq!(post.timer_token(TimerKind::AwaitGateDeadline), Some(tid(9)));
@@ -4839,10 +4614,7 @@ mod tests {
             )),
             ProfileState::Active(
                 ActiveBurst::PreFire(unit_pre(
-                    PreFirePhase::Verifying {
-                        slot: ProbeSlot::empty(),
-                        target: r,
-                    },
+                    PreFirePhase::Verifying { slot: ProbeSlot::empty(), target: r },
                     tid(1),
                 )),
                 BurstFinish::ReturnToIdle,
@@ -4854,10 +4626,7 @@ mod tests {
             ProfileState::Active(
                 ActiveBurst::PostFire(PostFireBurst::new(
                     BurstIntent::Standard,
-                    PostFirePhase::Awaiting {
-                        outstanding: 1,
-                        gate_deadline: tid(3),
-                    },
+                    PostFirePhase::Awaiting { outstanding: 1, gate_deadline: tid(3) },
                     DirtyProvenance::new(),
                 )),
                 BurstFinish::ReturnToIdle,
@@ -4873,9 +4642,7 @@ mod tests {
             ProfileState::Active(
                 ActiveBurst::PostFire(PostFireBurst::new(
                     BurstIntent::Standard,
-                    PostFirePhase::Settling {
-                        settle_timer: tid(4),
-                    },
+                    PostFirePhase::Settling { settle_timer: tid(4) },
                     DirtyProvenance::new(),
                 )),
                 BurstFinish::ReturnToIdle,
@@ -5021,10 +4788,7 @@ mod tests {
     fn awaiting_post(outstanding: u32) -> PostFireBurst {
         PostFireBurst::new(
             BurstIntent::Standard,
-            PostFirePhase::Awaiting {
-                outstanding,
-                gate_deadline: tid(9),
-            },
+            PostFirePhase::Awaiting { outstanding, gate_deadline: tid(9) },
             DirtyProvenance::new(),
         )
     }
@@ -5037,19 +4801,13 @@ mod tests {
         assert_eq!(post.note_effect_completion(), AwaitVerdict::Decremented);
         assert_eq!(post.note_effect_completion(), AwaitVerdict::Decremented);
         assert_eq!(post.note_effect_completion(), AwaitVerdict::LastReached);
-        assert!(matches!(
-            post.phase,
-            PostFirePhase::Awaiting { outstanding: 0, .. }
-        ));
+        assert!(matches!(post.phase, PostFirePhase::Awaiting { outstanding: 0, .. }));
     }
 
     /// A single outstanding effect hits zero on its first completion.
     #[test]
     fn note_effect_completion_single_is_last_reached() {
-        assert_eq!(
-            awaiting_post(1).note_effect_completion(),
-            AwaitVerdict::LastReached
-        );
+        assert_eq!(awaiting_post(1).note_effect_completion(), AwaitVerdict::LastReached);
     }
 
     /// Rebasing carries no outstanding-effect counter, so a late completion in Rebasing folds to
@@ -5095,11 +4853,7 @@ mod tests {
     }
 
     fn rebasing_post(intent: BurstIntent, residual: DirtyProvenance) -> PostFireBurst {
-        PostFireBurst::new(
-            intent,
-            PostFirePhase::Rebasing(ProbeSlot::empty()),
-            residual,
-        )
+        PostFireBurst::new(intent, PostFirePhase::Rebasing(ProbeSlot::empty()), residual)
     }
 
     /// The residual provenance seeds the restart: the typed move re-arms a fresh `Batching` Standard
@@ -5112,12 +4866,8 @@ mod tests {
     fn into_pre_fire_residual_seeds_a_fresh_batching_burst() {
         let mut tree = Tree::new();
         let anchor = tree.ensure_root("anchor", ResourceRole::User);
-        let c1 = tree
-            .ensure_child(anchor, "c1", ResourceRole::User)
-            .expect("live");
-        let c2 = tree
-            .ensure_child(anchor, "c2", ResourceRole::User)
-            .expect("live");
+        let c1 = tree.ensure_child(anchor, "c1", ResourceRole::User).expect("live");
+        let c2 = tree.ensure_child(anchor, "c2", ResourceRole::User).expect("live");
         let residual = dirty_prov(&[(c1, "/w/c1"), (c2, "/w/c2")]);
         let now = std::time::Instant::now();
 
@@ -5153,9 +4903,7 @@ mod tests {
     fn into_pre_fire_residual_seed_origin_restarts_as_standard() {
         let mut tree = Tree::new();
         let anchor = tree.ensure_root("anchor", ResourceRole::User);
-        let c1 = tree
-            .ensure_child(anchor, "c1", ResourceRole::User)
-            .expect("live");
+        let c1 = tree.ensure_child(anchor, "c1", ResourceRole::User).expect("live");
         let residual = dirty_prov(&[(c1, "/w/c1")]);
         let pre = rebasing_post(BurstIntent::Seed, residual).into_pre_fire_residual(
             DirtyProvenance::new(),
@@ -5231,9 +4979,7 @@ mod tests {
     fn post_fire_carrier_drops_at_into_pre_fire_residual() {
         let mut tree = Tree::new();
         let anchor = tree.ensure_root("anchor", ResourceRole::User);
-        let c1 = tree
-            .ensure_child(anchor, "c1", ResourceRole::User)
-            .expect("live");
+        let c1 = tree.ensure_child(anchor, "c1", ResourceRole::User).expect("live");
         let residual = dirty_prov(&[(c1, "/w/c1")]);
 
         let mut post = rebasing_post(BurstIntent::Standard, residual);
@@ -5265,10 +5011,7 @@ mod tests {
     /// `AbsorbFold` override — reaching it means a classify-routing bug let a latched burst cross
     /// the fire boundary. Debug-only: the assert is compiled out in release.
     #[test]
-    #[cfg_attr(
-        not(debug_assertions),
-        ignore = "debug_assert! is compiled out in release"
-    )]
+    #[cfg_attr(not(debug_assertions), ignore = "debug_assert! is compiled out in release")]
     #[should_panic(expected = "fold-latched burst must not fire")]
     fn into_post_fire_panics_on_latched_burst_in_debug() {
         let mut pre = batching_burst(tid(7), tid(99));
@@ -5283,9 +5026,7 @@ mod tests {
     fn into_pre_fire_residual_threads_fold_latched() {
         let mut tree = Tree::new();
         let anchor = tree.ensure_root("anchor", ResourceRole::User);
-        let c1 = tree
-            .ensure_child(anchor, "c1", ResourceRole::User)
-            .expect("live");
+        let c1 = tree.ensure_child(anchor, "c1", ResourceRole::User).expect("live");
         let residual = dirty_prov(&[(c1, "/w/c1")]);
 
         let pre = rebasing_post(BurstIntent::Standard, residual).into_pre_fire_residual(
@@ -5308,12 +5049,8 @@ mod tests {
     fn into_pre_fire_residual_unions_parked_under_residual() {
         let mut tree = Tree::new();
         let anchor = tree.ensure_root("anchor", ResourceRole::User);
-        let c1 = tree
-            .ensure_child(anchor, "c1", ResourceRole::User)
-            .expect("live");
-        let c2 = tree
-            .ensure_child(anchor, "c2", ResourceRole::User)
-            .expect("live");
+        let c1 = tree.ensure_child(anchor, "c1", ResourceRole::User).expect("live");
+        let c2 = tree.ensure_child(anchor, "c2", ResourceRole::User).expect("live");
         let parked = dirty_prov(&[(c1, "/w/c1")]);
         let residual = dirty_prov(&[(c2, "/w/c2")]);
 
@@ -5340,14 +5077,7 @@ mod tests {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
         let c = rids(2);
-        let mut p = mk_profile(
-            r,
-            cfg(),
-            MAX_SETTLE,
-            SETTLE,
-            NO_EVENTS,
-            Some(ResourceKind::Dir),
-        );
+        let mut p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, Some(ResourceKind::Dir));
 
         // Pre-fire park takes `dirty`, leaving the burst's store empty.
         let mut pre = batching_burst(tid(1), tid(2));
@@ -5357,10 +5087,7 @@ mod tests {
             BurstFinish::ReturnToIdle,
         ));
         p.park_burst_evidence();
-        assert!(
-            p.pre_fire_burst().unwrap().dirty.is_empty(),
-            "the park empties the live carrier",
-        );
+        assert!(p.pre_fire_burst().unwrap().dirty.is_empty(), "the park empties the live carrier");
 
         // Post-fire park takes the residual and unions it onto the parked set.
         let post = rebasing_post(BurstIntent::Standard, dirty_prov(&[(c[1], "/w/c2")]));
@@ -5390,10 +5117,7 @@ mod tests {
         let r = tree.ensure_root("anchor", ResourceRole::User);
         let mut p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
         p.park_burst_evidence();
-        assert!(
-            p.take_standing_obligation().is_empty(),
-            "Idle parks nothing",
-        );
+        assert!(p.take_standing_obligation().is_empty(), "Idle parks nothing");
     }
 
     // -----------------------------------------------------------------------
@@ -5415,10 +5139,7 @@ mod tests {
             ActiveBurst::PreFire(batching_burst(tid(1), tid(2))),
             BurstFinish::ReturnToIdle,
         );
-        assert!(
-            !prefire.burst_fold_latched(),
-            "fresh PreFire reads unlatched",
-        );
+        assert!(!prefire.burst_fold_latched(), "fresh PreFire reads unlatched");
         prefire.latch_fold();
         assert!(prefire.burst_fold_latched(), "latch flips the PreFire read");
 
@@ -5428,10 +5149,7 @@ mod tests {
             BurstFinish::ReturnToIdle,
         );
         postfire.latch_fold();
-        assert!(
-            !postfire.burst_fold_latched(),
-            "PostFire has no latch — the cascade no-ops",
-        );
+        assert!(!postfire.burst_fold_latched(), "PostFire has no latch — the cascade no-ops");
 
         // Idle / Pending: no in-flight burst — latch is a no-op.
         for mut state in [ProfileState::Idle, pending(r)] {
@@ -5461,15 +5179,9 @@ mod tests {
         p.arm_absorb(base + SETTLE, AbsorbMode::ConsumeOnFirst);
         assert_eq!(
             p.absorb_window(),
-            Some(&AbsorbWindow {
-                expiry: base + SETTLE,
-                mode: AbsorbMode::ConsumeOnFirst,
-            }),
+            Some(&AbsorbWindow { expiry: base + SETTLE, mode: AbsorbMode::ConsumeOnFirst }),
         );
-        assert!(
-            p.state().burst_fold_latched(),
-            "arm retro-latches the in-flight PreFire burst",
-        );
+        assert!(p.state().burst_fold_latched(), "arm retro-latches the in-flight PreFire burst");
 
         // (ii) Idle: window stands for the next birth, nothing latches.
         let mut idle = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
@@ -5486,10 +5198,7 @@ mod tests {
         q.arm_absorb(base + MAX_SETTLE, AbsorbMode::PersistUntil);
         assert_eq!(
             q.absorb_window(),
-            Some(&AbsorbWindow {
-                expiry: base + MAX_SETTLE,
-                mode: AbsorbMode::PersistUntil,
-            }),
+            Some(&AbsorbWindow { expiry: base + MAX_SETTLE, mode: AbsorbMode::PersistUntil }),
             "re-arm overwrites the window wholesale",
         );
     }
@@ -5508,20 +5217,14 @@ mod tests {
         consume.arm_absorb(base + SETTLE, AbsorbMode::ConsumeOnFirst);
         consume.note_absorb_fold();
         assert_eq!(consume.absorb_count(), 1);
-        assert!(
-            consume.absorb_window().is_none(),
-            "ConsumeOnFirst retires on the first fold",
-        );
+        assert!(consume.absorb_window().is_none(), "ConsumeOnFirst retires on the first fold");
 
         // PersistUntil: count bumps, window stands.
         let mut persist = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
         persist.arm_absorb(base + SETTLE, AbsorbMode::PersistUntil);
         persist.note_absorb_fold();
         assert_eq!(persist.absorb_count(), 1);
-        assert!(
-            persist.absorb_window().is_some(),
-            "PersistUntil survives the fold",
-        );
+        assert!(persist.absorb_window().is_some(), "PersistUntil survives the fold");
 
         // No window: count still bumps unconditionally, stays None.
         let mut unarmed = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
@@ -5548,14 +5251,8 @@ mod tests {
 
         p.arm_absorb(base + SETTLE, AbsorbMode::PersistUntil);
         assert!(p.absorb_window_live(base), "before expiry ⇒ live");
-        assert!(
-            !p.absorb_window_live(base + SETTLE),
-            "at expiry ⇒ inert (now < expiry is strict)",
-        );
-        assert!(
-            !p.absorb_window_live(base + SETTLE + SETTLE),
-            "beyond expiry ⇒ inert",
-        );
+        assert!(!p.absorb_window_live(base + SETTLE), "at expiry ⇒ inert (now < expiry is strict)");
+        assert!(!p.absorb_window_live(base + SETTLE + SETTLE), "beyond expiry ⇒ inert");
     }
 
     /// `absorb_window` borrows the armed window **without** live-gating — the contrast with
@@ -5566,18 +5263,13 @@ mod tests {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
         let now = std::time::Instant::now();
-        let past = now
-            .checked_sub(SETTLE)
-            .expect("monotonic clock past origin");
+        let past = now.checked_sub(SETTLE).expect("monotonic clock past origin");
 
         let mut p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
         p.arm_absorb(past, AbsorbMode::PersistUntil);
         assert_eq!(
             p.absorb_window(),
-            Some(&AbsorbWindow {
-                expiry: past,
-                mode: AbsorbMode::PersistUntil,
-            }),
+            Some(&AbsorbWindow { expiry: past, mode: AbsorbMode::PersistUntil }),
             "absorb_window borrows the armed window regardless of expiry",
         );
         assert!(
@@ -5590,14 +5282,8 @@ mod tests {
     fn profile_new_threads_kind_param() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let classified = mk_profile(
-            r,
-            cfg(),
-            MAX_SETTLE,
-            SETTLE,
-            NO_EVENTS,
-            Some(ResourceKind::Dir),
-        );
+        let classified =
+            mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, Some(ResourceKind::Dir));
         assert_eq!(classified.kind(), Some(ResourceKind::Dir));
         let unprobed = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
         assert_eq!(unprobed.kind(), None);
@@ -5663,19 +5349,13 @@ mod tests {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
         let mut profiles = ProfileMap::new();
-        let pid = profiles.attach(
-            &mut tree,
-            mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
-        );
+        let pid =
+            profiles.attach(&mut tree, mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None));
         // A fresh Profile births steady Idle; the descent entry's `transition_state(Pending)` records
         // the +1.
         assert_eq!(profiles.nonsteady(), 0, "a fresh Profile births steady");
         let _ = profiles.transition_state(pid, pending(r));
-        assert_eq!(
-            profiles.nonsteady(),
-            1,
-            "the Idle → Pending push records the carrier edge",
-        );
+        assert_eq!(profiles.nonsteady(), 1, "the Idle → Pending push records the carrier edge");
 
         // Transform Pending → Active(PreFire). The closure consumes the prior by value and computes
         // the next from it; the auxiliary `R` is threaded back out. Pending → Active is a nonsteady
@@ -5687,16 +5367,9 @@ mod tests {
             );
             (active_prefire(), 0xABCD_u32)
         });
-        assert_eq!(
-            aux,
-            Some(0xABCD),
-            "the live-id path threads the auxiliary R out"
-        );
+        assert_eq!(aux, Some(0xABCD), "the live-id path threads the auxiliary R out");
         assert!(
-            matches!(
-                profiles.get(pid).unwrap().state(),
-                ProfileState::Active(_, _)
-            ),
+            matches!(profiles.get(pid).unwrap().state(), ProfileState::Active(_, _)),
             "the closure's computed state is installed",
         );
         assert_eq!(
@@ -5708,15 +5381,8 @@ mod tests {
         // A stale id never runs the closure and returns `None` — the outer `None`
         // `finish_burst_to_idle` flattens against.
         let stale: Option<()> = profiles.map_state(ProfileId::default(), |s| (s, ()));
-        assert!(
-            stale.is_none(),
-            "stale id short-circuits to None without transforming"
-        );
-        assert_eq!(
-            profiles.nonsteady(),
-            0,
-            "a stale-id no-op leaves the carrier count untouched",
-        );
+        assert!(stale.is_none(), "stale id short-circuits to None without transforming");
+        assert_eq!(profiles.nonsteady(), 0, "a stale-id no-op leaves the carrier count untouched");
     }
 
     #[test]
@@ -5755,11 +5421,7 @@ mod tests {
         p.clear_anchor_classification();
 
         assert_eq!(p.kind(), None);
-        assert_eq!(
-            p.settled_hash(),
-            Some(expected),
-            "File baseline hash captured as the witness",
-        );
+        assert_eq!(p.settled_hash(), Some(expected), "File baseline hash captured as the witness");
     }
 
     #[test]
@@ -5816,9 +5478,7 @@ mod tests {
         let r = tree.ensure_root("anchor", ResourceRole::User);
         let mut p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
         p.transition_state(pending(r));
-        p.anchor = AnchorClassification::Unclassified {
-            witness: Some(0xfeed_face),
-        };
+        p.anchor = AnchorClassification::Unclassified { witness: Some(0xfeed_face) };
 
         p.materialize_anchor(ResourceKind::Dir);
 
@@ -5833,10 +5493,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        not(debug_assertions),
-        ignore = "debug_assert! is compiled out in release"
-    )]
+    #[cfg_attr(not(debug_assertions), ignore = "debug_assert! is compiled out in release")]
     #[should_panic(expected = "state must be Pending")]
     fn materialize_anchor_panics_when_not_pending() {
         let mut tree = Tree::new();
@@ -5847,10 +5504,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        not(debug_assertions),
-        ignore = "debug_assert! is compiled out in release"
-    )]
+    #[cfg_attr(not(debug_assertions), ignore = "debug_assert! is compiled out in release")]
     #[should_panic(expected = "anchor_claim must be None")]
     fn materialize_anchor_panics_when_claim_held() {
         let mut tree = Tree::new();
@@ -5862,20 +5516,14 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        not(debug_assertions),
-        ignore = "debug_assert! is compiled out in release"
-    )]
+    #[cfg_attr(not(debug_assertions), ignore = "debug_assert! is compiled out in release")]
     #[should_panic(expected = "anchor must be Unclassified")]
     fn materialize_anchor_panics_when_already_classified() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
         let mut p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
         p.transition_state(pending(r));
-        p.anchor = AnchorClassification::Dir {
-            current: None,
-            settled: SettledState::Unset,
-        };
+        p.anchor = AnchorClassification::Dir { current: None, settled: SettledState::Unset };
         p.materialize_anchor(ResourceKind::Dir);
     }
 
@@ -5888,20 +5536,12 @@ mod tests {
         p.install_anchor_claim_held();
         assert_eq!(p.anchor_claim(), AnchorClaim::Held);
         p.install_anchor_claim_held();
-        assert_eq!(
-            p.anchor_claim(),
-            AnchorClaim::Held,
-            "idempotent against Held"
-        );
+        assert_eq!(p.anchor_claim(), AnchorClaim::Held, "idempotent against Held");
 
         p.release_anchor_claim_now();
         assert_eq!(p.anchor_claim(), AnchorClaim::None);
         p.release_anchor_claim_now();
-        assert_eq!(
-            p.anchor_claim(),
-            AnchorClaim::None,
-            "idempotent against None"
-        );
+        assert_eq!(p.anchor_claim(), AnchorClaim::None, "idempotent against None");
     }
 
     #[test]
@@ -5933,17 +5573,11 @@ mod tests {
 
         assert!(p.post_fire_burst_mut().is_none(), "Idle has no post-fire");
         p.transition_state(active_prefire());
-        assert!(
-            p.post_fire_burst_mut().is_none(),
-            "PreFire has no post-fire"
-        );
+        assert!(p.post_fire_burst_mut().is_none(), "PreFire has no post-fire");
 
         p.transition_state(active_postfire());
-        let post = p
-            .post_fire_burst_mut()
-            .expect("PostFire carries the payload");
-        post.final_window_residual
-            .note(r, Arc::from(Path::new("/w/anchor")));
+        let post = p.post_fire_burst_mut().expect("PostFire carries the payload");
+        post.final_window_residual.note(r, Arc::from(Path::new("/w/anchor")));
         assert!(
             p.post_fire_burst_mut()
                 .expect("still PostFire")
@@ -5986,9 +5620,7 @@ mod tests {
         // take_probe delegates to ProfileState::take_probe: arming the Pending descent slot through
         // the typed mint edge, then taking it idles the machine state (the take is the linear
         // consume, so the slot is never dropped armed).
-        p.descent_state_mut()
-            .expect("still Pending")
-            .arm_probe(ProbeCorrelation::from(7));
+        p.descent_state_mut().expect("still Pending").arm_probe(ProbeCorrelation::from(7));
         assert_eq!(p.take_probe(), Some(ProbeCorrelation::from(7)));
         assert_eq!(p.take_probe(), None, "delegate idled the slot");
 
@@ -6015,11 +5647,7 @@ mod tests {
         let taken = p.take_current();
         assert!(matches!(taken, Some(TreeSnapshot::Dir(_))));
         assert!(!p.current_is_some(), "take leaves current None");
-        assert_eq!(
-            p.settled_hash(),
-            settled,
-            "take_current does not disturb the settled baseline",
-        );
+        assert_eq!(p.settled_hash(), settled, "take_current does not disturb the settled baseline");
         assert!(p.take_current().is_none(), "second take is idempotent");
 
         // Unclassified short-circuits to None.
@@ -6247,46 +5875,23 @@ mod tests {
         let r = tree.ensure_root("anchor", ResourceRole::User);
 
         let a = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
-        assert!(matches!(
-            a.anchor,
-            AnchorClassification::Unclassified { witness: None }
-        ));
+        assert!(matches!(a.anchor, AnchorClassification::Unclassified { witness: None }));
         assert_eq!(a.kind(), None);
         assert_eq!(a.settled_hash(), None);
 
-        let c_dir = mk_profile(
-            r,
-            cfg(),
-            MAX_SETTLE,
-            SETTLE,
-            NO_EVENTS,
-            Some(ResourceKind::Dir),
-        );
+        let c_dir = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, Some(ResourceKind::Dir));
         assert!(matches!(
             c_dir.anchor,
-            AnchorClassification::Dir {
-                current: None,
-                settled: SettledState::Unset
-            }
+            AnchorClassification::Dir { current: None, settled: SettledState::Unset }
         ));
         assert_eq!(c_dir.kind(), Some(ResourceKind::Dir));
         assert!(!c_dir.current_is_some());
         assert_eq!(c_dir.settled_hash(), None);
 
-        let c_file = mk_profile(
-            r,
-            cfg(),
-            MAX_SETTLE,
-            SETTLE,
-            NO_EVENTS,
-            Some(ResourceKind::File),
-        );
+        let c_file = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, Some(ResourceKind::File));
         assert!(matches!(
             c_file.anchor,
-            AnchorClassification::File {
-                current: None,
-                settled: SettledState::Unset
-            }
+            AnchorClassification::File { current: None, settled: SettledState::Unset }
         ));
         assert_eq!(c_file.kind(), Some(ResourceKind::File));
     }
@@ -6296,22 +5901,12 @@ mod tests {
     /// shape as `None`) rather than constructing an illegal state; debug builds trip the
     /// `debug_assert!`.
     #[test]
-    #[cfg_attr(
-        not(debug_assertions),
-        ignore = "debug_assert! is compiled out in release"
-    )]
+    #[cfg_attr(not(debug_assertions), ignore = "debug_assert! is compiled out in release")]
     #[should_panic(expected = "Resource::kind() yields Unknown→None")]
     fn profile_new_unknown_kind_is_defensively_dead() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let _ = mk_profile(
-            r,
-            cfg(),
-            MAX_SETTLE,
-            SETTLE,
-            NO_EVENTS,
-            Some(ResourceKind::Unknown),
-        );
+        let _ = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, Some(ResourceKind::Unknown));
     }
 
     /// `settled_hash` is the one total drift reference across the sum: not-yet-settled ⇒ `None`;
@@ -6357,20 +5952,14 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        not(debug_assertions),
-        ignore = "debug_assert! is compiled out in release"
-    )]
+    #[cfg_attr(not(debug_assertions), ignore = "debug_assert! is compiled out in release")]
     #[should_panic(expected = "Pending Profile must be Unclassified")]
     fn anchor_coherent_trips_on_classified_pending() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
         let mut p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
         p.transition_state(pending(r));
-        p.anchor = AnchorClassification::Dir {
-            current: None,
-            settled: SettledState::Unset,
-        };
+        p.anchor = AnchorClassification::Dir { current: None, settled: SettledState::Unset };
         p.debug_assert_anchor_coherent();
     }
 }

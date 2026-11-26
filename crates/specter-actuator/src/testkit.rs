@@ -93,13 +93,7 @@ impl MockSpawner {
     pub fn complete(&self, pid: u32, outcome: EffectOutcome) -> Result<(), &'static str> {
         // Clone the Sender so the lock is released before send (avoids holding the Mutex across the
         // channel operation).
-        let tx = self
-            .completions
-            .lock()
-            .unwrap()
-            .get(&pid)
-            .cloned()
-            .ok_or("unknown pid")?;
+        let tx = self.completions.lock().unwrap().get(&pid).cloned().ok_or("unknown pid")?;
         tx.send(outcome).map_err(|_| "waiter dropped channel")
     }
 
@@ -124,29 +118,19 @@ impl MockSpawner {
     /// outcome)` a single contract: any pid returned from `take_spawns()` / `spawns()` is wired into
     /// exactly one in-flight completion channel.
     fn allocate_spawn(
-        &self,
-        argv: Vec<String>,
-        env: Vec<(String, String)>,
-        cwd: PathBuf,
+        &self, argv: Vec<String>, env: Vec<(String, String)>, cwd: PathBuf,
     ) -> (u32, Receiver<EffectOutcome>, DeadFlag) {
         let pid = self.next_pid.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = bounded::<EffectOutcome>(1);
         self.completions.lock().unwrap().insert(pid, tx);
-        self.spawns.lock().unwrap().push(SpawnRecord {
-            pid,
-            argv,
-            env,
-            cwd,
-        });
+        self.spawns.lock().unwrap().push(SpawnRecord { pid, argv, env, cwd });
         (pid, rx, DeadFlag::new())
     }
 
     /// Owned `Vec<(String, String)>` mirror of the spawner's borrowed env slice. Shared by
     /// [`Self::spawn`] and [`Self::spawn_pipe`] so the recorded env shape is stable.
     fn env_to_owned(env: &[EnvVar<'_>]) -> Vec<(String, String)> {
-        env.iter()
-            .map(|e| (e.key.to_owned(), e.value.as_ref().to_owned()))
-            .collect()
+        env.iter().map(|e| (e.key.to_owned(), e.value.as_ref().to_owned())).collect()
     }
 }
 
@@ -162,15 +146,8 @@ impl Spawner for MockSpawner {
             self.allocate_spawn(argv.to_vec(), Self::env_to_owned(env), cwd.to_owned());
         Ok(SpawnHandles {
             pid,
-            waiter: Box::new(MockChildWaiter {
-                rx,
-                dead: dead.clone(),
-            }),
-            signaler: Arc::new(MockChildSignaler {
-                pid,
-                dead,
-                signals: Arc::clone(&self.signals),
-            }),
+            waiter: Box::new(MockChildWaiter { rx, dead: dead.clone() }),
+            signaler: Arc::new(MockChildSignaler { pid, dead, signals: Arc::clone(&self.signals) }),
         })
     }
 
@@ -197,10 +174,7 @@ impl Spawner for MockSpawner {
                 cwd.to_owned(),
             );
             last_pid = pid;
-            stage_waiters.push(Box::new(MockChildWaiter {
-                rx,
-                dead: dead.clone(),
-            }));
+            stage_waiters.push(Box::new(MockChildWaiter { rx, dead: dead.clone() }));
             stage_signalers.push(Arc::new(MockChildSignaler {
                 pid,
                 dead,
@@ -211,19 +185,11 @@ impl Spawner for MockSpawner {
         // signaler, and the controller's `stage_signalers` handle. Tests reading
         // `handles.stage_signalers.len()` see the same shape as production.
         let stage_signalers: Arc<[Arc<dyn ChildSignaler>]> = Arc::from(stage_signalers);
-        let combined: Arc<dyn ChildSignaler> = Arc::new(crate::pipe::CombinedSignaler::new(
-            Arc::clone(&stage_signalers),
-        ));
-        let waiter: Box<dyn ChildWaiter> = Box::new(crate::pipe::PipeWaiter::new(
-            stage_waiters,
-            Arc::clone(&stage_signalers),
-        ));
-        Ok(PipeSpawnHandles {
-            last_pid,
-            waiter,
-            combined_signaler: combined,
-            stage_signalers,
-        })
+        let combined: Arc<dyn ChildSignaler> =
+            Arc::new(crate::pipe::CombinedSignaler::new(Arc::clone(&stage_signalers)));
+        let waiter: Box<dyn ChildWaiter> =
+            Box::new(crate::pipe::PipeWaiter::new(stage_waiters, Arc::clone(&stage_signalers)));
+        Ok(PipeSpawnHandles { last_pid, waiter, combined_signaler: combined, stage_signalers })
     }
 }
 
@@ -240,10 +206,7 @@ impl ChildWaiter for MockChildWaiter {
         self.dead.mark_dead();
         match result {
             Ok(o) => Ok(o),
-            Err(_) => Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "completion channel dropped",
-            )),
+            Err(_) => Err(io::Error::new(io::ErrorKind::BrokenPipe, "completion channel dropped")),
         }
     }
 }
@@ -259,30 +222,21 @@ impl ChildSignaler for MockChildSignaler {
         if self.dead.is_dead() {
             return Ok(());
         }
-        self.signals
-            .lock()
-            .unwrap()
-            .push(SignalRecord::Term(self.pid));
+        self.signals.lock().unwrap().push(SignalRecord::Term(self.pid));
         Ok(())
     }
     fn signal_kill(&self) -> io::Result<()> {
         if self.dead.is_dead() {
             return Ok(());
         }
-        self.signals
-            .lock()
-            .unwrap()
-            .push(SignalRecord::Kill(self.pid));
+        self.signals.lock().unwrap().push(SignalRecord::Kill(self.pid));
         Ok(())
     }
     fn reap_blocking(&self) -> io::Result<()> {
         if self.dead.is_dead() {
             return Ok(());
         }
-        self.signals
-            .lock()
-            .unwrap()
-            .push(SignalRecord::Reap(self.pid));
+        self.signals.lock().unwrap().push(SignalRecord::Reap(self.pid));
         self.dead.mark_dead();
         Ok(())
     }

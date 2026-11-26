@@ -38,9 +38,7 @@ fn poll_for(w: &KqueueWatcher) -> Poll {
 }
 
 fn drain_until<F: Fn(&(ResourceId, FsEvent)) -> bool>(
-    w: &mut KqueueWatcher,
-    pred: F,
-    overall: Duration,
+    w: &mut KqueueWatcher, pred: F, overall: Duration,
 ) -> Vec<(ResourceId, FsEvent)> {
     let deadline = Instant::now() + overall;
     let mut poll = poll_for(w);
@@ -131,8 +129,7 @@ fn in_place_edit_fires_content_changed_on_per_file_fd() {
         Duration::from_secs(2),
     );
     assert!(
-        out.iter()
-            .any(|(r, e)| *r == r_file && *e == FsEvent::ContentChanged),
+        out.iter().any(|(r, e)| *r == r_file && *e == FsEvent::ContentChanged),
         "per-file FD must fire ContentChanged on in-place edit; got {out:?}",
     );
 
@@ -155,8 +152,7 @@ fn in_place_edit_does_not_fire_on_dir_watch_alone() {
     let mut w = KqueueWatcher::new().unwrap();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r_dir = sm.insert(());
-    w.watch(r_dir, tmp.path(), ResourceKind::Dir, ClassSet::STRUCTURE)
-        .expect("watch dir");
+    w.watch(r_dir, tmp.path(), ResourceKind::Dir, ClassSet::STRUCTURE).expect("watch dir");
 
     // Drain any registration ack noise so the post-edit drain is clean.
     let _ = drain_for(&mut w, Duration::from_millis(100));

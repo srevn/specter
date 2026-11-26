@@ -256,12 +256,7 @@ pub(crate) enum ResolveError {
     /// on the daemon's CWD.
     Relative { source: SocketSource, path: PathBuf },
     /// An override whose byte length, plus the bind-time staging suffix, would overflow `sun_path`.
-    TooLong {
-        source: SocketSource,
-        path: PathBuf,
-        len: usize,
-        limit: usize,
-    },
+    TooLong { source: SocketSource, path: PathBuf, len: usize, limit: usize },
 }
 
 impl fmt::Display for ResolveError {
@@ -273,12 +268,7 @@ impl fmt::Display for ResolveError {
                 source.label(),
                 path.display(),
             ),
-            Self::TooLong {
-                source,
-                path,
-                len,
-                limit,
-            } => write!(
+            Self::TooLong { source, path, len, limit } => write!(
                 f,
                 "the socket path ({}) is too long: {len} bytes exceeds the {limit}-byte limit \
                  (the bind-time staging suffix is reserved): {}",
@@ -308,8 +298,7 @@ where
 /// Resolve the highest-precedence explicit override, if any. `--socket` wins over `$SPECTER_SOCK`;
 /// both run through [`validate`] so the absolute-only + length rule has one home.
 fn explicit_override<F>(
-    cli_socket: Option<&Path>,
-    getenv: &F,
+    cli_socket: Option<&Path>, getenv: &F,
 ) -> Result<Option<SocketCandidate>, ResolveError>
 where
     F: Fn(&str) -> Option<OsString>,
@@ -373,10 +362,7 @@ where
 
 /// A single-candidate cascade rooted at `dir` (head only, empty tail).
 fn single(source: SocketSource, dir: &str) -> Candidates {
-    Candidates {
-        head: candidate(source, Path::new(dir).join(SOCKET_FILE)),
-        tail: Box::new([]),
-    }
+    Candidates { head: candidate(source, Path::new(dir).join(SOCKET_FILE)), tail: Box::new([]) }
 }
 
 /// Pair a source with its path. Convention paths skip [`validate`] — they are absolute and short by
@@ -391,10 +377,7 @@ const fn candidate(source: SocketSource, path: PathBuf) -> SocketCandidate {
 /// also fits when `bind_socket_atomic` stages it.
 fn validate(path: &Path, source: SocketSource) -> Result<SocketCandidate, ResolveError> {
     if !path.is_absolute() {
-        return Err(ResolveError::Relative {
-            source,
-            path: path.to_owned(),
-        });
+        return Err(ResolveError::Relative { source, path: path.to_owned() });
     }
     let len = path.as_os_str().as_bytes().len();
     if len > MAX_SOCKET_PATH_LEN {
@@ -432,11 +415,7 @@ mod tests {
     /// Build a `getenv` closure from explicit key→value pairs; any key not listed resolves to absent.
     /// Keeps each test's environment shape visible at the call site.
     fn env_of<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<OsString> + 'a {
-        move |key| {
-            pairs
-                .iter()
-                .find_map(|(k, v)| (*k == key).then(|| OsString::from(*v)))
-        }
+        move |key| pairs.iter().find_map(|(k, v)| (*k == key).then(|| OsString::from(*v)))
     }
 
     /// Precedence ladder: `--socket` outranks `$SPECTER_SOCK` outranks the convention cascade, and
@@ -464,10 +443,7 @@ mod tests {
         );
 
         // Neither: the convention cascade, never a pin.
-        assert!(matches!(
-            resolve(None, env_of(&[])).unwrap(),
-            Resolution::Cascade(_),
-        ));
+        assert!(matches!(resolve(None, env_of(&[])).unwrap(), Resolution::Cascade(_)));
     }
 
     /// A relative override (flag or env) is a hard error tagged with its source, never a silent
@@ -475,27 +451,12 @@ mod tests {
     #[test]
     fn resolve_relative_override_is_hard_error() {
         let cli_err = resolve(Some(Path::new("relative/x.sock")), env_of(&[])).unwrap_err();
-        assert!(matches!(
-            cli_err,
-            ResolveError::Relative {
-                source: SocketSource::Cli,
-                ..
-            },
-        ));
+        assert!(matches!(cli_err, ResolveError::Relative { source: SocketSource::Cli, .. }));
         let msg = cli_err.to_string();
-        assert!(
-            msg.contains("--socket") && msg.contains("absolute"),
-            "got: {msg}",
-        );
+        assert!(msg.contains("--socket") && msg.contains("absolute"), "got: {msg}");
 
         let env_err = resolve(None, env_of(&[("SPECTER_SOCK", "rel/x.sock")])).unwrap_err();
-        assert!(matches!(
-            env_err,
-            ResolveError::Relative {
-                source: SocketSource::Env,
-                ..
-            },
-        ));
+        assert!(matches!(env_err, ResolveError::Relative { source: SocketSource::Env, .. }));
     }
 
     /// The length check reserves the bind-time staging suffix: a path at exactly the limit resolves,
@@ -513,13 +474,7 @@ mod tests {
         assert_eq!(over_limit.len(), MAX_SOCKET_PATH_LEN + 1);
         let over_err = resolve(Some(Path::new(&over_limit)), env_of(&[])).unwrap_err();
         assert!(
-            matches!(
-                over_err,
-                ResolveError::TooLong {
-                    source: SocketSource::Cli,
-                    ..
-                },
-            ),
+            matches!(over_err, ResolveError::TooLong { source: SocketSource::Cli, .. }),
             "an over-long --socket override is a source-attributed TooLong error",
         );
         assert!(
@@ -545,14 +500,8 @@ mod tests {
     fn vocab_label_and_daemon_hint() {
         assert_eq!(SocketSource::Cli.label(), "from --socket");
         assert_eq!(SocketSource::Env.label(), "from SPECTER_SOCK");
-        assert_eq!(
-            SocketSource::Cli.daemon_hint(),
-            DaemonHint::OperatorProvided
-        );
-        assert_eq!(
-            SocketSource::Env.daemon_hint(),
-            DaemonHint::OperatorProvided
-        );
+        assert_eq!(SocketSource::Cli.daemon_hint(), DaemonHint::OperatorProvided);
+        assert_eq!(SocketSource::Env.daemon_hint(), DaemonHint::OperatorProvided);
         // An operator-chosen path renders the bare creation advice and must NOT re-suggest the
         // override flag the operator just passed.
         let operator = DaemonHint::OperatorProvided.to_string();
@@ -570,14 +519,8 @@ mod tests {
         {
             assert_eq!(SocketSource::LinuxSession.label(), "session runtime");
             assert_eq!(SocketSource::LinuxSystem.label(), "system runtime");
-            assert_eq!(
-                SocketSource::LinuxSession.daemon_hint(),
-                DaemonHint::SessionRuntimeDir,
-            );
-            assert_eq!(
-                SocketSource::LinuxSystem.daemon_hint(),
-                DaemonHint::SystemdRuntimeDir,
-            );
+            assert_eq!(SocketSource::LinuxSession.daemon_hint(), DaemonHint::SessionRuntimeDir);
+            assert_eq!(SocketSource::LinuxSystem.daemon_hint(), DaemonHint::SystemdRuntimeDir);
             // A convention hint names its provisioner AND carries the override escape, so a bind
             // failure stays actionable.
             let systemd = DaemonHint::SystemdRuntimeDir.to_string();
@@ -589,10 +532,7 @@ mod tests {
         #[cfg(target_os = "macos")]
         {
             assert_eq!(SocketSource::MacosDefault.label(), "default location");
-            assert_eq!(
-                SocketSource::MacosDefault.daemon_hint(),
-                DaemonHint::OperatorProvided,
-            );
+            assert_eq!(SocketSource::MacosDefault.daemon_hint(), DaemonHint::OperatorProvided);
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
@@ -617,30 +557,17 @@ mod tests {
             panic!("absolute XDG_RUNTIME_DIR must resolve to a cascade");
         };
 
-        let order: Vec<_> = cascade
-            .clone()
-            .into_iter()
-            .map(|c| (c.source, c.path))
-            .collect();
+        let order: Vec<_> = cascade.clone().into_iter().map(|c| (c.source, c.path)).collect();
         assert_eq!(
             order,
             vec![
-                (
-                    SocketSource::LinuxSession,
-                    PathBuf::from("/run/user/1000/specter.sock"),
-                ),
-                (
-                    SocketSource::LinuxSystem,
-                    PathBuf::from("/run/specter/specter.sock"),
-                ),
+                (SocketSource::LinuxSession, PathBuf::from("/run/user/1000/specter.sock")),
+                (SocketSource::LinuxSystem, PathBuf::from("/run/specter/specter.sock")),
             ],
         );
 
         // Daemon commit == client probe head, by construction.
-        assert_eq!(
-            resolve(None, &env).unwrap().into_commit(),
-            cascade.into_iter().next().unwrap(),
-        );
+        assert_eq!(resolve(None, &env).unwrap().into_commit(), cascade.into_iter().next().unwrap());
     }
 
     /// Linux without a usable `$XDG_RUNTIME_DIR` — absent, empty, relative, or an over-long join —
@@ -653,30 +580,17 @@ mod tests {
         // system path — exactly as an absent/empty/relative dir does. Bound here so the `&str`
         // outlives the array borrow below.
         let over_long = format!("/{}", "x".repeat(SUN_MAX));
-        for unusable in [
-            None,
-            Some(""),
-            Some("relative/dir"),
-            Some(over_long.as_str()),
-        ] {
-            let pairs: Vec<(&str, &str)> = unusable
-                .map(|v| vec![("XDG_RUNTIME_DIR", v)])
-                .unwrap_or_default();
+        for unusable in [None, Some(""), Some("relative/dir"), Some(over_long.as_str())] {
+            let pairs: Vec<(&str, &str)> =
+                unusable.map(|v| vec![("XDG_RUNTIME_DIR", v)]).unwrap_or_default();
             let env = env_of(&pairs);
             let Resolution::Cascade(cascade) = resolve(None, &env).unwrap() else {
                 panic!("convention must resolve to a cascade for {unusable:?}");
             };
             let candidates: Vec<_> = cascade.into_iter().collect();
-            assert_eq!(
-                candidates.len(),
-                1,
-                "no session tail when XDG_RUNTIME_DIR is {unusable:?}",
-            );
+            assert_eq!(candidates.len(), 1, "no session tail when XDG_RUNTIME_DIR is {unusable:?}");
             assert_eq!(candidates[0].source, SocketSource::LinuxSystem);
-            assert_eq!(
-                candidates[0].path,
-                PathBuf::from("/run/specter/specter.sock"),
-            );
+            assert_eq!(candidates[0].path, PathBuf::from("/run/specter/specter.sock"));
         }
     }
 
@@ -693,10 +607,7 @@ mod tests {
         assert_eq!(candidates.len(), 1, "macOS has a single fixed location");
         assert_eq!(candidates[0].source, SocketSource::MacosDefault);
         assert_eq!(candidates[0].path, PathBuf::from("/tmp/specter.sock"));
-        assert_eq!(
-            resolve(None, &env).unwrap().into_commit(),
-            cascade.into_iter().next().unwrap(),
-        );
+        assert_eq!(resolve(None, &env).unwrap().into_commit(), cascade.into_iter().next().unwrap());
     }
 
     /// BSD convention is the fixed `/var/run/specter/specter.sock`; single candidate, commit == head.
@@ -710,13 +621,7 @@ mod tests {
         let candidates: Vec<_> = cascade.clone().into_iter().collect();
         assert_eq!(candidates.len(), 1, "BSD has a single fixed location");
         assert_eq!(candidates[0].source, SocketSource::BsdSystem);
-        assert_eq!(
-            candidates[0].path,
-            PathBuf::from("/var/run/specter/specter.sock"),
-        );
-        assert_eq!(
-            resolve(None, &env).unwrap().into_commit(),
-            cascade.into_iter().next().unwrap(),
-        );
+        assert_eq!(candidates[0].path, PathBuf::from("/var/run/specter/specter.sock"));
+        assert_eq!(resolve(None, &env).unwrap().into_commit(), cascade.into_iter().next().unwrap());
     }
 }

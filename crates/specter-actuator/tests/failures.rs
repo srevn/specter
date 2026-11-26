@@ -12,20 +12,12 @@ use std::time::Duration;
 #[test]
 fn non_existent_command_returns_failed() {
     let mut h = Harness::new(nz(2));
-    h.submit(perfile_effect(
-        1,
-        1,
-        1,
-        1,
-        vec!["/no/such/binary".into()],
-        std::env::temp_dir(),
-    ));
+    h.submit(perfile_effect(1, 1, 1, 1, vec!["/no/such/binary".into()], std::env::temp_dir()));
     let completions = h.wait_for_effect_completes(1, Duration::from_secs(2));
     match &completions[0] {
-        Input::EffectComplete(c) => assert!(matches!(
-            c.outcome,
-            EffectOutcome::Failed(Termination::Internal)
-        )),
+        Input::EffectComplete(c) => {
+            assert!(matches!(c.outcome, EffectOutcome::Failed(Termination::Internal)));
+        }
         other => panic!("expected EffectComplete::Failed; got {other:?}"),
     }
     h.shutdown();
@@ -87,10 +79,9 @@ fn nonexistent_cwd_returns_failed() {
     ));
     let completions = h.wait_for_effect_completes(1, Duration::from_secs(2));
     match &completions[0] {
-        Input::EffectComplete(c) => assert!(matches!(
-            c.outcome,
-            EffectOutcome::Failed(Termination::Internal)
-        )),
+        Input::EffectComplete(c) => {
+            assert!(matches!(c.outcome, EffectOutcome::Failed(Termination::Internal)));
+        }
         other => panic!("expected EffectComplete::Failed; got {other:?}"),
     }
     h.shutdown();
@@ -102,10 +93,9 @@ fn empty_argv_returns_failed() {
     h.submit(perfile_effect(1, 1, 1, 1, vec![], std::env::temp_dir()));
     let completions = h.wait_for_effect_completes(1, Duration::from_secs(2));
     match &completions[0] {
-        Input::EffectComplete(c) => assert!(matches!(
-            c.outcome,
-            EffectOutcome::Failed(Termination::Internal)
-        )),
+        Input::EffectComplete(c) => {
+            assert!(matches!(c.outcome, EffectOutcome::Failed(Termination::Internal)));
+        }
         other => panic!("expected Failed; got {other:?}"),
     }
     h.shutdown();

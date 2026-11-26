@@ -47,9 +47,7 @@ fn collect_fs(buf: &mut Vec<WatcherEvent>, out: &mut Vec<(ResourceId, FsEvent)>)
 
 /// Drain at least one event matching `pred` or hit `overall` deadline.
 fn drain_until<F: Fn(&(ResourceId, FsEvent)) -> bool>(
-    w: &mut InotifyWatcher,
-    pred: F,
-    overall: Duration,
+    w: &mut InotifyWatcher, pred: F, overall: Duration,
 ) -> Vec<(ResourceId, FsEvent)> {
     let deadline = Instant::now() + overall;
     let mut poll = poll_for(w);
@@ -109,8 +107,7 @@ fn rewatch_with_widened_mask_delivers_new_classes() {
 
     // First registration: CONTENT only. `IN_ATTRIB` is not installed, so chmod must not fire
     // `MetadataChanged`.
-    w.watch(r, &path, ResourceKind::File, ClassSet::CONTENT)
-        .unwrap();
+    w.watch(r, &path, ResourceKind::File, ClassSet::CONTENT).unwrap();
 
     // Drain any pending registration acks / spurious events.
     let _ = drain_for(&mut w, Duration::from_millis(100));
@@ -121,9 +118,7 @@ fn rewatch_with_widened_mask_delivers_new_classes() {
     std::fs::set_permissions(&path, perms).unwrap();
     let early = drain_for(&mut w, Duration::from_millis(300));
     assert!(
-        !early
-            .iter()
-            .any(|(rid, e)| *rid == r && *e == FsEvent::MetadataChanged),
+        !early.iter().any(|(rid, e)| *rid == r && *e == FsEvent::MetadataChanged),
         "CONTENT-only mask must not deliver MetadataChanged; got {early:?}"
     );
 
@@ -131,13 +126,7 @@ fn rewatch_with_widened_mask_delivers_new_classes() {
     // diffs cached mask vs new, and re-registers via `inotify_add_watch` with `IN_ATTRIB` now in
     // the mask. The kernel's "replace mask" semantics return the same wd for the same inode, so
     // `wd == prior.wd` and the inode-swap branch does not fire.
-    w.watch(
-        r,
-        &path,
-        ResourceKind::File,
-        ClassSet::CONTENT | ClassSet::METADATA,
-    )
-    .unwrap();
+    w.watch(r, &path, ResourceKind::File, ClassSet::CONTENT | ClassSet::METADATA).unwrap();
 
     // Now chmod fires `MetadataChanged`.
     let mut perms = std::fs::metadata(&path).unwrap().permissions();
@@ -149,8 +138,7 @@ fn rewatch_with_widened_mask_delivers_new_classes() {
         Duration::from_secs(2),
     );
     assert!(
-        post.iter()
-            .any(|(rid, e)| *rid == r && *e == FsEvent::MetadataChanged),
+        post.iter().any(|(rid, e)| *rid == r && *e == FsEvent::MetadataChanged),
         "after re-register with METADATA, chmod should fire MetadataChanged; got {post:?}"
     );
 
@@ -169,13 +157,7 @@ fn rewatch_with_narrowed_mask_drops_classes() {
     let r = sm.insert(());
 
     // First: STRUCTURE | METADATA on the dir.
-    w.watch(
-        r,
-        tmp.path(),
-        ResourceKind::Dir,
-        ClassSet::STRUCTURE | ClassSet::METADATA,
-    )
-    .unwrap();
+    w.watch(r, tmp.path(), ResourceKind::Dir, ClassSet::STRUCTURE | ClassSet::METADATA).unwrap();
     let _ = drain_for(&mut w, Duration::from_millis(100));
 
     // Verify METADATA is currently registered: chmod fires.
@@ -188,14 +170,12 @@ fn rewatch_with_narrowed_mask_drops_classes() {
         Duration::from_secs(2),
     );
     assert!(
-        pre.iter()
-            .any(|(rid, e)| *rid == r && *e == FsEvent::MetadataChanged),
+        pre.iter().any(|(rid, e)| *rid == r && *e == FsEvent::MetadataChanged),
         "pre-narrow: chmod should fire MetadataChanged; got {pre:?}"
     );
 
     // Narrow to STRUCTURE only. Re-watch path: re-registers without `IN_ATTRIB`.
-    w.watch(r, tmp.path(), ResourceKind::Dir, ClassSet::STRUCTURE)
-        .unwrap();
+    w.watch(r, tmp.path(), ResourceKind::Dir, ClassSet::STRUCTURE).unwrap();
     let _ = drain_for(&mut w, Duration::from_millis(100));
 
     // chmod again — must NOT fire MetadataChanged anymore.
@@ -204,9 +184,7 @@ fn rewatch_with_narrowed_mask_drops_classes() {
     std::fs::set_permissions(tmp.path(), perms).unwrap();
     let post = drain_for(&mut w, Duration::from_millis(300));
     assert!(
-        !post
-            .iter()
-            .any(|(rid, e)| *rid == r && *e == FsEvent::MetadataChanged),
+        !post.iter().any(|(rid, e)| *rid == r && *e == FsEvent::MetadataChanged),
         "post-narrow: METADATA dropped, chmod must not fire MetadataChanged; got {post:?}"
     );
 
@@ -218,9 +196,7 @@ fn rewatch_with_narrowed_mask_drops_classes() {
         Duration::from_secs(2),
     );
     assert!(
-        post_struct
-            .iter()
-            .any(|(rid, e)| *rid == r && *e == FsEvent::StructureChanged),
+        post_struct.iter().any(|(rid, e)| *rid == r && *e == FsEvent::StructureChanged),
         "post-narrow: STRUCTURE still active, child write should fire StructureChanged; got {post_struct:?}"
     );
 
@@ -241,11 +217,9 @@ fn rewatch_with_same_mask_preserves_registration() {
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r = sm.insert(());
 
-    w.watch(r, &path, ResourceKind::File, ClassSet::CONTENT)
-        .unwrap();
+    w.watch(r, &path, ResourceKind::File, ClassSet::CONTENT).unwrap();
     // Same mask twice: hits the cache-diff `noop` branch.
-    w.watch(r, &path, ResourceKind::File, ClassSet::CONTENT)
-        .unwrap();
+    w.watch(r, &path, ResourceKind::File, ClassSet::CONTENT).unwrap();
 
     std::fs::write(&path, "y").unwrap();
     let out = drain_until(
@@ -254,8 +228,7 @@ fn rewatch_with_same_mask_preserves_registration() {
         Duration::from_secs(2),
     );
     assert!(
-        out.iter()
-            .any(|(rid, e)| *rid == r && *e == FsEvent::ContentChanged),
+        out.iter().any(|(rid, e)| *rid == r && *e == FsEvent::ContentChanged),
         "post no-op rewatch, write should still fire ContentChanged; got {out:?}"
     );
 
@@ -313,13 +286,8 @@ fn rewatch_after_unknown_cache_with_kind_flip_installs_observed_mask() {
     // File-shape mask on the Dir. Under the fix, the slow path observes `Dir`, computes the Dir-shape
     // mask (`IN_CREATE | IN_DELETE | IN_MOVED_* | IN_ATTRIB | IN_ONLYDIR` over the identity floor),
     // and refreshes the cached kind to Dir.
-    w.watch(
-        r,
-        &anchor,
-        ResourceKind::Unknown,
-        ClassSet::STRUCTURE | ClassSet::METADATA,
-    )
-    .expect("rewatch over Unknown→Dir swap should install Dir-shape mask");
+    w.watch(r, &anchor, ResourceKind::Unknown, ClassSet::STRUCTURE | ClassSet::METADATA)
+        .expect("rewatch over Unknown→Dir swap should install Dir-shape mask");
 
     // Child file create — only fires `StructureChanged` on `r` if the install carried `IN_CREATE`
     // on the Dir wd.
@@ -330,8 +298,7 @@ fn rewatch_after_unknown_cache_with_kind_flip_installs_observed_mask() {
         Duration::from_secs(2),
     );
     assert!(
-        out.iter()
-            .any(|(rid, e)| *rid == r && *e == FsEvent::StructureChanged),
+        out.iter().any(|(rid, e)| *rid == r && *e == FsEvent::StructureChanged),
         "post Unknown→Dir rewatch, child create should fire StructureChanged \
          (proves the install mask carried IN_CREATE — i.e., the observed kind \
          drove `compute_install_mask`, not the stale Unknown cache); got {out:?}"
@@ -352,13 +319,11 @@ fn unwatch_then_watch_starts_fresh() {
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r = sm.insert(());
 
-    w.watch(r, &path, ResourceKind::File, ClassSet::CONTENT)
-        .unwrap();
+    w.watch(r, &path, ResourceKind::File, ClassSet::CONTENT).unwrap();
     w.unwatch(r);
     // Fresh watch (per-resource cache repopulated). Observable check: a subsequent write fires
     // `ContentChanged` normally.
-    w.watch(r, &path, ResourceKind::File, ClassSet::CONTENT)
-        .unwrap();
+    w.watch(r, &path, ResourceKind::File, ClassSet::CONTENT).unwrap();
 
     std::fs::write(&path, "y").unwrap();
     let out = drain_until(
@@ -367,8 +332,7 @@ fn unwatch_then_watch_starts_fresh() {
         Duration::from_secs(2),
     );
     assert!(
-        out.iter()
-            .any(|(rid, e)| *rid == r && *e == FsEvent::ContentChanged),
+        out.iter().any(|(rid, e)| *rid == r && *e == FsEvent::ContentChanged),
         "post unwatch+watch, write should fire ContentChanged; got {out:?}"
     );
 

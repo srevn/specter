@@ -42,15 +42,9 @@ impl Loader {
     /// the seeding rule stays single-source.
     #[must_use]
     pub(crate) const fn new(
-        current_config: Config,
-        current_log: LogConfig,
-        config_meta: FileMeta,
+        current_config: Config, current_log: LogConfig, config_meta: FileMeta,
     ) -> Self {
-        Self {
-            current_config,
-            current_log,
-            config_meta,
-        }
+        Self { current_config, current_log, config_meta }
     }
 
     /// Borrow the currently-applied [`Config`].

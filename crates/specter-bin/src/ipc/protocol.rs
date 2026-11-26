@@ -485,10 +485,7 @@ pub(crate) enum ShowResponse {
     /// Sub is in `engine.subs()` — the full [`SubDetails`] block.
     Active(SubDetails),
     /// Sub is operator-declared but not attached. `source` says why.
-    Disabled {
-        name: String,
-        source: DisabledSource,
-    },
+    Disabled { name: String, source: DisabledSource },
     /// Sub is not operator-declared at all (no `[[watch]]`, no runtime disable record).
     Unknown { name: String },
 }
@@ -639,18 +636,9 @@ mod tests {
     fn wire_id_round_trips_slotmap_as_ffi() {
         let raw: u64 = 0x1234_5678_9abc_def0;
         let canonical = KeyData::from_ffi(raw).as_ffi();
-        assert_eq!(
-            WireId::from(SubId::from(KeyData::from_ffi(raw))).0,
-            canonical
-        );
-        assert_eq!(
-            WireId::from(ProfileId::from(KeyData::from_ffi(raw))).0,
-            canonical
-        );
-        assert_eq!(
-            WireId::from(ResourceId::from(KeyData::from_ffi(raw))).0,
-            canonical
-        );
+        assert_eq!(WireId::from(SubId::from(KeyData::from_ffi(raw))).0, canonical);
+        assert_eq!(WireId::from(ProfileId::from(KeyData::from_ffi(raw))).0, canonical);
+        assert_eq!(WireId::from(ResourceId::from(KeyData::from_ffi(raw))).0, canonical);
     }
 
     /// `WireRequest` deserializes the unit-shaped verbs, the name-bearing struct variants, and the
@@ -700,13 +688,7 @@ mod tests {
         }
         let again = serde_json::to_string(&parsed).unwrap();
         let reparsed: WireRequest = serde_json::from_str(&again).unwrap();
-        assert!(matches!(
-            reparsed,
-            WireRequest::Absorb {
-                duration_ms: None,
-                ..
-            }
-        ));
+        assert!(matches!(reparsed, WireRequest::Absorb { duration_ms: None, .. }));
 
         // Explicit duration_ms ⇒ Some(n), preserved across the cycle.
         let some = WireRequest::Absorb {
@@ -748,10 +730,9 @@ mod tests {
         // Baseline: bare serde silently accepts the typo, dropping `names`.
         let lenient: WireRequest = serde_json::from_slice(bytes).expect("bare parse succeeds");
         match lenient {
-            WireRequest::Subscribe { name } => assert_eq!(
-                name, None,
-                "bare parse silently drops the typoed `names` key",
-            ),
+            WireRequest::Subscribe { name } => {
+                assert_eq!(name, None, "bare parse silently drops the typoed `names` key");
+            }
             other => panic!("expected Subscribe, got {other:?}"),
         }
         // Boundary: strict parse rejects.
@@ -793,10 +774,7 @@ mod tests {
             error: "no watch named foo".into(),
         })
         .unwrap();
-        assert_eq!(
-            err,
-            r#"{"kind":"err","code":"unknown_sub","error":"no watch named foo"}"#
-        );
+        assert_eq!(err, r#"{"kind":"err","code":"unknown_sub","error":"no watch named foo"}"#);
 
         let round_trip: ResponsePayload = serde_json::from_str(&err).unwrap();
         match round_trip {
@@ -810,10 +788,8 @@ mod tests {
         let ack = serde_json::to_string(&ResponsePayload::SubscribeAck { sub: None }).unwrap();
         assert_eq!(ack, r#"{"kind":"subscribe_ack","sub":null}"#);
 
-        let ack_some = serde_json::to_string(&ResponsePayload::SubscribeAck {
-            sub: Some(WireId(7)),
-        })
-        .unwrap();
+        let ack_some =
+            serde_json::to_string(&ResponsePayload::SubscribeAck { sub: Some(WireId(7)) }).unwrap();
         assert_eq!(ack_some, r#"{"kind":"subscribe_ack","sub":7}"#);
 
         let disabled = serde_json::to_string(&DisabledSource::Runtime).unwrap();
@@ -842,11 +818,7 @@ mod tests {
                 "JSON form ({json}) must equal as_str() ({}) for {code:?}",
                 code.as_str(),
             );
-            assert_eq!(
-                code.to_string(),
-                code.as_str(),
-                "Display must write as_str() for {code:?}",
-            );
+            assert_eq!(code.to_string(), code.as_str(), "Display must write as_str() for {code:?}");
             let round_trip: WireErrorCode =
                 serde_json::from_str(&json).expect("deserialize wire form");
             assert_eq!(round_trip, code);
@@ -879,11 +851,7 @@ mod tests {
                 .and_then(|s| s.strip_suffix('"'))
                 .expect("JSON form is a bare quoted token");
             assert_eq!(stripped, src.as_str(), "JSON form must equal as_str()");
-            assert_eq!(
-                src.to_string(),
-                src.as_str(),
-                "Display must write as_str() for {src:?}",
-            );
+            assert_eq!(src.to_string(), src.as_str(), "Display must write as_str() for {src:?}");
             let back: DisabledSource = serde_json::from_str(&json).expect("deserialize wire form");
             assert_eq!(back, src);
         }
@@ -901,25 +869,13 @@ mod tests {
             via: WireReloadTrigger::Sighup,
         }));
         let json = serde_json::to_value(&with).expect("serialize");
-        assert!(
-            json.get("last_reload_at").is_some(),
-            "Some inlines last_reload_at: {json}",
-        );
-        assert!(
-            json.get("last_reload_via").is_some(),
-            "Some inlines last_reload_via: {json}",
-        );
-        assert!(
-            json.get("last_reload").is_none(),
-            "no wrapper key appears: {json}",
-        );
+        assert!(json.get("last_reload_at").is_some(), "Some inlines last_reload_at: {json}");
+        assert!(json.get("last_reload_via").is_some(), "Some inlines last_reload_via: {json}");
+        assert!(json.get("last_reload").is_none(), "no wrapper key appears: {json}");
 
         let without = sample_status(None);
         let json = serde_json::to_value(&without).expect("serialize");
-        assert!(
-            json.get("last_reload_at").is_none(),
-            "None omits last_reload_at entirely: {json}",
-        );
+        assert!(json.get("last_reload_at").is_none(), "None omits last_reload_at entirely: {json}");
         assert!(
             json.get("last_reload_via").is_none(),
             "None omits last_reload_via entirely: {json}",
@@ -938,10 +894,7 @@ mod tests {
         }));
         let json = serde_json::to_string(&original).expect("serialize");
         let parsed: StatusResponse = serde_json::from_str(&json).expect("deserialize");
-        let lr = parsed
-            .last_reload
-            .as_ref()
-            .expect("Some on the round-trip side too");
+        let lr = parsed.last_reload.as_ref().expect("Some on the round-trip side too");
         assert_eq!(lr.via, WireReloadTrigger::Ipc);
         assert_eq!(lr, original.last_reload.as_ref().expect("Some originally"));
     }
@@ -970,10 +923,7 @@ mod tests {
         // a serde-flatten property, not a load-bearing wire invariant.
         let parsed: StatusResponse =
             serde_json::from_slice(&at_only).expect("bare serde tolerates partial flatten");
-        assert!(
-            parsed.last_reload.is_none(),
-            "bare serde collapses partial flatten to None",
-        );
+        assert!(parsed.last_reload.is_none(), "bare serde collapses partial flatten to None");
 
         // Layer 2 — `parse_strict` catches it. The boundary gate every client response read routes
         // through reports the orphan key as `unknown field` because the parsed `StatusResponse`
@@ -1024,16 +974,10 @@ mod tests {
             (Some(3), Some(1)),
             "spawn payload inlines its bare keys, its absorb facts among them: {json}",
         );
-        assert!(
-            json.get("minted_live").is_none(),
-            "spawn carries no mint keys: {json}",
-        );
+        assert!(json.get("minted_live").is_none(), "spawn carries no mint keys: {json}");
         let bytes = serde_json::to_vec(&spawn).expect("serialize");
         let back: SubDetails = parse_strict(&bytes).expect("flattened spawn round-trips");
-        assert!(matches!(
-            back.reaction,
-            WireReaction::Spawn { fire_count: 3, .. }
-        ));
+        assert!(matches!(back.reaction, WireReaction::Spawn { fire_count: 3, .. }));
 
         let mint = sample_details(WireReaction::Mint {
             minted_settle_ms: 500,
@@ -1060,8 +1004,7 @@ mod tests {
             "the Sub's own settle stays top-level: {json}",
         );
         assert_eq!(
-            json.get("minted_settle_ms")
-                .and_then(serde_json::Value::as_u64),
+            json.get("minted_settle_ms").and_then(serde_json::Value::as_u64),
             Some(500),
             "the template knob lands prefixed beside it: {json}",
         );
@@ -1082,10 +1025,7 @@ mod tests {
         );
         let bytes = serde_json::to_vec(&mint).expect("serialize");
         let back: SubDetails = parse_strict(&bytes).expect("flattened mint round-trips");
-        assert!(matches!(
-            back.reaction,
-            WireReaction::Mint { minted_live: 2, .. }
-        ));
+        assert!(matches!(back.reaction, WireReaction::Mint { minted_live: 2, .. }));
     }
 
     /// A cross-variant stray key — a `mint` payload key on a `spawn` row — fails the strict boundary

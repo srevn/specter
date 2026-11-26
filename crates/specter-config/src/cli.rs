@@ -13,18 +13,11 @@ const HEADING: Style = AnsiColor::Yellow.on_default().bold();
 const LITERAL: Style = AnsiColor::Cyan.on_default().bold();
 const PLACEHOLDER: Style = AnsiColor::Green.on_default();
 
-const STYLES: Styles = Styles::styled()
-    .header(HEADING)
-    .usage(HEADING)
-    .literal(LITERAL)
-    .placeholder(PLACEHOLDER);
+const STYLES: Styles =
+    Styles::styled().header(HEADING).usage(HEADING).literal(LITERAL).placeholder(PLACEHOLDER);
 
 fn banner() -> String {
-    format!(
-        "{}specter{} — prove the absence of change",
-        LITERAL.render(),
-        LITERAL.render_reset(),
-    )
+    format!("{}specter{} — prove the absence of change", LITERAL.render(), LITERAL.render_reset())
 }
 
 /// `specter run` is the daemon; every other verb is a client of a running daemon, over its UNIX
@@ -348,16 +341,10 @@ mod tests {
         .unwrap();
         let args = run_args(cli);
         assert_eq!(args.config, std::path::Path::new("/etc/specter.toml"));
-        assert_eq!(
-            args.socket.as_deref(),
-            Some(std::path::Path::new("/run/specter/specter.sock"))
-        );
+        assert_eq!(args.socket.as_deref(), Some(std::path::Path::new("/run/specter/specter.sock")));
         assert_eq!(args.log_level, Some(LogLevel::Debug));
         assert_eq!(args.log_destination, Some(LogDestination::Stderr));
-        assert_eq!(
-            args.log_path.as_deref(),
-            Some(std::path::Path::new("/var/log/specter.log"))
-        );
+        assert_eq!(args.log_path.as_deref(), Some(std::path::Path::new("/var/log/specter.log")));
         assert_eq!(args.concurrency, NonZeroUsize::new(8));
         assert_eq!(args.probe_concurrency, NonZeroUsize::new(16));
         assert!(args.no_config_watch);
@@ -392,24 +379,13 @@ mod tests {
     #[test]
     fn no_subcommand_shows_help() {
         let err = parse(&["specter"]).unwrap_err();
-        assert_eq!(
-            err.kind(),
-            clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand,
-        );
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand);
     }
 
     #[test]
     fn status_parses_with_wide_and_output() {
-        let cli = parse(&[
-            "specter",
-            "status",
-            "--socket",
-            "/tmp/s.sock",
-            "-o",
-            "json",
-            "--wide",
-        ])
-        .unwrap();
+        let cli = parse(&["specter", "status", "--socket", "/tmp/s.sock", "-o", "json", "--wide"])
+            .unwrap();
         match cli.command {
             Command::Status(args) => {
                 assert_eq!(
@@ -425,16 +401,8 @@ mod tests {
 
     #[test]
     fn list_parses_with_wide_and_output() {
-        let cli = parse(&[
-            "specter",
-            "list",
-            "--socket",
-            "/tmp/s.sock",
-            "-o",
-            "json",
-            "--wide",
-        ])
-        .unwrap();
+        let cli =
+            parse(&["specter", "list", "--socket", "/tmp/s.sock", "-o", "json", "--wide"]).unwrap();
         match cli.command {
             Command::List(args) => {
                 assert_eq!(
@@ -456,16 +424,9 @@ mod tests {
 
     #[test]
     fn wait_parses_kind_and_timeout() {
-        let cli = parse(&[
-            "specter",
-            "wait",
-            "my-watch",
-            "--kind",
-            "detach",
-            "--timeout",
-            "1500ms",
-        ])
-        .unwrap();
+        let cli =
+            parse(&["specter", "wait", "my-watch", "--kind", "detach", "--timeout", "1500ms"])
+                .unwrap();
         match cli.command {
             Command::Wait(args) => {
                 assert_eq!(args.name, "my-watch");
@@ -515,15 +476,8 @@ mod tests {
 
     #[test]
     fn tail_collects_repeated_filter() {
-        let cli = parse(&[
-            "specter",
-            "tail",
-            "--filter",
-            "SubFired",
-            "--filter",
-            "SubDetached",
-        ])
-        .unwrap();
+        let cli =
+            parse(&["specter", "tail", "--filter", "SubFired", "--filter", "SubDetached"]).unwrap();
         match cli.command {
             Command::Tail(args) => {
                 assert_eq!(args.filter, vec!["SubFired", "SubDetached"]);

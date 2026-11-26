@@ -53,13 +53,7 @@ impl Engine {
         };
         p.install_anchor_claim_held();
         let (resource, events) = (p.resource(), p.events());
-        add_watch(
-            &mut self.tree,
-            resource,
-            ContribKey::ProfileAnchor(pid),
-            events,
-            out,
-        );
+        add_watch(&mut self.tree, resource, ContribKey::ProfileAnchor(pid), events, out);
     }
 
     /// Release the Profile's anchor claim if held. Idempotent (flag already `None` ⇒ no-op). Safe
@@ -77,12 +71,7 @@ impl Engine {
         };
         p.release_anchor_claim_now();
         let resource = p.resource();
-        sub_watch(
-            &mut self.tree,
-            resource,
-            ContribKey::ProfileAnchor(pid),
-            out,
-        );
+        sub_watch(&mut self.tree, resource, ContribKey::ProfileAnchor(pid), out);
     }
 
     /// Install the Profile's watch-root parent claim: a [`ContribKey::ProfileParent`] contribution
@@ -127,15 +116,8 @@ impl Engine {
             return;
         }
         p.set_watch_root_parent(parent);
-        self.tree
-            .promote_scaffold(parent, ResourceRole::WatchRootParent);
-        add_watch(
-            &mut self.tree,
-            parent,
-            ContribKey::ProfileParent(pid),
-            ClassSet::STRUCTURE,
-            out,
-        );
+        self.tree.promote_scaffold(parent, ResourceRole::WatchRootParent);
+        add_watch(&mut self.tree, parent, ContribKey::ProfileParent(pid), ClassSet::STRUCTURE, out);
     }
 
     /// Release the Profile's watch-root parent contribution if held. Idempotent; safe in any
@@ -148,10 +130,8 @@ impl Engine {
     /// parent in that same step.
     pub(crate) fn release_watch_root_parent_claim(&mut self, pid: ProfileId, out: &mut StepOutput) {
         // `take_watch_root_parent` reads and clears the cached id in one move, under one `get_mut`.
-        let Some(parent) = self
-            .profiles
-            .get_mut(pid)
-            .and_then(specter_core::Profile::take_watch_root_parent)
+        let Some(parent) =
+            self.profiles.get_mut(pid).and_then(specter_core::Profile::take_watch_root_parent)
         else {
             return;
         };
@@ -180,10 +160,7 @@ impl Engine {
     /// in every build — its orphaned correlation would otherwise stale-detect its own response. The
     /// discard *is* the enforcement site; no local witness is needed.
     pub(crate) fn release_descent_prefix_claim(
-        &mut self,
-        pid: ProfileId,
-        narration: ParkNarration,
-        out: &mut StepOutput,
+        &mut self, pid: ProfileId, narration: ParkNarration, out: &mut StepOutput,
     ) {
         let Some(prefix) = self.descent_state(pid).map(DescentState::current_prefix) else {
             return;
@@ -221,10 +198,7 @@ impl Engine {
     pub(crate) fn release_descendant_claim(&mut self, pid: ProfileId, out: &mut StepOutput) {
         // Take the snapshot atomically. Idempotent: subsequent calls find `None` and short-circuit
         // without further work.
-        let taken = self
-            .profiles
-            .get_mut(pid)
-            .and_then(specter_core::Profile::take_current);
+        let taken = self.profiles.get_mut(pid).and_then(specter_core::Profile::take_current);
         let Some(snapshot) = taken else {
             return;
         };
@@ -446,10 +420,7 @@ mod tests {
     /// Verifying-first contract puts the probe in flight at burst construction, so this helper
     /// answers it directly — no settle expiry step.
     fn drive_fresh_seed_to_idle(
-        e: &mut Engine,
-        pid: ProfileId,
-        snap: Arc<DirSnapshot>,
-        t0: Instant,
+        e: &mut Engine, pid: ProfileId, snap: Arc<DirSnapshot>, t0: Instant,
     ) {
         let corr = e
             .pending_probe_for(pid)
@@ -466,10 +437,7 @@ mod tests {
             t0 + SETTLE,
         );
         assert!(
-            matches!(
-                e.profiles().get(pid).unwrap().state(),
-                specter_core::ProfileState::Idle
-            ),
+            matches!(e.profiles().get(pid).unwrap().state(), specter_core::ProfileState::Idle),
             "two settle-spaced equal Seed samples pin the baseline → Idle",
         );
     }
@@ -483,10 +451,8 @@ mod tests {
         let mut e = Engine::new();
         let parent = e.tree_mut().ensure_root("var", ResourceRole::User);
         e.tree_mut().set_kind(parent, ResourceKind::Dir);
-        let anchor = e
-            .tree_mut()
-            .ensure_child(parent, "log", ResourceRole::User)
-            .expect("test live parent");
+        let anchor =
+            e.tree_mut().ensure_child(parent, "log", ResourceRole::User).expect("test live parent");
         e.tree_mut().set_kind(anchor, ResourceKind::Dir);
 
         let req = SubAttachRequest::for_anchor(
@@ -539,10 +505,7 @@ mod tests {
     #[test]
     fn discard_anchor_state_preserves_watch_root_parent() {
         let (mut e, _sid, pid, _anchor, parent) = engine_with_materialised_profile(ClassSet::EMPTY);
-        assert_eq!(
-            e.profiles().get(pid).unwrap().watch_root_parent(),
-            Some(parent),
-        );
+        assert_eq!(e.profiles().get(pid).unwrap().watch_root_parent(), Some(parent));
 
         let mut out = StepOutput::default();
         e.discard_anchor_state(pid, &mut out);
@@ -621,10 +584,7 @@ mod tests {
         let mut out = StepOutput::default();
         e.discard_anchor_state(pid, &mut out);
         let witness_after_first = e.profiles().get(pid).unwrap().settled_hash();
-        assert!(
-            witness_after_first.is_some(),
-            "first discard captures the survival witness",
-        );
+        assert!(witness_after_first.is_some(), "first discard captures the survival witness");
 
         let mut out2 = StepOutput::default();
         e.discard_anchor_state(pid, &mut out2);
@@ -646,12 +606,7 @@ mod tests {
 
         let snap_after_first = {
             let p = e.profiles().get(pid).expect("Profile lives");
-            (
-                p.kind(),
-                p.baseline().is_some(),
-                p.current().is_some(),
-                p.anchor_claim(),
-            )
+            (p.kind(), p.baseline().is_some(), p.current().is_some(), p.anchor_claim())
         };
 
         let mut out2 = StepOutput::default();
@@ -659,12 +614,7 @@ mod tests {
 
         let snap_after_second = {
             let p = e.profiles().get(pid).expect("Profile lives");
-            (
-                p.kind(),
-                p.baseline().is_some(),
-                p.current().is_some(),
-                p.anchor_claim(),
-            )
+            (p.kind(), p.baseline().is_some(), p.current().is_some(), p.anchor_claim())
         };
 
         assert_eq!(
@@ -693,9 +643,7 @@ mod tests {
         let mut vacate_out = StepOutput::default();
         e.tree_mut().vacate(anchor, &mut vacate_out);
         assert_eq!(
-            e.tree()
-                .get(anchor)
-                .map_or(0, specter_core::Resource::watch_demand),
+            e.tree().get(anchor).map_or(0, specter_core::Resource::watch_demand),
             0,
             "vacate zeroed the counter",
         );
@@ -728,21 +676,9 @@ mod tests {
         let mut out = StepOutput::default();
         e.discard_anchor_state(pid, &mut out);
 
-        assert!(
-            out.watch_ops.is_empty(),
-            "no watch ops; got {:?}",
-            out.watch_ops
-        );
-        assert!(
-            out.probe_ops().is_empty(),
-            "no probe ops; got {:?}",
-            out.probe_ops()
-        );
-        assert!(
-            out.diagnostics.is_empty(),
-            "no diagnostics; got {:?}",
-            out.diagnostics,
-        );
+        assert!(out.watch_ops.is_empty(), "no watch ops; got {:?}", out.watch_ops);
+        assert!(out.probe_ops().is_empty(), "no probe ops; got {:?}", out.probe_ops());
+        assert!(out.diagnostics.is_empty(), "no diagnostics; got {:?}", out.diagnostics);
         assert!(out.effects().is_empty());
     }
 
@@ -764,11 +700,7 @@ mod tests {
 
         let p = e.profiles().get(pid).expect("Profile lives");
         assert_eq!(p.events(), events_before, "events_union invariant");
-        assert_eq!(
-            p.has_per_file_fds(),
-            fds_before,
-            "has_per_file_fds invariant"
-        );
+        assert_eq!(p.has_per_file_fds(), fds_before, "has_per_file_fds invariant");
     }
 
     #[test]
@@ -794,19 +726,12 @@ mod tests {
         let sid =
             specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
         let pid = e.subs().get(sid).unwrap().profile();
-        drive_fresh_seed_to_idle(
-            &mut e,
-            pid,
-            dir_snap(vec![("nested", EntryKind::Dir, 1)]),
-            t0,
-        );
+        drive_fresh_seed_to_idle(&mut e, pid, dir_snap(vec![("nested", EntryKind::Dir, 1)]), t0);
 
         // Confirm the child slot is materialised + watched.
         let nested_id = e.tree().lookup(Some(anchor), "nested").expect("child slot");
         assert!(
-            e.tree()
-                .get(nested_id)
-                .is_some_and(|r| r.watch_demand() >= 1),
+            e.tree().get(nested_id).is_some_and(|r| r.watch_demand() >= 1),
             "child watch_demand bumped by graft",
         );
 
@@ -815,14 +740,8 @@ mod tests {
 
         // Child's contribution from this Profile released; the slot may even have been reaped if no
         // other claimers remain. Either way, its watch_demand drops to 0.
-        let child_demand = e
-            .tree()
-            .get(nested_id)
-            .map_or(0, specter_core::Resource::watch_demand);
-        assert_eq!(
-            child_demand, 0,
-            "descendant contribution released after discard_anchor_state",
-        );
+        let child_demand = e.tree().get(nested_id).map_or(0, specter_core::Resource::watch_demand);
+        assert_eq!(child_demand, 0, "descendant contribution released after discard_anchor_state");
         let _ = sid;
     }
 
@@ -878,10 +797,7 @@ mod tests {
 
         // FsEvent at the anchor opens a Standard burst (Idle → Active).
         e.step(
-            Input::FsEvent {
-                resource: anchor,
-                event: specter_core::FsEvent::StructureChanged,
-            },
+            Input::FsEvent { resource: anchor, event: specter_core::FsEvent::StructureChanged },
             Instant::now(),
         );
 
@@ -889,10 +805,7 @@ mod tests {
         // dirty / force-walk accumulator. This is the per-event state the deleted global suppress
         // filter used to poison for a co-resident Profile; assert it concretely.
         e.step(
-            Input::FsEvent {
-                resource: b_id,
-                event: specter_core::FsEvent::StructureChanged,
-            },
+            Input::FsEvent { resource: b_id, event: specter_core::FsEvent::StructureChanged },
             Instant::now(),
         );
         {
@@ -927,10 +840,7 @@ mod tests {
         );
 
         // Clean reap: the single-contributor descendant slot is gone.
-        assert!(
-            e.tree().get(b_id).is_none(),
-            "descendant b reaped after delete_child + try_reap",
-        );
+        assert!(e.tree().get(b_id).is_none(), "descendant b reaped after delete_child + try_reap");
 
         // The kernel-watch protocol stays balanced through the single-protocol vacate terminus:
         // exactly one Unwatch(b), no other op references the reaped descendant.
@@ -969,11 +879,7 @@ mod tests {
         let (mut e, _sid, pid, anchor, _parent) =
             engine_with_materialised_profile(ClassSet::CONTENT);
         let claim = |e: &Engine| e.profiles().get(pid).unwrap().anchor_claim();
-        assert_eq!(
-            claim(&e),
-            AnchorClaim::Held,
-            "fixture materialised the anchor"
-        );
+        assert_eq!(claim(&e), AnchorClaim::Held, "fixture materialised the anchor");
 
         let mut out = StepOutput::default();
         e.release_anchor_claim(pid, &mut out);
@@ -983,35 +889,19 @@ mod tests {
         let mut out = StepOutput::default();
         e.release_anchor_claim(pid, &mut out);
         assert_eq!(claim(&e), AnchorClaim::None, "a second release stays None");
-        assert!(
-            out.watch_ops.is_empty(),
-            "a second release emits nothing: {:?}",
-            out.watch_ops
-        );
+        assert!(out.watch_ops.is_empty(), "a second release emits nothing: {:?}", out.watch_ops);
 
         let mut out = StepOutput::default();
         e.install_anchor_claim(pid, &mut out);
         assert_eq!(claim(&e), AnchorClaim::Held, "install flips None → Held");
         let slot = e.tree().get(anchor).unwrap();
-        assert_eq!(
-            slot.watch_demand(),
-            1,
-            "install adds the contribution with the flag"
-        );
-        assert_eq!(
-            slot.events_union(),
-            ClassSet::CONTENT,
-            "at the Profile's mask"
-        );
+        assert_eq!(slot.watch_demand(), 1, "install adds the contribution with the flag");
+        assert_eq!(slot.events_union(), ClassSet::CONTENT, "at the Profile's mask");
 
         let mut out = StepOutput::default();
         e.install_anchor_claim(pid, &mut out);
         assert_eq!(e.tree().get(anchor).unwrap().watch_demand(), 1);
-        assert!(
-            out.watch_ops.is_empty(),
-            "a second install emits nothing: {:?}",
-            out.watch_ops
-        );
+        assert!(out.watch_ops.is_empty(), "a second install emits nothing: {:?}", out.watch_ops);
     }
 
     /// A recovery descent's terminus re-installs the watch-root parent claim on a Profile whose claim
@@ -1020,10 +910,7 @@ mod tests {
     #[test]
     fn watch_root_parent_claim_install_is_idempotent_across_recovery() {
         let (mut e, _sid, pid, _anchor, parent) = engine_with_materialised_profile(ClassSet::EMPTY);
-        assert_eq!(
-            e.profiles().get(pid).unwrap().watch_root_parent(),
-            Some(parent)
-        );
+        assert_eq!(e.profiles().get(pid).unwrap().watch_root_parent(), Some(parent));
         assert_eq!(e.tree().get(parent).unwrap().watch_demand(), 1);
 
         let mut out = StepOutput::default();
@@ -1033,10 +920,6 @@ mod tests {
             1,
             "no second bump on the cached parent",
         );
-        assert!(
-            out.watch_ops.is_empty(),
-            "no Watch op re-emitted: {:?}",
-            out.watch_ops
-        );
+        assert!(out.watch_ops.is_empty(), "no Watch op re-emitted: {:?}", out.watch_ops);
     }
 }

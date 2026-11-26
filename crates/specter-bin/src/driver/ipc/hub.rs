@@ -169,8 +169,7 @@ impl Hub {
     /// Propagates [`io::Error`] from `set_nonblocking` or the listener registration — both are
     /// programmer-error or kernel-pressure failures. The caller treats any error as startup-fatal.
     pub(crate) fn new(
-        listener: std::os::unix::net::UnixListener,
-        registry: Registry,
+        listener: std::os::unix::net::UnixListener, registry: Registry,
     ) -> io::Result<Self> {
         // Listener: must be non-blocking before mio observes it (mio's `from_std` does not set the
         // flag), or the next `accept()` would block the reactor thread on an empty listen queue.
@@ -181,12 +180,7 @@ impl Hub {
             super::super::reactor::TOKEN_LISTENER,
             Interest::READABLE,
         )?;
-        Ok(Self {
-            listener,
-            conns: BTreeMap::new(),
-            registry,
-            next_conn_token: TOKEN_CONN_BASE,
-        })
+        Ok(Self { listener, conns: BTreeMap::new(), registry, next_conn_token: TOKEN_CONN_BASE })
     }
 
     /// Accept every pending connection in this tick, bounded above by `MAX_IPC_CONNS * 2` iterations
@@ -257,8 +251,7 @@ impl Hub {
                     }
                     let token = self.allocate_conn_token();
                     let mut conn = ConnState::new(stream, token);
-                    self.registry
-                        .register(&mut conn.stream, token, Interest::READABLE)?;
+                    self.registry.register(&mut conn.stream, token, Interest::READABLE)?;
                     self.conns.insert(token, conn);
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(()),
@@ -331,11 +324,7 @@ impl Hub {
     /// the cost is one `O(MAX_IPC_CONNS)` discriminator walk before bailing, well below the
     /// `WireDiagnostic::from` + `encode_line` build it stands in front of.
     pub(in crate::driver) fn dispatch_to_subscribers(
-        &mut self,
-        diag: &Diagnostic,
-        at: SystemTime,
-        wire_at: &WireTime,
-        about: Option<DiagSub>,
+        &mut self, diag: &Diagnostic, at: SystemTime, wire_at: &WireTime, about: Option<DiagSub>,
     ) {
         if !self.has_any_subscriber() {
             return;
@@ -363,9 +352,7 @@ impl Hub {
     /// [`Self::dispatch_to_subscribers`] retains the same predicate as a defensive inner
     /// short-circuit; the accessor keeps the rule single-source so the two surfaces cannot drift.
     pub(in crate::driver) fn has_any_subscriber(&self) -> bool {
-        self.conns
-            .values()
-            .any(|c| matches!(c.role, ConnRole::Sub { .. }))
+        self.conns.values().any(|c| matches!(c.role, ConnRole::Sub { .. }))
     }
 
     /// Borrow a per-conn state mutably by [`Token`]. Returns `None` if the conn closed between the
@@ -424,16 +411,11 @@ impl Hub {
     /// All transport-level read failures map to `Ok(ReadOutcome::PeerGone)` so the caller's terminate
     /// path is uniform.
     pub(in crate::driver) fn read_conn_into_lines(
-        &mut self,
-        token: Token,
-        out: &mut Vec<Vec<u8>>,
+        &mut self, token: Token, out: &mut Vec<Vec<u8>>,
     ) -> io::Result<ReadOutcome> {
         use std::io::Read;
         let conn = self.conns.get_mut(&token).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("ipc read: no conn for {token:?}"),
-            )
+            io::Error::new(io::ErrorKind::NotFound, format!("ipc read: no conn for {token:?}"))
         })?;
         let mut buf = [0u8; 4096];
         let mut peer_gone = false;
@@ -477,11 +459,7 @@ impl Hub {
             );
             conn.arm_close_after_flush();
         }
-        Ok(if peer_gone {
-            ReadOutcome::PeerGone
-        } else {
-            ReadOutcome::Continue
-        })
+        Ok(if peer_gone { ReadOutcome::PeerGone } else { ReadOutcome::Continue })
     }
 
     /// Serialize a response value and append the JSON line to the conn's write_queue (the trailing
@@ -510,9 +488,7 @@ impl Hub {
     /// tree, so the wrapper's `expect` lives at the contract source in [`crate::ipc::framing`] rather
     /// than scattered as one-off `.expect("…")` strings at every enqueue arm.
     pub(in crate::driver) fn enqueue_response<T: InfallibleSerialize>(
-        &mut self,
-        token: Token,
-        response: &T,
+        &mut self, token: Token, response: &T,
     ) -> EnqueueOutcome {
         let bytes = encode_line(response);
         // Scope the conn borrow so the post-push reaches into &mut self cleanly on the Refused arm.
@@ -578,10 +554,8 @@ impl Hub {
     /// Termination needs the cloned [`Registry`] to deregister the stream, which is why this lives
     /// on Hub rather than on `ConnState`.
     pub(in crate::driver) fn try_terminate_if_idle(&mut self, token: Token) -> bool {
-        let should_terminate = self
-            .conns
-            .get(&token)
-            .is_some_and(|c| c.close_after_flush && c.write_queue.is_empty());
+        let should_terminate =
+            self.conns.get(&token).is_some_and(|c| c.close_after_flush && c.write_queue.is_empty());
         if should_terminate {
             self.terminate_conn(token);
         }
@@ -639,10 +613,7 @@ impl Hub {
             if conn.close_after_flush {
                 return DrainWritableOutcome::Terminate;
             }
-            if let Err(e) = self
-                .registry
-                .reregister(&mut conn.stream, token, Interest::READABLE)
-            {
+            if let Err(e) = self.registry.reregister(&mut conn.stream, token, Interest::READABLE) {
                 tracing::debug!(?token, ?e, "ipc reregister-to-READABLE failed; closing");
                 return DrainWritableOutcome::Terminate;
             }
@@ -669,11 +640,7 @@ impl Hub {
             return;
         };
         if let Err(e) = self.registry.deregister(&mut conn.stream) {
-            tracing::debug!(
-                ?token,
-                ?e,
-                "ipc deregister failed (fd likely already closed)"
-            );
+            tracing::debug!(?token, ?e, "ipc deregister failed (fd likely already closed)");
         }
         // `conn` drops here — `ConnState::stream`'s Drop closes the fd; the read/write buffers drop
         // their allocations.
@@ -752,9 +719,7 @@ impl Hub {
             .conns
             .get_mut(&token)
             .expect("force_deregister_conn_for_test: token must be in map");
-        self.registry
-            .deregister(&mut conn.stream)
-            .expect("test: deregister against live Poll");
+        self.registry.deregister(&mut conn.stream).expect("test: deregister against live Poll");
     }
 }
 

@@ -37,9 +37,7 @@ struct TestEngineIn(Sender<Input>);
 
 impl EffectCompleteSender for TestEngineIn {
     fn send(&self, completion: EffectCompletion) -> Result<(), ActSendError> {
-        self.0
-            .send(Input::EffectComplete(completion))
-            .map_err(|_| ActSendError::Disconnected)
+        self.0.send(Input::EffectComplete(completion)).map_err(|_| ActSendError::Disconnected)
     }
 }
 
@@ -94,12 +92,7 @@ impl Harness {
                 let spawner = Arc::new(OsSpawner::new());
                 let mut a = SubprocessActuator::new(concurrency);
                 a.run(
-                    RunWiring {
-                        effects_rx,
-                        shutdown_rx,
-                        hard_shutdown_rx,
-                        hard_shutdown_done_tx,
-                    },
+                    RunWiring { effects_rx, shutdown_rx, hard_shutdown_rx, hard_shutdown_done_tx },
                     &engine_in,
                     spawner.as_ref(),
                 );
@@ -137,10 +130,7 @@ impl Harness {
             match self.engine_in.recv_timeout(deadline - now) {
                 Ok(i) => received.push(i),
                 Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
-                    panic!(
-                        "timeout waiting for EffectCompletes; saw {}",
-                        received.len()
-                    )
+                    panic!("timeout waiting for EffectCompletes; saw {}", received.len())
                 }
                 Err(crossbeam::channel::RecvTimeoutError::Disconnected) => break,
             }
@@ -164,10 +154,7 @@ impl Drop for Harness {
 /// to satisfy `Effect.program: Arc<ActionProgram>` while keeping fixture call sites' `Vec<String>`
 /// ergonomics intact.
 fn literal_program(argv: Vec<String>) -> Arc<ActionProgram> {
-    single_exec_program(
-        argv.into_iter()
-            .map(|s| ArgTemplate::new([ArgPart::literal(s)])),
-    )
+    single_exec_program(argv.into_iter().map(|s| ArgTemplate::new([ArgPart::literal(s)])))
 }
 
 /// Wrap a sequence of literal argvs as a multi-op [`ActionProgram`] — one `Exec` op per inner vec,
@@ -183,8 +170,7 @@ pub fn literal_multi_program(steps: Vec<Vec<String>>) -> Arc<ActionProgram> {
             b.patch_on_ok(ph, next).unwrap();
         }
         let exec = ExecAction::new(
-            argv.into_iter()
-                .map(|s| ArgTemplate::new([ArgPart::literal(s)])),
+            argv.into_iter().map(|s| ArgTemplate::new([ArgPart::literal(s)])),
             None,
         );
         let h = b.emit(SpawnBody::Exec(exec));
@@ -201,11 +187,7 @@ pub fn literal_multi_program(steps: Vec<Vec<String>>) -> Arc<ActionProgram> {
 /// but lets the caller supply a pre-built `Arc<ActionProgram>` directly — needed for tests that need
 /// to assert program-snapshot invariants by re-using the same `Arc` across multiple fixtures.
 pub fn perfile_effect_with_program(
-    sub_seed: u64,
-    profile_seed: u64,
-    res_seed: u64,
-    corr: u64,
-    program: Arc<ActionProgram>,
+    sub_seed: u64, profile_seed: u64, res_seed: u64, corr: u64, program: Arc<ActionProgram>,
     cwd: PathBuf,
 ) -> Effect {
     let resource = unique_resource_id(res_seed);
@@ -221,12 +203,7 @@ pub fn perfile_effect_with_program(
         anchor_kind: ResourceKind::Dir,
         exclude: Arc::from(Vec::<CompactString>::new()),
     };
-    Effect::per_file(
-        common,
-        resource,
-        CompactString::new(""),
-        Arc::new(Diff::default()),
-    )
+    Effect::per_file(common, resource, CompactString::new(""), Arc::new(Diff::default()))
 }
 
 /// Build a PerFile Effect with a literal `argv` and the given correlation.
@@ -240,12 +217,7 @@ pub fn perfile_effect_with_program(
 /// empty). Tests asserting on `SPECTER_PATH` set `target_relative` directly to introduce a per-file
 /// segment.
 pub fn perfile_effect(
-    sub_seed: u64,
-    profile_seed: u64,
-    res_seed: u64,
-    corr: u64,
-    argv: Vec<String>,
-    cwd: PathBuf,
+    sub_seed: u64, profile_seed: u64, res_seed: u64, corr: u64, argv: Vec<String>, cwd: PathBuf,
 ) -> Effect {
     let resource = unique_resource_id(res_seed);
     let common = EffectCommon {
@@ -260,12 +232,7 @@ pub fn perfile_effect(
         anchor_kind: ResourceKind::Dir,
         exclude: Arc::from(Vec::<CompactString>::new()),
     };
-    Effect::per_file(
-        common,
-        resource,
-        CompactString::new(""),
-        Arc::new(Diff::default()),
-    )
+    Effect::per_file(common, resource, CompactString::new(""), Arc::new(Diff::default()))
 }
 
 /// Build a Subtree Effect with a literal `argv`.
@@ -274,11 +241,7 @@ pub fn perfile_effect(
 /// (`unique_resource_id(profile_seed)`) so fixtures remain comparable across calls without leaking
 /// engine-internal anchor identity into the actuator's tests.
 pub fn subtree_effect(
-    sub_seed: u64,
-    profile_seed: u64,
-    corr: u64,
-    argv: Vec<String>,
-    cwd: PathBuf,
+    sub_seed: u64, profile_seed: u64, corr: u64, argv: Vec<String>, cwd: PathBuf,
 ) -> Effect {
     let common = EffectCommon {
         sub: unique_sub_id(sub_seed),

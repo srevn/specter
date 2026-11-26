@@ -151,10 +151,9 @@ pub(crate) enum ResolveError {
 impl std::fmt::Display for ResolveError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::UnsetEnvVar { name } => write!(
-                f,
-                "env var `{name}` is unset and the placeholder has no `:-` default",
-            ),
+            Self::UnsetEnvVar { name } => {
+                write!(f, "env var `{name}` is unset and the placeholder has no `:-` default")
+            }
         }
     }
 }
@@ -198,10 +197,7 @@ struct Derived<'a> {
 /// `SPECTER_DIFF_PATH` in alphabetical position iff this is `Some`, keeping env order total across
 /// the spawn-time set the child observes.
 pub(crate) fn resolve_step<'a>(
-    effect: &'a Effect,
-    exec: &'a ExecAction,
-    now: SystemTime,
-    diff_path: Option<&'a Path>,
+    effect: &'a Effect, exec: &'a ExecAction, now: SystemTime, diff_path: Option<&'a Path>,
     env_snapshot: &EnvSnapshot,
 ) -> Result<(CommandResolved, Vec<EnvVar<'a>>), ResolveError> {
     // Unpack the `Arc<Diff>` once and thread `Option<&Diff>` through both surfaces — pipe stages
@@ -244,10 +240,9 @@ pub(crate) fn resolve_step<'a>(
 /// invocations and re-walk the same `Path` twice.
 fn render_target_paths(target_path: Cow<'_, Path>) -> (Cow<'_, str>, Cow<'_, str>) {
     match target_path {
-        Cow::Borrowed(p) => (
-            p.to_string_lossy(),
-            p.parent().map_or(Cow::Borrowed(""), Path::to_string_lossy),
-        ),
+        Cow::Borrowed(p) => {
+            (p.to_string_lossy(), p.parent().map_or(Cow::Borrowed(""), Path::to_string_lossy))
+        }
         Cow::Owned(pb) => {
             // Compute `parent` while `pb` is still owned here — the closure copies the slice's bytes
             // into a fresh `String`, so once `map_or_else` returns, no borrow of `pb` remains and
@@ -295,10 +290,9 @@ fn render_target_paths(target_path: Cow<'_, Path>) -> (Cow<'_, str>, Cow<'_, str
 pub(crate) fn compute_cwd(effect: &Effect) -> &Path {
     let anchor_path: &Path = &effect.anchor_path;
     match effect.anchor_kind {
-        ResourceKind::File => anchor_path
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or(anchor_path),
+        ResourceKind::File => {
+            anchor_path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(anchor_path)
+        }
         ResourceKind::Dir => anchor_path,
         ResourceKind::Unknown => unreachable!(
             "Effect.anchor_kind is structurally constrained to File or Dir: \
@@ -323,25 +317,14 @@ const SUBSTITUTE_SCRATCH_CAPACITY: usize = 64;
 /// slot pushed to `out` is a `clone` of scratch's current content (exact-size allocation, no
 /// over-reserved trailing capacity).
 fn substitute_argv(
-    exec: &ExecAction,
-    effect: &Effect,
-    derived: &Derived<'_>,
-    diff: Option<&Diff>,
+    exec: &ExecAction, effect: &Effect, derived: &Derived<'_>, diff: Option<&Diff>,
     env_snapshot: &EnvSnapshot,
 ) -> Result<Vec<String>, ResolveError> {
     let template = exec.argv();
     let mut argv = Vec::with_capacity(template.len());
     let mut scratch = String::with_capacity(SUBSTITUTE_SCRATCH_CAPACITY);
     for arg in template {
-        substitute_one(
-            arg,
-            effect,
-            derived,
-            diff,
-            env_snapshot,
-            &mut argv,
-            &mut scratch,
-        )?;
+        substitute_one(arg, effect, derived, diff, env_snapshot, &mut argv, &mut scratch)?;
     }
     Ok(argv)
 }
@@ -355,13 +338,8 @@ fn substitute_argv(
 /// for the next call. The multi-value arm allocates a fresh slot per emitted entry — the shared
 /// scratch prefix and the per-entry suffix are sized exactly so no growth pass is needed.
 fn substitute_one(
-    arg: &ArgTemplate,
-    effect: &Effect,
-    derived: &Derived<'_>,
-    diff: Option<&Diff>,
-    env_snapshot: &EnvSnapshot,
-    out: &mut Vec<String>,
-    scratch: &mut String,
+    arg: &ArgTemplate, effect: &Effect, derived: &Derived<'_>, diff: Option<&Diff>,
+    env_snapshot: &EnvSnapshot, out: &mut Vec<String>, scratch: &mut String,
 ) -> Result<(), ResolveError> {
     scratch.clear();
     let mut emitted_any = false;
@@ -442,10 +420,7 @@ fn has_multivalue(arg: &ArgTemplate) -> bool {
 /// ([`env_multivalue`]) newline-joins into one owned `String`. Both surfaces share this dispatch —
 /// argv and env can't drift on the `Placeholder → source list` mapping.
 fn for_each_multivalue(
-    p: Placeholder,
-    effect: &Effect,
-    diff: Option<&Diff>,
-    mut emit: impl FnMut(&str),
+    p: Placeholder, effect: &Effect, diff: Option<&Diff>, mut emit: impl FnMut(&str),
 ) {
     match p {
         Placeholder::Excluded => {
@@ -537,11 +512,8 @@ fn format_now(now: SystemTime) -> String {
     let ts = match Timestamp::try_from(now) {
         Ok(ts) if ts >= Timestamp::UNIX_EPOCH => ts,
         _ => {
-            let clamped = if now < SystemTime::UNIX_EPOCH {
-                Timestamp::UNIX_EPOCH
-            } else {
-                Timestamp::MAX
-            };
+            let clamped =
+                if now < SystemTime::UNIX_EPOCH { Timestamp::UNIX_EPOCH } else { Timestamp::MAX };
             tracing::warn!(
                 ?now,
                 %clamped,
@@ -585,17 +557,9 @@ const SPECTER_ENV_BASE_COUNT: usize = 15;
 /// string), or when `derived`'s path-derived fields fall through PerFile's Owned arm. Keys are always
 /// `&'static str`.
 fn build_env<'a>(
-    effect: &'a Effect,
-    derived: Derived<'a>,
-    diff: Option<&Diff>,
-    diff_path: Option<&'a Path>,
+    effect: &'a Effect, derived: Derived<'a>, diff: Option<&Diff>, diff_path: Option<&'a Path>,
 ) -> Vec<EnvVar<'a>> {
-    let Derived {
-        path_lossy,
-        anchor_lossy,
-        parent_lossy,
-        time_str,
-    } = derived;
+    let Derived { path_lossy, anchor_lossy, parent_lossy, time_str } = derived;
     // `event_kind` derives from the fire shape — Subtree/PerFile agree with the originating Sub's
     // EffectScope by construction, so there is no second source-of-truth to consult.
     let event_kind: &'static str = match effect.target {
@@ -604,10 +568,7 @@ fn build_env<'a>(
     };
     let cap = SPECTER_ENV_BASE_COUNT + usize::from(diff_path.is_some());
     let mut env: Vec<EnvVar<'a>> = Vec::with_capacity(cap);
-    env.push(EnvVar {
-        key: "SPECTER_ANCHOR",
-        value: anchor_lossy,
-    });
+    env.push(EnvVar { key: "SPECTER_ANCHOR", value: anchor_lossy });
     env.push(EnvVar {
         key: "SPECTER_CORRELATION",
         value: Cow::Owned(effect.correlation.as_u64().to_string()),
@@ -621,15 +582,9 @@ fn build_env<'a>(
         value: env_multivalue(Placeholder::Deleted, effect, diff),
     });
     if let Some(p) = diff_path {
-        env.push(EnvVar {
-            key: "SPECTER_DIFF_PATH",
-            value: p.to_string_lossy(),
-        });
+        env.push(EnvVar { key: "SPECTER_DIFF_PATH", value: p.to_string_lossy() });
     }
-    env.push(EnvVar {
-        key: "SPECTER_EVENT_KIND",
-        value: Cow::Borrowed(event_kind),
-    });
+    env.push(EnvVar { key: "SPECTER_EVENT_KIND", value: Cow::Borrowed(event_kind) });
     env.push(EnvVar {
         key: "SPECTER_EXCLUDED",
         value: env_multivalue(Placeholder::Excluded, effect, diff),
@@ -642,18 +597,9 @@ fn build_env<'a>(
         key: "SPECTER_MODIFIED",
         value: env_multivalue(Placeholder::Modified, effect, diff),
     });
-    env.push(EnvVar {
-        key: "SPECTER_PARENT",
-        value: parent_lossy,
-    });
-    env.push(EnvVar {
-        key: "SPECTER_PATH",
-        value: path_lossy,
-    });
-    env.push(EnvVar {
-        key: "SPECTER_RELATIVE_PATH",
-        value: Cow::Borrowed(effect.relative()),
-    });
+    env.push(EnvVar { key: "SPECTER_PARENT", value: parent_lossy });
+    env.push(EnvVar { key: "SPECTER_PATH", value: path_lossy });
+    env.push(EnvVar { key: "SPECTER_RELATIVE_PATH", value: Cow::Borrowed(effect.relative()) });
     env.push(EnvVar {
         key: "SPECTER_RENAMED_FROM",
         value: env_multivalue(Placeholder::RenamedFrom, effect, diff),
@@ -662,25 +608,15 @@ fn build_env<'a>(
         key: "SPECTER_RENAMED_TO",
         value: env_multivalue(Placeholder::RenamedTo, effect, diff),
     });
-    env.push(EnvVar {
-        key: "SPECTER_TIME",
-        value: Cow::Owned(time_str),
-    });
-    env.push(EnvVar {
-        key: "SPECTER_WATCH",
-        value: Cow::Borrowed(effect.sub_name.as_str()),
-    });
+    env.push(EnvVar { key: "SPECTER_TIME", value: Cow::Owned(time_str) });
+    env.push(EnvVar { key: "SPECTER_WATCH", value: Cow::Borrowed(effect.sub_name.as_str()) });
     env
 }
 
 #[cfg(test)]
 mod tests {
     //! Sibling unit tests for [`super::resolve`]. Pure data work — all fixtures are inline; no I/O.
-    #![allow(
-        clippy::items_after_statements,
-        clippy::missing_const_for_fn,
-        clippy::too_many_lines
-    )]
+    #![allow(clippy::items_after_statements, clippy::missing_const_for_fn, clippy::too_many_lines)]
 
     use super::CommandResolved;
     use crate::env::EnvSnapshot;
@@ -731,14 +667,8 @@ mod tests {
     /// `scope` selects the `EffectTarget` shape (Subtree ⇒ no per-file segment, PerStableFile ⇒
     /// per-file segment); the resolver then derives `SPECTER_EVENT_KIND` from the shape.
     fn make_effect(
-        sub_name: &str,
-        scope: EffectScope,
-        argv: Vec<ArgTemplate>,
-        anchor_path: &Path,
-        target_relative: &str,
-        forced: bool,
-        correlation: CorrelationId,
-        diff: Option<Arc<Diff>>,
+        sub_name: &str, scope: EffectScope, argv: Vec<ArgTemplate>, anchor_path: &Path,
+        target_relative: &str, forced: bool, correlation: CorrelationId, diff: Option<Arc<Diff>>,
     ) -> Effect {
         let common = EffectCommon {
             sub: SubId::default(),
@@ -818,10 +748,7 @@ mod tests {
             None,
         );
         let (cmd, _env) = resolve(&e);
-        assert_eq!(
-            cmd.argv,
-            vec!["fmt".to_string(), "/proj/src/a.c".to_string()]
-        );
+        assert_eq!(cmd.argv, vec!["fmt".to_string(), "/proj/src/a.c".to_string()]);
     }
 
     #[test]
@@ -944,10 +871,7 @@ mod tests {
         .into();
         let (_, env) = resolve(&e);
         assert_eq!(
-            env.iter()
-                .find(|e| e.key == "SPECTER_EXCLUDED")
-                .unwrap()
-                .value,
+            env.iter().find(|e| e.key == "SPECTER_EXCLUDED").unwrap().value,
             "*.tmp\ncache/\n**/.git/",
             "no trailing newline; entries joined by single \\n",
         );
@@ -967,13 +891,7 @@ mod tests {
             None,
         );
         let (_, env) = resolve(&e);
-        assert_eq!(
-            env.iter()
-                .find(|e| e.key == "SPECTER_EXCLUDED")
-                .unwrap()
-                .value,
-            "",
-        );
+        assert_eq!(env.iter().find(|e| e.key == "SPECTER_EXCLUDED").unwrap().value, "");
     }
 
     // ---------- ${specter.time} / SPECTER_TIME ----------
@@ -1016,10 +934,7 @@ mod tests {
         );
         let (_, env) = super::resolve_step(&e, exec_of(&e), now, None, &empty_env())
             .expect("test fixtures don\'t exercise the strict-env failure path");
-        assert_eq!(
-            env.iter().find(|e| e.key == "SPECTER_TIME").unwrap().value,
-            FIXED_NOW_RFC3339
-        );
+        assert_eq!(env.iter().find(|e| e.key == "SPECTER_TIME").unwrap().value, FIXED_NOW_RFC3339);
     }
 
     #[test]
@@ -1147,13 +1062,7 @@ mod tests {
             None,
         );
         let (_, env) = resolve(&e);
-        assert_eq!(
-            env.iter()
-                .find(|e| e.key == "SPECTER_PARENT")
-                .unwrap()
-                .value,
-            ""
-        );
+        assert_eq!(env.iter().find(|e| e.key == "SPECTER_PARENT").unwrap().value, "");
     }
 
     #[test]
@@ -1169,13 +1078,7 @@ mod tests {
             None,
         );
         let (_, env) = resolve(&e);
-        assert_eq!(
-            env.iter()
-                .find(|e| e.key == "SPECTER_PARENT")
-                .unwrap()
-                .value,
-            "/anchor/src"
-        );
+        assert_eq!(env.iter().find(|e| e.key == "SPECTER_PARENT").unwrap().value, "/anchor/src");
     }
 
     #[test]
@@ -1185,10 +1088,7 @@ mod tests {
         let e = make_effect(
             "build",
             EffectScope::SubtreeRoot,
-            vec![
-                arg(vec![lit("notify-send")]),
-                arg(vec![ph(Placeholder::Watch), lit(" settled")]),
-            ],
+            vec![arg(vec![lit("notify-send")]), arg(vec![ph(Placeholder::Watch), lit(" settled")])],
             Path::new("/proj"),
             "",
             false,
@@ -1196,10 +1096,7 @@ mod tests {
             None,
         );
         let (cmd, _env) = resolve(&e);
-        assert_eq!(
-            cmd.argv,
-            vec!["notify-send".to_string(), "build settled".to_string()]
-        );
+        assert_eq!(cmd.argv, vec!["notify-send".to_string(), "build settled".to_string()]);
     }
 
     #[test]
@@ -1221,11 +1118,7 @@ mod tests {
     #[test]
     fn resolve_with_created_expands_to_n_argv() {
         let diff = Diff {
-            created: smallvec![
-                entry_ref("a.rs", 1),
-                entry_ref("b.rs", 2),
-                entry_ref("c.rs", 3)
-            ],
+            created: smallvec![entry_ref("a.rs", 1), entry_ref("b.rs", 2), entry_ref("c.rs", 3)],
             ..Default::default()
         };
         let e = make_effect(
@@ -1241,12 +1134,7 @@ mod tests {
         let (cmd, _env) = resolve(&e);
         assert_eq!(
             cmd.argv,
-            vec![
-                "fmt".to_string(),
-                "a.rs".to_string(),
-                "b.rs".to_string(),
-                "c.rs".to_string()
-            ]
+            vec!["fmt".to_string(), "a.rs".to_string(), "b.rs".to_string(), "c.rs".to_string()]
         );
     }
 
@@ -1272,10 +1160,7 @@ mod tests {
 
     #[test]
     fn resolve_with_modified_expands_to_n_argv() {
-        let diff = Diff {
-            modified: smallvec![entry_ref("m.rs", 1)],
-            ..Default::default()
-        };
+        let diff = Diff { modified: smallvec![entry_ref("m.rs", 1)], ..Default::default() };
         let e = make_effect(
             "lint",
             EffectScope::PerStableFile,
@@ -1294,14 +1179,8 @@ mod tests {
     fn resolve_with_renamed_from_and_to_expands_independently() {
         let diff = Diff {
             renamed: smallvec![
-                Rename {
-                    from: entry_ref("a", 1),
-                    to: entry_ref("A", 1),
-                },
-                Rename {
-                    from: entry_ref("b", 2),
-                    to: entry_ref("B", 2),
-                },
+                Rename { from: entry_ref("a", 1), to: entry_ref("A", 1) },
+                Rename { from: entry_ref("b", 2), to: entry_ref("B", 2) },
             ],
             ..Default::default()
         };
@@ -1366,10 +1245,8 @@ mod tests {
 
     #[test]
     fn resolve_with_multivalue_in_separate_args_emits_literals_as_standalone_slots() {
-        let diff = Diff {
-            created: smallvec![entry_ref("a", 1), entry_ref("b", 2)],
-            ..Default::default()
-        };
+        let diff =
+            Diff { created: smallvec![entry_ref("a", 1), entry_ref("b", 2)], ..Default::default() };
         let e = make_effect(
             "x",
             EffectScope::PerStableFile,
@@ -1387,21 +1264,14 @@ mod tests {
         let (cmd, _) = resolve(&e);
         assert_eq!(
             cmd.argv,
-            vec![
-                "pre".to_string(),
-                "a".to_string(),
-                "b".to_string(),
-                "post".to_string()
-            ]
+            vec!["pre".to_string(), "a".to_string(), "b".to_string(), "post".to_string()]
         );
     }
 
     #[test]
     fn resolve_with_multivalue_having_prefix_literal_tiles_per_value() {
-        let diff = Diff {
-            created: smallvec![entry_ref("a", 1), entry_ref("b", 2)],
-            ..Default::default()
-        };
+        let diff =
+            Diff { created: smallvec![entry_ref("a", 1), entry_ref("b", 2)], ..Default::default() };
         let e = make_effect(
             "x",
             EffectScope::PerStableFile,
@@ -1440,11 +1310,7 @@ mod tests {
         // `\n`, no trailing newline. Empty list ⇒ empty string (asserted in env_diff_lists_*);
         // populated list ⇒ the segments.
         let diff = Diff {
-            created: smallvec![
-                entry_ref("a.rs", 1),
-                entry_ref("src/b.rs", 2),
-                entry_ref("c", 3),
-            ],
+            created: smallvec![entry_ref("a.rs", 1), entry_ref("src/b.rs", 2), entry_ref("c", 3),],
             ..Default::default()
         };
         let e = make_effect(
@@ -1459,10 +1325,7 @@ mod tests {
         );
         let (_, env) = resolve(&e);
         assert_eq!(
-            env.iter()
-                .find(|e| e.key == "SPECTER_CREATED")
-                .unwrap()
-                .value,
+            env.iter().find(|e| e.key == "SPECTER_CREATED").unwrap().value,
             "a.rs\nsrc/b.rs\nc",
             "no trailing newline; entries joined by single \\n",
         );
@@ -1488,28 +1351,10 @@ mod tests {
             Some(Arc::new(diff)),
         );
         let (_, env) = resolve(&e);
-        assert_eq!(
-            env.iter()
-                .find(|e| e.key == "SPECTER_DELETED")
-                .unwrap()
-                .value,
-            "d1\nd2",
-        );
-        assert_eq!(
-            env.iter()
-                .find(|e| e.key == "SPECTER_MODIFIED")
-                .unwrap()
-                .value,
-            "m1",
-        );
+        assert_eq!(env.iter().find(|e| e.key == "SPECTER_DELETED").unwrap().value, "d1\nd2");
+        assert_eq!(env.iter().find(|e| e.key == "SPECTER_MODIFIED").unwrap().value, "m1");
         // Categories not populated stay empty even though the diff is present.
-        assert_eq!(
-            env.iter()
-                .find(|e| e.key == "SPECTER_CREATED")
-                .unwrap()
-                .value,
-            "",
-        );
+        assert_eq!(env.iter().find(|e| e.key == "SPECTER_CREATED").unwrap().value, "");
     }
 
     #[test]
@@ -1519,14 +1364,8 @@ mod tests {
         // `diff_env_renames` is broken.
         let diff = Diff {
             renamed: smallvec![
-                Rename {
-                    from: entry_ref("old1", 1),
-                    to: entry_ref("new1", 1),
-                },
-                Rename {
-                    from: entry_ref("old2", 2),
-                    to: entry_ref("new2", 2),
-                },
+                Rename { from: entry_ref("old1", 1), to: entry_ref("new1", 1) },
+                Rename { from: entry_ref("old2", 2), to: entry_ref("new2", 2) },
             ],
             ..Default::default()
         };
@@ -1542,19 +1381,10 @@ mod tests {
         );
         let (_, env) = resolve(&e);
         assert_eq!(
-            env.iter()
-                .find(|e| e.key == "SPECTER_RENAMED_FROM")
-                .unwrap()
-                .value,
+            env.iter().find(|e| e.key == "SPECTER_RENAMED_FROM").unwrap().value,
             "old1\nold2",
         );
-        assert_eq!(
-            env.iter()
-                .find(|e| e.key == "SPECTER_RENAMED_TO")
-                .unwrap()
-                .value,
-            "new1\nnew2",
-        );
+        assert_eq!(env.iter().find(|e| e.key == "SPECTER_RENAMED_TO").unwrap().value, "new1\nnew2");
     }
 
     #[test]
@@ -1639,13 +1469,7 @@ mod tests {
             None,
         );
         let (_, env) = resolve(&e);
-        assert_eq!(
-            env.iter()
-                .find(|e| e.key == "SPECTER_RELATIVE_PATH")
-                .unwrap()
-                .value,
-            ""
-        );
+        assert_eq!(env.iter().find(|e| e.key == "SPECTER_RELATIVE_PATH").unwrap().value, "");
     }
 
     #[test]
@@ -1661,13 +1485,7 @@ mod tests {
             None,
         );
         let (_, env) = resolve(&e);
-        assert_eq!(
-            env.iter()
-                .find(|e| e.key == "SPECTER_RELATIVE_PATH")
-                .unwrap()
-                .value,
-            "src/a.c"
-        );
+        assert_eq!(env.iter().find(|e| e.key == "SPECTER_RELATIVE_PATH").unwrap().value, "src/a.c");
     }
 
     #[test]
@@ -1702,10 +1520,7 @@ mod tests {
             None,
         );
         let (_, env) = resolve(&e);
-        assert_eq!(
-            env.iter().find(|e| e.key == "SPECTER_WATCH").unwrap().value,
-            "build"
-        );
+        assert_eq!(env.iter().find(|e| e.key == "SPECTER_WATCH").unwrap().value, "build");
     }
 
     #[test]
@@ -1721,13 +1536,7 @@ mod tests {
             None,
         );
         let (_, env) = resolve(&e);
-        assert_eq!(
-            env.iter()
-                .find(|e| e.key == "SPECTER_FORCED")
-                .unwrap()
-                .value,
-            "0"
-        );
+        assert_eq!(env.iter().find(|e| e.key == "SPECTER_FORCED").unwrap().value, "0");
     }
 
     #[test]
@@ -1743,13 +1552,7 @@ mod tests {
             None,
         );
         let (_, env) = resolve(&e);
-        assert_eq!(
-            env.iter()
-                .find(|e| e.key == "SPECTER_FORCED")
-                .unwrap()
-                .value,
-            "1"
-        );
+        assert_eq!(env.iter().find(|e| e.key == "SPECTER_FORCED").unwrap().value, "1");
     }
 
     #[test]
@@ -1766,10 +1569,7 @@ mod tests {
         );
         let (_, env) = resolve(&e);
         assert_eq!(
-            env.iter()
-                .find(|e| e.key == "SPECTER_EVENT_KIND")
-                .unwrap()
-                .value,
+            env.iter().find(|e| e.key == "SPECTER_EVENT_KIND").unwrap().value,
             "dir-subtree"
         );
     }
@@ -1787,13 +1587,7 @@ mod tests {
             None,
         );
         let (_, env) = resolve(&e);
-        assert_eq!(
-            env.iter()
-                .find(|e| e.key == "SPECTER_EVENT_KIND")
-                .unwrap()
-                .value,
-            "file"
-        );
+        assert_eq!(env.iter().find(|e| e.key == "SPECTER_EVENT_KIND").unwrap().value, "file");
     }
 
     #[test]
@@ -1809,21 +1603,12 @@ mod tests {
             None,
         );
         let (_, env) = resolve(&e);
-        assert_eq!(
-            env.iter()
-                .find(|e| e.key == "SPECTER_CORRELATION")
-                .unwrap()
-                .value,
-            "42"
-        );
+        assert_eq!(env.iter().find(|e| e.key == "SPECTER_CORRELATION").unwrap().value, "42");
     }
 
     #[test]
     fn env_does_not_contain_specter_diff_path() {
-        let diff = Diff {
-            created: smallvec![entry_ref("a", 1)],
-            ..Default::default()
-        };
+        let diff = Diff { created: smallvec![entry_ref("a", 1)], ..Default::default() };
         let e = make_effect(
             "x",
             EffectScope::PerStableFile,
@@ -1921,10 +1706,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            env.iter()
-                .find(|e| e.key == "SPECTER_DIFF_PATH")
-                .unwrap()
-                .value,
+            env.iter().find(|e| e.key == "SPECTER_DIFF_PATH").unwrap().value,
             "/tmp/specter-1234-deadbeef.diff"
         );
     }
@@ -2034,10 +1816,7 @@ mod tests {
         let e = make_effect(
             "x",
             EffectScope::SubtreeRoot,
-            vec![arg(vec![ArgPart::EnvVar {
-                name: "HOME".into(),
-                default: None,
-            }])],
+            vec![arg(vec![ArgPart::EnvVar { name: "HOME".into(), default: None }])],
             Path::new("/p"),
             "",
             false,
@@ -2057,10 +1836,7 @@ mod tests {
         let e = make_effect(
             "x",
             EffectScope::SubtreeRoot,
-            vec![arg(vec![ArgPart::EnvVar {
-                name: "MISSING".into(),
-                default: None,
-            }])],
+            vec![arg(vec![ArgPart::EnvVar { name: "MISSING".into(), default: None }])],
             Path::new("/p"),
             "",
             false,
@@ -2069,12 +1845,7 @@ mod tests {
         );
         let err = super::resolve_step(&e, exec_of(&e), SystemTime::UNIX_EPOCH, None, &env)
             .expect_err("unset env var must fail strict resolve");
-        assert_eq!(
-            err,
-            crate::resolve::ResolveError::UnsetEnvVar {
-                name: "MISSING".into(),
-            }
-        );
+        assert_eq!(err, crate::resolve::ResolveError::UnsetEnvVar { name: "MISSING".into() });
     }
 
     /// Unset env var with a `:-default` renders the default literal — explicit lenient opt-in. Empty
@@ -2086,10 +1857,7 @@ mod tests {
             "x",
             EffectScope::SubtreeRoot,
             vec![
-                arg(vec![ArgPart::EnvVar {
-                    name: "MISSING".into(),
-                    default: Some("/tmp".into()),
-                }]),
+                arg(vec![ArgPart::EnvVar { name: "MISSING".into(), default: Some("/tmp".into()) }]),
                 arg(vec![ArgPart::EnvVar {
                     name: "ALSO_MISSING".into(),
                     default: Some(CompactString::new("")),

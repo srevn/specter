@@ -147,11 +147,7 @@ impl From<SystemTime> for WireTime {
         let ts = match Timestamp::try_from(t) {
             Ok(ts) if ts >= Timestamp::UNIX_EPOCH => ts,
             _ => {
-                let clamped = if t < UNIX_EPOCH {
-                    Timestamp::UNIX_EPOCH
-                } else {
-                    Timestamp::MAX
-                };
+                let clamped = if t < UNIX_EPOCH { Timestamp::UNIX_EPOCH } else { Timestamp::MAX };
                 tracing::warn!(
                     ?t,
                     %clamped,
@@ -557,48 +553,33 @@ impl From<(&Diagnostic, &WireTime)> for WireDiagnostic {
                 owner: WireId::from(*owner),
                 correlation: correlation.as_u64(),
             },
-            Diagnostic::StaleTimer { id } => Self::StaleTimer {
-                at: at.clone(),
-                id: id.as_u64(),
-            },
-            Diagnostic::EffectCompleteOutsideAwaiting {
-                sub,
-                profile,
-                minted_by,
-            } => Self::EffectCompleteOutsideAwaiting {
-                at: at.clone(),
-                sub: WireId::from(*sub),
-                profile: WireId::from(*profile),
-                minted_by: minted_by.map(WireId::from),
-            },
-            Diagnostic::EffectCompleteForUnknownSub { sub } => Self::EffectCompleteForUnknownSub {
-                at: at.clone(),
-                sub: WireId::from(*sub),
-            },
-            Diagnostic::DetachUnknownSub { sub } => Self::DetachUnknownSub {
-                at: at.clone(),
-                sub: WireId::from(*sub),
-            },
-            Diagnostic::ConfigDiffUnknownSub { name } => Self::ConfigDiffUnknownSub {
-                at: at.clone(),
-                name: name.clone(),
-            },
-            Diagnostic::ConfigDiffRebindFallbackAttach { name } => {
-                Self::ConfigDiffRebindFallbackAttach {
+            Diagnostic::StaleTimer { id } => Self::StaleTimer { at: at.clone(), id: id.as_u64() },
+            Diagnostic::EffectCompleteOutsideAwaiting { sub, profile, minted_by } => {
+                Self::EffectCompleteOutsideAwaiting {
                     at: at.clone(),
-                    name: name.clone(),
+                    sub: WireId::from(*sub),
+                    profile: WireId::from(*profile),
+                    minted_by: minted_by.map(WireId::from),
                 }
+            }
+            Diagnostic::EffectCompleteForUnknownSub { sub } => {
+                Self::EffectCompleteForUnknownSub { at: at.clone(), sub: WireId::from(*sub) }
+            }
+            Diagnostic::DetachUnknownSub { sub } => {
+                Self::DetachUnknownSub { at: at.clone(), sub: WireId::from(*sub) }
+            }
+            Diagnostic::ConfigDiffUnknownSub { name } => {
+                Self::ConfigDiffUnknownSub { at: at.clone(), name: name.clone() }
+            }
+            Diagnostic::ConfigDiffRebindFallbackAttach { name } => {
+                Self::ConfigDiffRebindFallbackAttach { at: at.clone(), name: name.clone() }
             }
             Diagnostic::ProbeVanished { profile, intent } => Self::ProbeVanished {
                 at: at.clone(),
                 profile: WireId::from(*profile),
                 intent: WireBurstIntent::from(*intent),
             },
-            Diagnostic::ProbeFailed {
-                profile,
-                intent,
-                failure,
-            } => Self::ProbeFailed {
+            Diagnostic::ProbeFailed { profile, intent, failure } => Self::ProbeFailed {
                 at: at.clone(),
                 profile: WireId::from(*profile),
                 intent: WireBurstIntent::from(*intent),
@@ -606,34 +587,26 @@ impl From<(&Diagnostic, &WireTime)> for WireDiagnostic {
                 // engine-internal.
                 errno: failure.errno(),
             },
-            Diagnostic::EventClassDropped {
-                resource,
-                event,
-                profile,
-            } => Self::EventClassDropped {
+            Diagnostic::EventClassDropped { resource, event, profile } => Self::EventClassDropped {
                 at: at.clone(),
                 resource: WireId::from(*resource),
                 event: WireFsEvent::from(*event),
                 profile: WireId::from(*profile),
             },
-            Diagnostic::EventOutsideProofObject {
-                resource,
-                event,
-                profile,
-            } => Self::EventOutsideProofObject {
-                at: at.clone(),
-                resource: WireId::from(*resource),
-                event: WireFsEvent::from(*event),
-                profile: WireId::from(*profile),
-            },
-            Diagnostic::EventOnUnwatchedResource { resource } => Self::EventOnUnwatchedResource {
-                at: at.clone(),
-                resource: WireId::from(*resource),
-            },
-            Diagnostic::EventNoConsumer { resource } => Self::EventNoConsumer {
-                at: at.clone(),
-                resource: WireId::from(*resource),
-            },
+            Diagnostic::EventOutsideProofObject { resource, event, profile } => {
+                Self::EventOutsideProofObject {
+                    at: at.clone(),
+                    resource: WireId::from(*resource),
+                    event: WireFsEvent::from(*event),
+                    profile: WireId::from(*profile),
+                }
+            }
+            Diagnostic::EventOnUnwatchedResource { resource } => {
+                Self::EventOnUnwatchedResource { at: at.clone(), resource: WireId::from(*resource) }
+            }
+            Diagnostic::EventNoConsumer { resource } => {
+                Self::EventNoConsumer { at: at.clone(), resource: WireId::from(*resource) }
+            }
             Diagnostic::WatchOpRejected { resource, failure } => Self::WatchOpRejected {
                 at: at.clone(),
                 resource: WireId::from(*resource),
@@ -646,38 +619,31 @@ impl From<(&Diagnostic, &WireTime)> for WireDiagnostic {
                     prefix: WireId::from(*prefix),
                 }
             }
-            Diagnostic::PendingPathProbeFailed {
-                profile,
-                prefix,
-                failure,
-            } => Self::PendingPathProbeFailed {
-                at: at.clone(),
-                profile: WireId::from(*profile),
-                prefix: WireId::from(*prefix),
-                errno: failure.errno(),
-            },
-            Diagnostic::PendingPathAwaitingSegment {
-                profile,
-                prefix,
-                segment,
-            } => Self::PendingPathAwaitingSegment {
-                at: at.clone(),
-                profile: WireId::from(*profile),
-                prefix: WireId::from(*prefix),
-                segment: segment.clone(),
-            },
-            Diagnostic::PendingPathRetriesExhausted {
-                profile,
-                prefix,
-                retries,
-                errno,
-            } => Self::PendingPathRetriesExhausted {
-                at: at.clone(),
-                profile: WireId::from(*profile),
-                prefix: WireId::from(*prefix),
-                retries: *retries,
-                errno: *errno,
-            },
+            Diagnostic::PendingPathProbeFailed { profile, prefix, failure } => {
+                Self::PendingPathProbeFailed {
+                    at: at.clone(),
+                    profile: WireId::from(*profile),
+                    prefix: WireId::from(*prefix),
+                    errno: failure.errno(),
+                }
+            }
+            Diagnostic::PendingPathAwaitingSegment { profile, prefix, segment } => {
+                Self::PendingPathAwaitingSegment {
+                    at: at.clone(),
+                    profile: WireId::from(*profile),
+                    prefix: WireId::from(*prefix),
+                    segment: segment.clone(),
+                }
+            }
+            Diagnostic::PendingPathRetriesExhausted { profile, prefix, retries, errno } => {
+                Self::PendingPathRetriesExhausted {
+                    at: at.clone(),
+                    profile: WireId::from(*profile),
+                    prefix: WireId::from(*prefix),
+                    retries: *retries,
+                    errno: *errno,
+                }
+            }
             Diagnostic::PendingPathMaterialized { profile, anchor } => {
                 Self::PendingPathMaterialized {
                     at: at.clone(),
@@ -685,10 +651,9 @@ impl From<(&Diagnostic, &WireTime)> for WireDiagnostic {
                     anchor: WireId::from(*anchor),
                 }
             }
-            Diagnostic::ReapPendingCancelled { profile } => Self::ReapPendingCancelled {
-                at: at.clone(),
-                profile: WireId::from(*profile),
-            },
+            Diagnostic::ReapPendingCancelled { profile } => {
+                Self::ReapPendingCancelled { at: at.clone(), profile: WireId::from(*profile) }
+            }
             Diagnostic::ProfileReaped { profile, via } => Self::ProfileReaped {
                 at: at.clone(),
                 profile: WireId::from(*profile),
@@ -699,83 +664,69 @@ impl From<(&Diagnostic, &WireTime)> for WireDiagnostic {
                 profile: WireId::from(*profile),
                 recovery: recovery.map(WireId::from),
             },
-            Diagnostic::ProfileClaimPurged {
-                profile,
-                claim,
-                resource,
-                failure,
-            } => Self::ProfileClaimPurged {
-                at: at.clone(),
-                profile: WireId::from(*profile),
-                claim: WireClaimKind::from(*claim),
-                resource: WireId::from(*resource),
-                failure: WireWatchFailure::from(*failure),
-            },
+            Diagnostic::ProfileClaimPurged { profile, claim, resource, failure } => {
+                Self::ProfileClaimPurged {
+                    at: at.clone(),
+                    profile: WireId::from(*profile),
+                    claim: WireClaimKind::from(*claim),
+                    resource: WireId::from(*resource),
+                    failure: WireWatchFailure::from(*failure),
+                }
+            }
             Diagnostic::AttachPathInvalid { path, hint } => Self::AttachPathInvalid {
                 at: at.clone(),
                 path: WirePath::from(path),
                 hint: (*hint).to_owned(),
             },
-            Diagnostic::AttachResourceStale { resource } => Self::AttachResourceStale {
-                at: at.clone(),
-                resource: WireId::from(*resource),
-            },
-            Diagnostic::AnchorKindMismatch {
-                profile,
-                prior_kind,
-                response_kind,
-            } => Self::AnchorKindMismatch {
-                at: at.clone(),
-                profile: WireId::from(*profile),
-                prior_kind: WireResourceKind::from(*prior_kind),
-                response_kind: WireResourceKind::from(*response_kind),
-            },
-            Diagnostic::SpliceCrossedUncovered {
-                profile,
-                target,
-                cause,
-            } => Self::SpliceCrossedUncovered {
-                at: at.clone(),
-                profile: WireId::from(*profile),
-                target: WireId::from(*target),
-                cause: WireSpliceFailureCause::from(*cause),
-            },
-            Diagnostic::EventAbsorbedByFireTail {
-                profile,
-                resource,
-                event,
-            } => Self::EventAbsorbedByFireTail {
-                at: at.clone(),
-                profile: WireId::from(*profile),
-                resource: WireId::from(*resource),
-                event: WireFsEvent::from(*event),
-            },
-            Diagnostic::AwaitGateDeadlineForceRebasing {
-                profile,
-                outstanding,
-            } => Self::AwaitGateDeadlineForceRebasing {
-                at: at.clone(),
-                profile: WireId::from(*profile),
-                outstanding: *outstanding,
-            },
-            Diagnostic::AwaitGateDeadlineReap {
-                profile,
-                outstanding,
-            } => Self::AwaitGateDeadlineReap {
-                at: at.clone(),
-                profile: WireId::from(*profile),
-                outstanding: *outstanding,
-            },
-            Diagnostic::QuiescenceCeilingUnreadable {
-                profile,
-                first_unread,
-                intent,
-            } => Self::QuiescenceCeilingUnreadable {
-                at: at.clone(),
-                profile: WireId::from(*profile),
-                first_unread: WirePath::from(first_unread),
-                intent: WireBurstIntent::from(*intent),
-            },
+            Diagnostic::AttachResourceStale { resource } => {
+                Self::AttachResourceStale { at: at.clone(), resource: WireId::from(*resource) }
+            }
+            Diagnostic::AnchorKindMismatch { profile, prior_kind, response_kind } => {
+                Self::AnchorKindMismatch {
+                    at: at.clone(),
+                    profile: WireId::from(*profile),
+                    prior_kind: WireResourceKind::from(*prior_kind),
+                    response_kind: WireResourceKind::from(*response_kind),
+                }
+            }
+            Diagnostic::SpliceCrossedUncovered { profile, target, cause } => {
+                Self::SpliceCrossedUncovered {
+                    at: at.clone(),
+                    profile: WireId::from(*profile),
+                    target: WireId::from(*target),
+                    cause: WireSpliceFailureCause::from(*cause),
+                }
+            }
+            Diagnostic::EventAbsorbedByFireTail { profile, resource, event } => {
+                Self::EventAbsorbedByFireTail {
+                    at: at.clone(),
+                    profile: WireId::from(*profile),
+                    resource: WireId::from(*resource),
+                    event: WireFsEvent::from(*event),
+                }
+            }
+            Diagnostic::AwaitGateDeadlineForceRebasing { profile, outstanding } => {
+                Self::AwaitGateDeadlineForceRebasing {
+                    at: at.clone(),
+                    profile: WireId::from(*profile),
+                    outstanding: *outstanding,
+                }
+            }
+            Diagnostic::AwaitGateDeadlineReap { profile, outstanding } => {
+                Self::AwaitGateDeadlineReap {
+                    at: at.clone(),
+                    profile: WireId::from(*profile),
+                    outstanding: *outstanding,
+                }
+            }
+            Diagnostic::QuiescenceCeilingUnreadable { profile, first_unread, intent } => {
+                Self::QuiescenceCeilingUnreadable {
+                    at: at.clone(),
+                    profile: WireId::from(*profile),
+                    first_unread: WirePath::from(first_unread),
+                    intent: WireBurstIntent::from(*intent),
+                }
+            }
             Diagnostic::QuiescenceCeilingForcedDespiteChange { profile, intent } => {
                 Self::QuiescenceCeilingForcedDespiteChange {
                     at: at.clone(),
@@ -783,40 +734,33 @@ impl From<(&Diagnostic, &WireTime)> for WireDiagnostic {
                     intent: WireBurstIntent::from(*intent),
                 }
             }
-            Diagnostic::RebaseCeilingForced {
-                profile,
-                intent,
-                observed_change,
-            } => Self::RebaseCeilingForced {
-                at: at.clone(),
-                profile: WireId::from(*profile),
-                intent: WireBurstIntent::from(*intent),
-                observed_change: *observed_change,
-            },
-            Diagnostic::RebaseCeilingUnreadable {
-                profile,
-                first_unread,
-                intent,
-            } => Self::RebaseCeilingUnreadable {
-                at: at.clone(),
-                profile: WireId::from(*profile),
-                first_unread: WirePath::from(first_unread),
-                intent: WireBurstIntent::from(*intent),
-            },
-            Diagnostic::ChangeOutsideEventMask {
-                profile,
-                intent,
-                retries,
-            } => Self::ChangeOutsideEventMask {
-                at: at.clone(),
-                profile: WireId::from(*profile),
-                intent: WireBurstIntent::from(*intent),
-                retries: *retries,
-            },
-            Diagnostic::SensorOverflow { scope } => Self::SensorOverflow {
-                at: at.clone(),
-                scope: WireOverflowScope::from(*scope),
-            },
+            Diagnostic::RebaseCeilingForced { profile, intent, observed_change } => {
+                Self::RebaseCeilingForced {
+                    at: at.clone(),
+                    profile: WireId::from(*profile),
+                    intent: WireBurstIntent::from(*intent),
+                    observed_change: *observed_change,
+                }
+            }
+            Diagnostic::RebaseCeilingUnreadable { profile, first_unread, intent } => {
+                Self::RebaseCeilingUnreadable {
+                    at: at.clone(),
+                    profile: WireId::from(*profile),
+                    first_unread: WirePath::from(first_unread),
+                    intent: WireBurstIntent::from(*intent),
+                }
+            }
+            Diagnostic::ChangeOutsideEventMask { profile, intent, retries } => {
+                Self::ChangeOutsideEventMask {
+                    at: at.clone(),
+                    profile: WireId::from(*profile),
+                    intent: WireBurstIntent::from(*intent),
+                    retries: *retries,
+                }
+            }
+            Diagnostic::SensorOverflow { scope } => {
+                Self::SensorOverflow { at: at.clone(), scope: WireOverflowScope::from(*scope) }
+            }
             Diagnostic::PerFileDriftDroppedOnRecovery { profile } => {
                 Self::PerFileDriftDroppedOnRecovery {
                     at: at.clone(),
@@ -829,43 +773,28 @@ impl From<(&Diagnostic, &WireTime)> for WireDiagnostic {
                     profile: WireId::from(*profile),
                 }
             }
-            Diagnostic::SubAttached {
-                sub,
-                name,
-                minted_by,
-            } => Self::SubAttached {
+            Diagnostic::SubAttached { sub, name, minted_by } => Self::SubAttached {
                 at: at.clone(),
                 sub: WireId::from(*sub),
                 name: name.clone(),
                 minted_by: minted_by.map(WireId::from),
             },
-            Diagnostic::SubFired {
-                sub,
-                profile,
-                count,
-                minted_by,
-            } => Self::SubFired {
+            Diagnostic::SubFired { sub, profile, count, minted_by } => Self::SubFired {
                 at: at.clone(),
                 sub: WireId::from(*sub),
                 profile: WireId::from(*profile),
                 count: *count,
                 minted_by: minted_by.map(WireId::from),
             },
-            Diagnostic::QuiescenceAbsorbed { profile } => Self::QuiescenceAbsorbed {
-                at: at.clone(),
-                profile: WireId::from(*profile),
-            },
+            Diagnostic::QuiescenceAbsorbed { profile } => {
+                Self::QuiescenceAbsorbed { at: at.clone(), profile: WireId::from(*profile) }
+            }
             Diagnostic::AbsorbArmed { profile, mode } => Self::AbsorbArmed {
                 at: at.clone(),
                 profile: WireId::from(*profile),
                 mode: WireAbsorbMode::from(*mode),
             },
-            Diagnostic::SubDetached {
-                sub,
-                profile,
-                reason,
-                minted_by,
-            } => Self::SubDetached {
+            Diagnostic::SubDetached { sub, profile, reason, minted_by } => Self::SubDetached {
                 at: at.clone(),
                 sub: WireId::from(*sub),
                 profile: WireId::from(*profile),
@@ -877,32 +806,24 @@ impl From<(&Diagnostic, &WireTime)> for WireDiagnostic {
                 sub: WireId::from(*sub),
                 minted_by: minted_by.map(WireId::from),
             },
-            Diagnostic::RebindUnknownSub { sub } => Self::RebindUnknownSub {
-                at: at.clone(),
-                sub: WireId::from(*sub),
-            },
-            Diagnostic::DiscoveryMinted {
-                template,
-                path,
-                kind,
-                entry,
-            } => Self::DiscoveryMinted {
+            Diagnostic::RebindUnknownSub { sub } => {
+                Self::RebindUnknownSub { at: at.clone(), sub: WireId::from(*sub) }
+            }
+            Diagnostic::DiscoveryMinted { template, path, kind, entry } => Self::DiscoveryMinted {
                 at: at.clone(),
                 template: WireId::from(*template),
                 path: WirePath::from(path),
                 kind: WireResourceKind::from(*kind),
                 entry: WireMintEntry::from(*entry),
             },
-            Diagnostic::DiscoveryUnsupportedAnchorKind {
-                template,
-                path,
-                kind,
-            } => Self::DiscoveryUnsupportedAnchorKind {
-                at: at.clone(),
-                template: WireId::from(*template),
-                path: WirePath::from(path),
-                kind: WireEntryKind::from(*kind),
-            },
+            Diagnostic::DiscoveryUnsupportedAnchorKind { template, path, kind } => {
+                Self::DiscoveryUnsupportedAnchorKind {
+                    at: at.clone(),
+                    template: WireId::from(*template),
+                    path: WirePath::from(path),
+                    kind: WireEntryKind::from(*kind),
+                }
+            }
             Diagnostic::DiscoveryFanoutThreshold { template, count } => {
                 Self::DiscoveryFanoutThreshold {
                     at: at.clone(),
@@ -910,11 +831,7 @@ impl From<(&Diagnostic, &WireTime)> for WireDiagnostic {
                     count: *count,
                 }
             }
-            Diagnostic::DiscoverySubReaped {
-                template,
-                sub,
-                path,
-            } => Self::DiscoverySubReaped {
+            Diagnostic::DiscoverySubReaped { template, sub, path } => Self::DiscoverySubReaped {
                 at: at.clone(),
                 template: WireId::from(*template),
                 sub: WireId::from(*sub),
@@ -925,20 +842,17 @@ impl From<(&Diagnostic, &WireTime)> for WireDiagnostic {
                 template: WireId::from(*template),
                 path: WirePath::from(path),
             },
-            Diagnostic::InvalidBurstTransition {
-                profile,
-                helper,
-                observed,
-            } => Self::InvalidBurstTransition {
-                at: at.clone(),
-                profile: WireId::from(*profile),
-                helper: WireBurstHelper::from(*helper),
-                observed: WireProfileStateDiscriminant::from(*observed),
-            },
-            Diagnostic::WalkerContractViolated { owner } => Self::WalkerContractViolated {
-                at: at.clone(),
-                owner: WireId::from(*owner),
-            },
+            Diagnostic::InvalidBurstTransition { profile, helper, observed } => {
+                Self::InvalidBurstTransition {
+                    at: at.clone(),
+                    profile: WireId::from(*profile),
+                    helper: WireBurstHelper::from(*helper),
+                    observed: WireProfileStateDiscriminant::from(*observed),
+                }
+            }
+            Diagnostic::WalkerContractViolated { owner } => {
+                Self::WalkerContractViolated { at: at.clone(), owner: WireId::from(*owner) }
+            }
         }
     }
 }
@@ -1220,9 +1134,7 @@ pub(crate) enum WireOverflowScope {
 impl From<OverflowScope> for WireOverflowScope {
     fn from(s: OverflowScope) -> Self {
         match s {
-            OverflowScope::Resource(r) => Self::Resource {
-                resource: WireId::from(r),
-            },
+            OverflowScope::Resource(r) => Self::Resource { resource: WireId::from(r) },
             OverflowScope::Global => Self::Global,
         }
     }
@@ -1542,11 +1454,8 @@ impl From<SpliceFailureCause> for WireSpliceFailureCause {
 
 impl WireSpliceFailureCause {
     /// Every variant — the round-trip witness source; the tripwire below keeps it exhaustive.
-    const ALL: [Self; 3] = [
-        Self::TargetOutsideAnchorSubtree,
-        Self::SlotReapedMidGraft,
-        Self::IntermediateUncovered,
-    ];
+    const ALL: [Self; 3] =
+        [Self::TargetOutsideAnchorSubtree, Self::SlotReapedMidGraft, Self::IntermediateUncovered];
 
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
@@ -1758,13 +1667,8 @@ impl From<ProfileStateDiscriminant> for WireProfileStateDiscriminant {
 
 impl WireProfileStateDiscriminant {
     /// Every variant — the round-trip witness source; the tripwire below keeps it exhaustive.
-    const ALL: [Self; 5] = [
-        Self::Idle,
-        Self::Parked,
-        Self::Pending,
-        Self::ActivePreFire,
-        Self::ActivePostFire,
-    ];
+    const ALL: [Self; 5] =
+        [Self::Idle, Self::Parked, Self::Pending, Self::ActivePreFire, Self::ActivePostFire];
 
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
@@ -2155,17 +2059,11 @@ mod tests {
         assert_eq!(json, r#""1970-01-01T00:00:00Z""#);
 
         let epoch = WireTime::from(UNIX_EPOCH);
-        assert_eq!(
-            serde_json::to_string(&epoch).unwrap(),
-            r#""1970-01-01T00:00:00Z""#
-        );
+        assert_eq!(serde_json::to_string(&epoch).unwrap(), r#""1970-01-01T00:00:00Z""#);
 
         // 10000-01-01T00:00:00Z — past jiff's `Timestamp::MAX`, which is the rendered ceiling.
         let post = WireTime::from(UNIX_EPOCH + Duration::from_hours(70_389_528));
-        assert_eq!(
-            serde_json::to_string(&post).unwrap(),
-            r#""9999-12-30T22:00:00Z""#
-        );
+        assert_eq!(serde_json::to_string(&post).unwrap(), r#""9999-12-30T22:00:00Z""#);
     }
 
     /// `Deserialize` for [`WireTime`] is the symmetric gate — a token that is not a timestamp, or a
@@ -2248,13 +2146,7 @@ mod tests {
     /// by the absence of the trailing `/<id>`.
     #[test]
     fn wire_overflow_scope_display_resource_carries_id_global_is_bare() {
-        assert_eq!(
-            WireOverflowScope::Resource {
-                resource: WireId(13),
-            }
-            .to_string(),
-            "resource/13",
-        );
+        assert_eq!(WireOverflowScope::Resource { resource: WireId(13) }.to_string(), "resource/13");
         assert_eq!(WireOverflowScope::Global.to_string(), "global");
     }
 
@@ -2263,18 +2155,9 @@ mod tests {
     /// `failure=` field.
     #[test]
     fn wire_watch_failure_display_includes_errno() {
-        assert_eq!(
-            WireWatchFailure::Pressure { errno: 24 }.to_string(),
-            "pressure(errno=24)",
-        );
-        assert_eq!(
-            WireWatchFailure::Resource { errno: 28 }.to_string(),
-            "resource(errno=28)",
-        );
-        assert_eq!(
-            WireWatchFailure::Invariant { errno: 22 }.to_string(),
-            "invariant(errno=22)",
-        );
+        assert_eq!(WireWatchFailure::Pressure { errno: 24 }.to_string(), "pressure(errno=24)");
+        assert_eq!(WireWatchFailure::Resource { errno: 28 }.to_string(), "resource(errno=28)");
+        assert_eq!(WireWatchFailure::Invariant { errno: 22 }.to_string(), "invariant(errno=22)");
     }
 
     /// Witness fixture covering every [`WireDiagnostic`] variant.
@@ -2293,11 +2176,7 @@ mod tests {
     fn variant_witnesses() -> Vec<WireDiagnostic> {
         let at = || WireTime::from(UNIX_EPOCH);
         vec![
-            WireDiagnostic::StaleProbeResponse {
-                at: at(),
-                owner: WireId(1),
-                correlation: 7,
-            },
+            WireDiagnostic::StaleProbeResponse { at: at(), owner: WireId(1), correlation: 7 },
             WireDiagnostic::StaleTimer { at: at(), id: 9 },
             WireDiagnostic::EffectCompleteOutsideAwaiting {
                 at: at(),
@@ -2305,22 +2184,10 @@ mod tests {
                 profile: WireId(22),
                 minted_by: None,
             },
-            WireDiagnostic::EffectCompleteForUnknownSub {
-                at: at(),
-                sub: WireId(13),
-            },
-            WireDiagnostic::DetachUnknownSub {
-                at: at(),
-                sub: WireId(17),
-            },
-            WireDiagnostic::ConfigDiffUnknownSub {
-                at: at(),
-                name: "foo".into(),
-            },
-            WireDiagnostic::ConfigDiffRebindFallbackAttach {
-                at: at(),
-                name: "baz".into(),
-            },
+            WireDiagnostic::EffectCompleteForUnknownSub { at: at(), sub: WireId(13) },
+            WireDiagnostic::DetachUnknownSub { at: at(), sub: WireId(17) },
+            WireDiagnostic::ConfigDiffUnknownSub { at: at(), name: "foo".into() },
+            WireDiagnostic::ConfigDiffRebindFallbackAttach { at: at(), name: "baz".into() },
             WireDiagnostic::ProbeVanished {
                 at: at(),
                 profile: WireId(31),
@@ -2344,14 +2211,8 @@ mod tests {
                 event: WireFsEvent::StructureChanged,
                 profile: WireId(46),
             },
-            WireDiagnostic::EventOnUnwatchedResource {
-                at: at(),
-                resource: WireId(42),
-            },
-            WireDiagnostic::EventNoConsumer {
-                at: at(),
-                resource: WireId(43),
-            },
+            WireDiagnostic::EventOnUnwatchedResource { at: at(), resource: WireId(42) },
+            WireDiagnostic::EventNoConsumer { at: at(), resource: WireId(43) },
             WireDiagnostic::WatchOpRejected {
                 at: at(),
                 resource: WireId(44),
@@ -2386,10 +2247,7 @@ mod tests {
                 profile: WireId(58),
                 anchor: WireId(59),
             },
-            WireDiagnostic::ReapPendingCancelled {
-                at: at(),
-                profile: WireId(60),
-            },
+            WireDiagnostic::ReapPendingCancelled { at: at(), profile: WireId(60) },
             WireDiagnostic::ProfileReaped {
                 at: at(),
                 profile: WireId(61),
@@ -2412,10 +2270,7 @@ mod tests {
                 path: WirePath::from(Path::new("/tmp/x")),
                 hint: "relative".into(),
             },
-            WireDiagnostic::AttachResourceStale {
-                at: at(),
-                resource: WireId(90),
-            },
+            WireDiagnostic::AttachResourceStale { at: at(), resource: WireId(90) },
             WireDiagnostic::AnchorKindMismatch {
                 at: at(),
                 profile: WireId(91),
@@ -2473,18 +2328,9 @@ mod tests {
                 intent: WireBurstIntent::Standard,
                 retries: 4,
             },
-            WireDiagnostic::SensorOverflow {
-                at: at(),
-                scope: WireOverflowScope::Global,
-            },
-            WireDiagnostic::PerFileDriftDroppedOnRecovery {
-                at: at(),
-                profile: WireId(140),
-            },
-            WireDiagnostic::PerFileFireSkippedOnFreshSeed {
-                at: at(),
-                profile: WireId(141),
-            },
+            WireDiagnostic::SensorOverflow { at: at(), scope: WireOverflowScope::Global },
+            WireDiagnostic::PerFileDriftDroppedOnRecovery { at: at(), profile: WireId(140) },
+            WireDiagnostic::PerFileFireSkippedOnFreshSeed { at: at(), profile: WireId(141) },
             WireDiagnostic::SubAttached {
                 at: at(),
                 sub: WireId(150),
@@ -2498,10 +2344,7 @@ mod tests {
                 count: 3,
                 minted_by: Some(WireId(159)),
             },
-            WireDiagnostic::QuiescenceAbsorbed {
-                at: at(),
-                profile: WireId(157),
-            },
+            WireDiagnostic::QuiescenceAbsorbed { at: at(), profile: WireId(157) },
             WireDiagnostic::AbsorbArmed {
                 at: at(),
                 profile: WireId(158),
@@ -2514,15 +2357,8 @@ mod tests {
                 reason: WireDetachReason::TemplateDetached,
                 minted_by: Some(WireId(160)),
             },
-            WireDiagnostic::SubRebound {
-                at: at(),
-                sub: WireId(155),
-                minted_by: None,
-            },
-            WireDiagnostic::RebindUnknownSub {
-                at: at(),
-                sub: WireId(156),
-            },
+            WireDiagnostic::SubRebound { at: at(), sub: WireId(155), minted_by: None },
+            WireDiagnostic::RebindUnknownSub { at: at(), sub: WireId(156) },
             WireDiagnostic::DiscoveryMinted {
                 at: at(),
                 template: WireId(190),
@@ -2558,10 +2394,7 @@ mod tests {
                 helper: WireBurstHelper::TransitionToVerifying,
                 observed: WireProfileStateDiscriminant::Idle,
             },
-            WireDiagnostic::WalkerContractViolated {
-                at: at(),
-                owner: WireId(181),
-            },
+            WireDiagnostic::WalkerContractViolated { at: at(), owner: WireId(181) },
             WireDiagnostic::Missed { at: at(), count: 5 },
         ]
     }
@@ -2609,16 +2442,8 @@ mod tests {
                 .strip_prefix('"')
                 .and_then(|s| s.strip_suffix('"'))
                 .expect("JSON form is a bare quoted token");
-            assert_eq!(
-                stripped,
-                as_str(v),
-                "JSON form ({json}) must equal as_str() for {v:?}",
-            );
-            assert_eq!(
-                v.to_string(),
-                as_str(v),
-                "Display must write as_str() for {v:?}",
-            );
+            assert_eq!(stripped, as_str(v), "JSON form ({json}) must equal as_str() for {v:?}");
+            assert_eq!(v.to_string(), as_str(v), "Display must write as_str() for {v:?}");
             let back: E = serde_json::from_str(&json).expect("deserialize wire form");
             assert_eq!(back, v);
         }

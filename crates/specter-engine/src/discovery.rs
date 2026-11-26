@@ -92,10 +92,7 @@ impl MatchSet {
     /// where the graft made it, made where a reap took it since. The walk writes no kind; a mint
     /// kinds its own terminus.
     fn resolve(
-        tree: &mut Tree,
-        anchor: ResourceId,
-        now: &DirSnapshot,
-        before: PriorDir<'_>,
+        tree: &mut Tree, anchor: ResourceId, now: &DirSnapshot, before: PriorDir<'_>,
         terminus_depth: u32,
     ) -> Self {
         let mut set = Self::default();
@@ -106,13 +103,8 @@ impl MatchSet {
     /// One level of [`Self::resolve`]: `dir` is listed at `slot`, the baseline holds `before` for
     /// it, its branch stood as `branch`, and its entries are matches at `depth` one.
     fn resolve_level(
-        &mut self,
-        tree: &mut Tree,
-        slot: ResourceId,
-        dir: &DirSnapshot,
-        before: PriorDir<'_>,
-        branch: Branch,
-        depth: u32,
+        &mut self, tree: &mut Tree, slot: ResourceId, dir: &DirSnapshot, before: PriorDir<'_>,
+        branch: Branch, depth: u32,
     ) {
         if depth == 1 {
             for (name, child) in dir.entries() {
@@ -120,11 +112,7 @@ impl MatchSet {
                     kind @ (EntryKind::File | EntryKind::Dir) => {
                         let slot = listed_slot(tree, slot, name);
                         self.slots.insert(slot);
-                        self.matched.push(Match {
-                            slot,
-                            kind: kind.into(),
-                            branch,
-                        });
+                        self.matched.push(Match { slot, kind: kind.into(), branch });
                     }
                     kind @ (EntryKind::Symlink | EntryKind::Other) => {
                         self.unsupported.get_or_insert_with(|| Unsupported {
@@ -166,9 +154,7 @@ impl MatchSet {
     /// holds none for it, no minted Sub lies beneath it.
     fn certifies_absent(&self, tree: &Tree, slot: ResourceId) -> bool {
         !self.slots.contains(&slot)
-            && !tree
-                .ancestors(slot)
-                .any(|above| self.denied.contains(&above))
+            && !tree.ancestors(slot).any(|above| self.denied.contains(&above))
     }
 }
 
@@ -186,11 +172,7 @@ impl Engine {
     /// attach order, which slot reuse can decouple from id order.
     fn templates_at(&self, profile: ProfileId) -> SmallVec<[SubId; 2]> {
         let mut templates = SmallVec::new();
-        if self
-            .profiles
-            .get(profile)
-            .is_some_and(|p| p.config().match_chain().is_some())
-        {
+        if self.profiles.get(profile).is_some_and(|p| p.config().match_chain().is_some()) {
             templates.extend_from_slice(self.subs.at(profile));
             templates.sort_unstable();
         }
@@ -200,17 +182,14 @@ impl Engine {
     /// Name, for each template on `discovery` and in `(template, path)` order, every directory its
     /// walk had cause to read and could not: what a pass at its ceiling goes on without.
     pub(crate) fn narrate_denied(
-        &self,
-        discovery: ProfileId,
-        denied: &NonEmptyPathSet,
-        out: &mut StepOutput,
+        &self, discovery: ProfileId, denied: &NonEmptyPathSet, out: &mut StepOutput,
     ) {
         for template in self.templates_at(discovery) {
-            out.diagnostics
-                .extend(denied.iter().map(|path| Diagnostic::DiscoveryDenied {
-                    template,
-                    path: Arc::clone(path),
-                }));
+            out.diagnostics.extend(
+                denied
+                    .iter()
+                    .map(|path| Diagnostic::DiscoveryDenied { template, path: Arc::clone(path) }),
+            );
         }
     }
 
@@ -230,10 +209,7 @@ impl Engine {
     /// templates' detach already took what they minted) reads nothing, makes no slot and closes no
     /// enumeration, so a template's first real walk still enumerates.
     pub(crate) fn reconcile_matches(
-        &mut self,
-        discovery: ProfileId,
-        now: Instant,
-        out: &mut StepOutput,
+        &mut self, discovery: ProfileId, now: Instant, out: &mut StepOutput,
     ) {
         let Some(profile) = self.profiles.get(discovery) else {
             return;
@@ -308,9 +284,7 @@ impl Engine {
             .minted(template)
             .filter_map(|sub| {
                 let slot = self.profiles.get(self.subs.get(sub)?.profile())?.resource();
-                matches
-                    .certifies_absent(&self.tree, slot)
-                    .then_some((slot, sub))
+                matches.certifies_absent(&self.tree, slot).then_some((slot, sub))
             })
             .collect();
         vanished.sort_unstable();
@@ -328,27 +302,21 @@ impl Engine {
     /// template's enumeration: the set the pass leaves is certified.
     fn close_pass(&mut self, template: SubId, matches: &MatchSet, out: &mut StepOutput) {
         if let Some(skipped) = &matches.unsupported
-            && self
-                .subs
-                .narrate_once(template, MintNarration::UnsupportedAnchorKind)
+            && self.subs.narrate_once(template, MintNarration::UnsupportedAnchorKind)
         {
-            out.diagnostics
-                .push(Diagnostic::DiscoveryUnsupportedAnchorKind {
-                    template,
-                    path: Arc::from(skipped.dir.join(skipped.name.as_str())),
-                    kind: skipped.kind,
-                });
+            out.diagnostics.push(Diagnostic::DiscoveryUnsupportedAnchorKind {
+                template,
+                path: Arc::from(skipped.dir.join(skipped.name.as_str())),
+                kind: skipped.kind,
+            });
         }
         // The live total, a Sub kept beneath a denied directory included, compared before the line
         // is spent: a pass below the threshold leaves it unmade.
         let count = self.subs.minted(template).len();
         if count > FANOUT_WARNING_THRESHOLD
-            && self
-                .subs
-                .narrate_once(template, MintNarration::FanoutThreshold)
+            && self.subs.narrate_once(template, MintNarration::FanoutThreshold)
         {
-            out.diagnostics
-                .push(Diagnostic::DiscoveryFanoutThreshold { template, count });
+            out.diagnostics.push(Diagnostic::DiscoveryFanoutThreshold { template, count });
         }
         self.subs.close_enumeration(template);
     }
@@ -399,9 +367,7 @@ mod tests {
     fn anchored() -> (Tree, ResourceId) {
         let mut tree = Tree::new();
         let root = tree.ensure_root(FS_ROOT_SEGMENT, ResourceRole::User);
-        let srv = tree
-            .ensure_child(root, "srv", ResourceRole::User)
-            .expect("live root");
+        let srv = tree.ensure_child(root, "srv", ResourceRole::User).expect("live root");
         (tree, srv)
     }
 
@@ -424,16 +390,8 @@ mod tests {
         assert_eq!(
             set.matched,
             [
-                Match {
-                    slot: at("a"),
-                    kind: ResourceKind::Dir,
-                    branch: Branch::Standing,
-                },
-                Match {
-                    slot: at("b.log"),
-                    kind: ResourceKind::File,
-                    branch: Branch::Standing,
-                },
+                Match { slot: at("a"), kind: ResourceKind::Dir, branch: Branch::Standing },
+                Match { slot: at("b.log"), kind: ResourceKind::File, branch: Branch::Standing },
             ],
         );
         let skipped = set.unsupported.expect("a symlink and a fifo match");
@@ -458,18 +416,14 @@ mod tests {
         let (mut tree, srv) = anchored();
         // A Sub minted beneath `locked` before it was denied holds that slot chain.
         let kept = ["locked", "q", "m"].iter().fold(srv, |dir, name| {
-            tree.ensure_child(dir, name, ResourceRole::User)
-                .expect("live parent")
+            tree.ensure_child(dir, name, ResourceRole::User).expect("live parent")
         });
         let before = dir_snap_nested(&[("o", covered_at(40, &[("p", denied(41))]))]);
         let now = dir_snap_nested(&[
             ("early.txt", leaf(EntryKind::File, 1)),
             ("sealed", uncovered(2)),
             ("locked", denied(3)),
-            (
-                "o",
-                covered_at(40, &[("p", covered_at(41, &[("m", uncovered(42))]))]),
-            ),
+            ("o", covered_at(40, &[("p", covered_at(41, &[("m", uncovered(42))]))])),
             (
                 "x",
                 covered_at(
@@ -498,16 +452,10 @@ mod tests {
             3,
         );
 
-        let at = |path: &[&str]| {
-            path.iter()
-                .try_fold(srv, |dir, name| tree.lookup(Some(dir), name))
-        };
+        let at =
+            |path: &[&str]| path.iter().try_fold(srv, |dir, name| tree.lookup(Some(dir), name));
         let slot = |path: &[&str]| at(path).expect("resolved");
-        let matched = |path: &[&str], kind, branch| Match {
-            slot: slot(path),
-            kind,
-            branch,
-        };
+        let matched = |path: &[&str], kind, branch| Match { slot: slot(path), kind, branch };
         assert_eq!(
             set.matched,
             [
@@ -518,11 +466,7 @@ mod tests {
             ],
         );
         assert_eq!(
-            [
-                at(&["early.txt"]),
-                at(&["sealed"]),
-                at(&["x", "y", "w", "deep"])
-            ],
+            [at(&["early.txt"]), at(&["sealed"]), at(&["x", "y", "w", "deep"])],
             [None; 3],
             "what is passed by gets no slot",
         );
@@ -532,13 +476,8 @@ mod tests {
         );
         assert!(!set.certifies_absent(&tree, slot(&["x", "y", "log"])));
         let y = slot(&["x", "y"]);
-        let gone = tree
-            .ensure_child(y, "gone", ResourceRole::User)
-            .expect("live y");
-        assert!(
-            set.certifies_absent(&tree, gone),
-            "a listing answers for a name it lacks",
-        );
+        let gone = tree.ensure_child(y, "gone", ResourceRole::User).expect("live y");
+        assert!(set.certifies_absent(&tree, gone), "a listing answers for a name it lacks");
     }
 
     /// The reconcile's non-Dir-anchor totality arm: with no Dir `current` (the cold probe hasn't

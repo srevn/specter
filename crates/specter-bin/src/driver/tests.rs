@@ -46,16 +46,7 @@ use std::time::{Duration, Instant, SystemTime};
 /// tests that *do* exercise the meta-rotation path can assert "rotated to a real value" by comparing
 /// against a fresh [`FileMeta::from_path`] (which differs from this sentinel in every field).
 fn dummy_meta() -> FileMeta {
-    FileMeta {
-        inode: 0,
-        device: 0,
-        mtime_sec: 0,
-        mtime_nsec: 0,
-        size: 0,
-        mode: 0,
-        uid: 0,
-        gid: 0,
-    }
+    FileMeta { inode: 0, device: 0, mtime_sec: 0, mtime_nsec: 0, size: 0, mode: 0, uid: 0, gid: 0 }
 }
 
 /// Bundle of handles a test holds to drive [`EngineDriver`] without the [`crate::app`] orchestration
@@ -113,14 +104,8 @@ fn rig_for(config: Config, config_path: PathBuf) -> TestRig {
     let signals = crate::signals::register_signal_handlers().expect("signal pipe init");
     let (prober_response_tx, prober_response_rx) = crossbeam::channel::unbounded::<Input>();
     let (effect_complete_tx, effect_complete_rx) = crossbeam::channel::unbounded::<Input>();
-    let reactor = Reactor::new(
-        watcher,
-        None,
-        signals,
-        prober_response_rx,
-        effect_complete_rx,
-    )
-    .expect("reactor init");
+    let reactor = Reactor::new(watcher, None, signals, prober_response_rx, effect_complete_rx)
+        .expect("reactor init");
     // Mint the Registry clone + WakeHandle BEFORE the reactor moves into the driver constructor —
     // once moved, the borrows are no longer reachable.
     let registry_for_ipc = reactor.registry_clone().expect("registry clone");
@@ -164,9 +149,7 @@ impl TestRig {
     /// Borrow the effect-complete sender for test injection. Panics if the sender has already been
     /// taken via [`Self::drop_effect_complete_tx`].
     fn effect_complete_tx(&self) -> &Sender<Input> {
-        self.effect_complete_tx
-            .as_ref()
-            .expect("effect_complete_tx already taken")
+        self.effect_complete_tx.as_ref().expect("effect_complete_tx already taken")
     }
 
     /// Simulate the actuator-thread closure exiting: drop the rig's `effect_complete_tx` clone, the
@@ -177,9 +160,7 @@ impl TestRig {
     /// Call [`super::WakeHandle::wake`] (via `rig.waker.wake()`) after this to mirror the Drop-fired
     /// wake edge that production's `WakingSink::Drop` pulses post-close. Panics if already taken.
     fn drop_effect_complete_tx(&mut self) {
-        self.effect_complete_tx
-            .take()
-            .expect("effect_complete_tx already taken");
+        self.effect_complete_tx.take().expect("effect_complete_tx already taken");
     }
 }
 
@@ -227,9 +208,7 @@ settle    = "50ms"
 /// rather than hanging the test.
 fn ipc_connect(rig: &TestRig) -> UnixStream {
     let client = UnixStream::connect(&rig.socket_path).expect("connect to rig socket");
-    client
-        .set_read_timeout(Some(Duration::from_millis(50)))
-        .expect("set read timeout");
+    client.set_read_timeout(Some(Duration::from_millis(50))).expect("set read timeout");
     client
 }
 
@@ -282,9 +261,7 @@ fn write_request(client: &mut UnixStream, req: &WireRequest) {
 /// Round-trip a single request → response over `client`, driving the rig's tick loop until the
 /// response surfaces. Panics on timeout (every covered verb completes within milliseconds).
 fn ipc_round_trip(
-    rig: &mut TestRig,
-    client: &mut UnixStream,
-    req: &WireRequest,
+    rig: &mut TestRig, client: &mut UnixStream, req: &WireRequest,
 ) -> ResponsePayload {
     write_request(client, req);
     run_until_response(rig, client).expect("IPC response within test deadline")
@@ -309,9 +286,7 @@ fn dispatch_signal_first_sigterm_continues_loop_and_arms_first_term() {
     let config = Config::from_str("").expect("empty config parses");
     let mut rig = rig_for(config, cfg_path);
 
-    let outcome = rig
-        .driver
-        .dispatch_signal(signal_hook::consts::SIGTERM, Instant::now());
+    let outcome = rig.driver.dispatch_signal(signal_hook::consts::SIGTERM, Instant::now());
     assert_eq!(outcome, ControlFlow::Continue(()));
     assert!(
         rig.driver.first_term.is_some(),
@@ -340,14 +315,9 @@ fn first_sigint_does_not_close_tick_loop() {
     let config = Config::from_str("").expect("empty config parses");
     let mut rig = rig_for(config, cfg_path);
 
-    let outcome = rig
-        .driver
-        .dispatch_signal(signal_hook::consts::SIGINT, Instant::now());
+    let outcome = rig.driver.dispatch_signal(signal_hook::consts::SIGINT, Instant::now());
     assert_eq!(outcome, ControlFlow::Continue(()));
-    assert!(
-        rig.driver.first_term.is_some(),
-        "first SIGINT arms first_term",
-    );
+    assert!(rig.driver.first_term.is_some(), "first SIGINT arms first_term");
 
     arm_zero_timeout(&mut rig);
     let tick_outcome = rig.driver.tick();
@@ -374,9 +344,7 @@ fn ipc_reload_refused_mid_shutdown_with_shutting_down_code() {
     let config = Config::from_str("").expect("empty config parses");
     let mut rig = rig_for(config, cfg_path);
 
-    let _ = rig
-        .driver
-        .dispatch_signal(signal_hook::consts::SIGINT, Instant::now());
+    let _ = rig.driver.dispatch_signal(signal_hook::consts::SIGINT, Instant::now());
     assert!(rig.driver.first_term.is_some());
 
     let mut client = ipc_connect(&rig);
@@ -411,18 +379,14 @@ fn ipc_disable_and_enable_refused_mid_shutdown_with_shutting_down_code() {
     let _ = rig.driver.run_initial_attach();
     assert!(rig.driver.engine.subs().find_by_name("build").is_some());
 
-    let _ = rig
-        .driver
-        .dispatch_signal(signal_hook::consts::SIGINT, Instant::now());
+    let _ = rig.driver.dispatch_signal(signal_hook::consts::SIGINT, Instant::now());
     assert!(rig.driver.first_term.is_some());
 
     let mut client = ipc_connect(&rig);
     let disable_reply = ipc_round_trip(
         &mut rig,
         &mut client,
-        &WireRequest::Disable {
-            name: CompactString::const_new("build"),
-        },
+        &WireRequest::Disable { name: CompactString::const_new("build") },
     );
     match disable_reply {
         ResponsePayload::Err { code, error } => {
@@ -447,9 +411,7 @@ fn ipc_disable_and_enable_refused_mid_shutdown_with_shutting_down_code() {
     let enable_reply = ipc_round_trip(
         &mut rig,
         &mut client,
-        &WireRequest::Enable {
-            name: CompactString::const_new("build"),
-        },
+        &WireRequest::Enable { name: CompactString::const_new("build") },
     );
     match enable_reply {
         ResponsePayload::Err { code, error } => {
@@ -539,11 +501,7 @@ fn drain_accept_bound_and_rearm_drains_burst_across_ticks() {
             break;
         }
     }
-    assert_eq!(
-        rig.driver.ipc.conn_count(),
-        0,
-        "all conns drained after client disconnect",
-    );
+    assert_eq!(rig.driver.ipc.conn_count(), 0, "all conns drained after client disconnect");
 
     let _ = rig.driver.begin_shutdown();
 }
@@ -589,18 +547,8 @@ fn arm_writable_interests_per_conn_failure_terminates_only_failing_conn() {
     let token_b = mio::Token(TOKEN_CONN_BASE + 1);
 
     // Push bytes so both conns are eligible for the rearm pass.
-    rig.driver
-        .ipc
-        .conn_mut(token_a)
-        .expect("A in map")
-        .write_queue
-        .push_back(b'x');
-    rig.driver
-        .ipc
-        .conn_mut(token_b)
-        .expect("B in map")
-        .write_queue
-        .push_back(b'x');
+    rig.driver.ipc.conn_mut(token_a).expect("A in map").write_queue.push_back(b'x');
+    rig.driver.ipc.conn_mut(token_b).expect("B in map").write_queue.push_back(b'x');
 
     // Force a registry inconsistency on conn A: deregister its stream out-of-band, leaving the conn
     // entry in the map. The next `reregister` syscall returns ENOENT, exercising the defer-terminate
@@ -609,14 +557,8 @@ fn arm_writable_interests_per_conn_failure_terminates_only_failing_conn() {
 
     rig.driver.ipc.arm_writable_interests();
 
-    assert!(
-        rig.driver.ipc.conn_ref(token_a).is_none(),
-        "conn A terminated on rearm failure",
-    );
-    assert!(
-        rig.driver.ipc.conn_ref(token_b).is_some(),
-        "conn B unaffected by A's failure",
-    );
+    assert!(rig.driver.ipc.conn_ref(token_a).is_none(), "conn A terminated on rearm failure");
+    assert!(rig.driver.ipc.conn_ref(token_b).is_some(), "conn B unaffected by A's failure");
     assert_eq!(rig.driver.ipc.conn_count(), 1, "only conn A removed");
 
     let _ = rig.driver.begin_shutdown();
@@ -633,17 +575,11 @@ fn ipc_subscribe_allowed_mid_shutdown() {
     let mut rig = rig_for(config, cfg_path);
     let _ = rig.driver.run_initial_attach();
 
-    let _ = rig
-        .driver
-        .dispatch_signal(signal_hook::consts::SIGINT, Instant::now());
+    let _ = rig.driver.dispatch_signal(signal_hook::consts::SIGINT, Instant::now());
     assert!(rig.driver.first_term.is_some());
 
     let mut client = ipc_connect(&rig);
-    let reply = ipc_round_trip(
-        &mut rig,
-        &mut client,
-        &WireRequest::Subscribe { name: None },
-    );
+    let reply = ipc_round_trip(&mut rig, &mut client, &WireRequest::Subscribe { name: None });
     match reply {
         ResponsePayload::SubscribeAck { sub: None } => {}
         other => panic!("expected SubscribeAck(None) mid-shutdown, got {other:?}"),
@@ -665,12 +601,7 @@ fn run_initial_attach_attaches_static_sub_and_emits_watch_op() {
 
     let _ = rig.driver.run_initial_attach();
 
-    let sid = rig
-        .driver
-        .engine
-        .subs()
-        .find_by_name("build")
-        .expect("static Sub 'build' attached");
+    let sid = rig.driver.engine.subs().find_by_name("build").expect("static Sub 'build' attached");
     assert!(rig.driver.engine.subs().get(sid).is_some());
 
     // The attach emitted a Watch op inline (via `forward`'s `apply_watch_ops`). The Seed burst
@@ -693,12 +624,7 @@ fn run_initial_attach_attaches_static_only_config() {
 
     let _ = rig.driver.run_initial_attach();
 
-    let sid = rig
-        .driver
-        .engine
-        .subs()
-        .find_by_name("build")
-        .expect("static Sub 'build' attached");
+    let sid = rig.driver.engine.subs().find_by_name("build").expect("static Sub 'build' attached");
     assert!(rig.driver.engine.subs().get(sid).is_some());
 
     let _ = rig.driver.begin_shutdown();
@@ -714,12 +640,7 @@ fn run_initial_attach_registers_discovery_sub_for_dynamic_watch() {
 
     let _ = rig.driver.run_initial_attach();
 
-    let sid = rig
-        .driver
-        .engine
-        .subs()
-        .find_by_name("logs")
-        .expect("template 'logs' registered");
+    let sid = rig.driver.engine.subs().find_by_name("logs").expect("template 'logs' registered");
     let sub = rig.driver.engine.subs().get(sid).expect("live Sub");
     assert!(sub.is_template(), "dynamic watch lowers to a template");
 
@@ -830,9 +751,7 @@ fn reload_with_invalid_path_logs_and_keeps_config() {
     let config = Config::from_str("").expect("empty config parses");
     let mut rig = rig_for(config.clone(), cfg_path);
 
-    let _ = rig
-        .driver
-        .dispatch_reload(ReloadTrigger::Sighup, Instant::now());
+    let _ = rig.driver.dispatch_reload(ReloadTrigger::Sighup, Instant::now());
 
     assert_eq!(rig.driver.loader.current_config(), &config);
 }
@@ -857,23 +776,12 @@ actions   = [{{ exec = ["true"] }}]
 
     let mut rig = rig_for(initial.clone(), cfg_path);
     let _ = rig.driver.run_initial_attach();
-    let sid_before = rig
-        .driver
-        .engine
-        .subs()
-        .find_by_name("build")
-        .expect("static Sub 'build' attached");
+    let sid_before =
+        rig.driver.engine.subs().find_by_name("build").expect("static Sub 'build' attached");
 
-    let _ = rig
-        .driver
-        .dispatch_reload(ReloadTrigger::Sighup, Instant::now());
+    let _ = rig.driver.dispatch_reload(ReloadTrigger::Sighup, Instant::now());
 
-    let sid_after = rig
-        .driver
-        .engine
-        .subs()
-        .find_by_name("build")
-        .expect("still attached");
+    let sid_after = rig.driver.engine.subs().find_by_name("build").expect("still attached");
     assert_eq!(sid_before, sid_after);
     assert_eq!(rig.driver.loader.current_config(), &initial);
 
@@ -918,9 +826,7 @@ settle    = "100ms"
     assert!(rig.driver.engine.subs().find_by_name("b").is_none());
 
     std::fs::write(&cfg_path, &new_text).unwrap();
-    let _ = rig
-        .driver
-        .dispatch_reload(ReloadTrigger::Sighup, Instant::now());
+    let _ = rig.driver.dispatch_reload(ReloadTrigger::Sighup, Instant::now());
 
     assert!(rig.driver.engine.subs().find_by_name("a").is_some());
     assert!(rig.driver.engine.subs().find_by_name("b").is_some());
@@ -964,9 +870,7 @@ actions   = [{{ exec = ["true"] }}]
     assert!(rig.driver.engine.subs().find_by_name("b").is_some());
 
     std::fs::write(&cfg_path, &new_text).unwrap();
-    let _ = rig
-        .driver
-        .dispatch_reload(ReloadTrigger::Sighup, Instant::now());
+    let _ = rig.driver.dispatch_reload(ReloadTrigger::Sighup, Instant::now());
 
     assert!(rig.driver.engine.subs().find_by_name("a").is_some());
     assert!(rig.driver.engine.subs().find_by_name("b").is_none());
@@ -997,16 +901,10 @@ actions   = [{{ exec = ["true"] }}]
     assert!(rig.driver.engine.subs().is_empty());
 
     std::fs::write(&cfg_path, &new_text).unwrap();
-    let _ = rig
-        .driver
-        .dispatch_reload(ReloadTrigger::Sighup, Instant::now());
+    let _ = rig.driver.dispatch_reload(ReloadTrigger::Sighup, Instant::now());
 
-    let sid = rig
-        .driver
-        .engine
-        .subs()
-        .find_by_name("logs")
-        .expect("template 'logs' attached on reload");
+    let sid =
+        rig.driver.engine.subs().find_by_name("logs").expect("template 'logs' attached on reload");
     let sub = rig.driver.engine.subs().get(sid).expect("live Sub");
     assert!(sub.is_template());
 
@@ -1036,9 +934,7 @@ actions   = [{{ exec = ["true"] }}]
     assert!(rig.driver.engine.subs().find_by_name("logs").is_some());
 
     std::fs::write(&cfg_path, &new_text).unwrap();
-    let _ = rig
-        .driver
-        .dispatch_reload(ReloadTrigger::Sighup, Instant::now());
+    let _ = rig.driver.dispatch_reload(ReloadTrigger::Sighup, Instant::now());
 
     assert!(rig.driver.engine.subs().find_by_name("logs").is_none());
 
@@ -1074,12 +970,7 @@ actions   = [{{ exec = ["{exec}"] }}]
     let segments: Vec<&str> = root.iter().skip(1).filter_map(|s| s.to_str()).collect();
     pre_place_dir(&mut rig.driver.engine, &segments);
     let _ = rig.driver.run_initial_attach();
-    let template = rig
-        .driver
-        .engine
-        .subs()
-        .find_by_name("logs")
-        .expect("template attached");
+    let template = rig.driver.engine.subs().find_by_name("logs").expect("template attached");
     let discovery = pid_of(&rig.driver.engine, template);
     let match_dir = |inode| covered_at(inode, &[("access.log", leaf(EntryKind::File, inode + 1))]);
     let walk = dir_snap_nested(&[("a", match_dir(1)), ("b", match_dir(3))]);
@@ -1088,16 +979,10 @@ actions   = [{{ exec = ["{exec}"] }}]
     assert_eq!(minted.len(), 2, "premise: the walk mints both matches");
 
     std::fs::write(&cfg_path, &new_text).unwrap();
-    let _ = rig
-        .driver
-        .dispatch_reload(ReloadTrigger::Sighup, Instant::now());
+    let _ = rig.driver.dispatch_reload(ReloadTrigger::Sighup, Instant::now());
 
     let subs = rig.driver.engine.subs();
-    assert_eq!(
-        subs.find_by_name("logs"),
-        Some(template),
-        "the template keeps its id"
-    );
+    assert_eq!(subs.find_by_name("logs"), Some(template), "the template keeps its id");
     assert_eq!(
         subs.minted(template).collect::<Vec<_>>(),
         minted,
@@ -1106,23 +991,11 @@ actions   = [{{ exec = ["{exec}"] }}]
     let new_text_config = Config::from_str(&new_text).expect("new parses");
     let new_program = &new_text_config.watches[0].program;
     let runs_new = |sid| {
-        subs.get(sid)
-            .and_then(Sub::spawn_spec)
-            .is_some_and(|spec| spec.program() == new_program)
+        subs.get(sid).and_then(Sub::spawn_spec).is_some_and(|spec| spec.program() == new_program)
     };
-    assert!(
-        minted.iter().all(|&sid| runs_new(sid)),
-        "each runs the new program"
-    );
-    let stamped = subs
-        .get(template)
-        .and_then(Sub::mint_spec)
-        .expect("a template");
-    assert_eq!(
-        stamped.params().spawn.program(),
-        new_program,
-        "and the template stamps it",
-    );
+    assert!(minted.iter().all(|&sid| runs_new(sid)), "each runs the new program");
+    let stamped = subs.get(template).and_then(Sub::mint_spec).expect("a template");
+    assert_eq!(stamped.params().spawn.program(), new_program, "and the template stamps it");
 
     let _ = rig.driver.begin_shutdown();
 }
@@ -1156,25 +1029,12 @@ actions   = [{{ exec = ["true"] }}]
 
     let mut rig = rig_for(initial, cfg_path.clone());
     let _ = rig.driver.run_initial_attach();
-    let static_sid = rig
-        .driver
-        .engine
-        .subs()
-        .find_by_name("foo")
-        .expect("static Sub 'foo' attached");
-    assert!(
-        !rig.driver
-            .engine
-            .subs()
-            .get(static_sid)
-            .expect("live Sub")
-            .is_template()
-    );
+    let static_sid =
+        rig.driver.engine.subs().find_by_name("foo").expect("static Sub 'foo' attached");
+    assert!(!rig.driver.engine.subs().get(static_sid).expect("live Sub").is_template());
 
     std::fs::write(&cfg_path, &new_text).unwrap();
-    let _ = rig
-        .driver
-        .dispatch_reload(ReloadTrigger::Sighup, Instant::now());
+    let _ = rig.driver.dispatch_reload(ReloadTrigger::Sighup, Instant::now());
 
     let dyn_sid = rig
         .driver
@@ -1183,14 +1043,7 @@ actions   = [{{ exec = ["true"] }}]
         .find_by_name("foo")
         .expect("template 'foo' attached post-migration");
     assert_ne!(dyn_sid, static_sid, "wholesale replace, not a rebind");
-    assert!(
-        rig.driver
-            .engine
-            .subs()
-            .get(dyn_sid)
-            .expect("live Sub")
-            .is_template()
-    );
+    assert!(rig.driver.engine.subs().get(dyn_sid).expect("live Sub").is_template());
 
     let _ = rig.driver.begin_shutdown();
 }
@@ -1223,25 +1076,11 @@ actions   = [{{ exec = ["true"] }}]
 
     let mut rig = rig_for(initial, cfg_path.clone());
     let _ = rig.driver.run_initial_attach();
-    let dyn_sid = rig
-        .driver
-        .engine
-        .subs()
-        .find_by_name("foo")
-        .expect("template 'foo' attached");
-    assert!(
-        rig.driver
-            .engine
-            .subs()
-            .get(dyn_sid)
-            .expect("live Sub")
-            .is_template()
-    );
+    let dyn_sid = rig.driver.engine.subs().find_by_name("foo").expect("template 'foo' attached");
+    assert!(rig.driver.engine.subs().get(dyn_sid).expect("live Sub").is_template());
 
     std::fs::write(&cfg_path, &new_text).unwrap();
-    let _ = rig
-        .driver
-        .dispatch_reload(ReloadTrigger::Sighup, Instant::now());
+    let _ = rig.driver.dispatch_reload(ReloadTrigger::Sighup, Instant::now());
 
     let static_sid = rig
         .driver
@@ -1250,14 +1089,7 @@ actions   = [{{ exec = ["true"] }}]
         .find_by_name("foo")
         .expect("static Sub 'foo' attached post-migration");
     assert_ne!(static_sid, dyn_sid, "wholesale replace, not a rebind");
-    assert!(
-        !rig.driver
-            .engine
-            .subs()
-            .get(static_sid)
-            .expect("live Sub")
-            .is_template()
-    );
+    assert!(!rig.driver.engine.subs().get(static_sid).expect("live Sub").is_template());
 
     let _ = rig.driver.begin_shutdown();
 }
@@ -1287,10 +1119,8 @@ actions = [{{ exec = ["true"] }}]
     .unwrap();
     let config = Config::from_str("").expect("empty config parses");
     let rig = rig_for(config, cfg_path.clone());
-    let (parsed_config, parsed_meta) = rig
-        .driver
-        .read_and_parse_config()
-        .expect("valid file parses to Some");
+    let (parsed_config, parsed_meta) =
+        rig.driver.read_and_parse_config().expect("valid file parses to Some");
     assert_eq!(parsed_config.watches.len(), 1);
     assert_eq!(parsed_config.watches[0].name, "build");
     let lstat = FileMeta::from_path(&cfg_path).expect("lstat ok");
@@ -1338,9 +1168,7 @@ settle    = "100ms"
     std::fs::write(&cfg_path, &v2_text).unwrap();
     let expected_meta = FileMeta::from_path(&cfg_path).expect("lstat ok");
 
-    let _ = rig
-        .driver
-        .dispatch_reload(ReloadTrigger::Sighup, Instant::now());
+    let _ = rig.driver.dispatch_reload(ReloadTrigger::Sighup, Instant::now());
 
     assert_eq!(rig.driver.loader.config_meta(), expected_meta);
     assert!(rig.driver.engine.subs().find_by_name("b").is_some());
@@ -1368,29 +1196,17 @@ actions   = [{{ exec = ["true"] }}]
 
     let mut rig = rig_for(initial.clone(), cfg_path.clone());
     let _ = rig.driver.run_initial_attach();
-    let sid_before = rig
-        .driver
-        .engine
-        .subs()
-        .find_by_name("build")
-        .expect("attached");
+    let sid_before = rig.driver.engine.subs().find_by_name("build").expect("attached");
 
     std::fs::write(&cfg_path, &cfg_text).unwrap();
     let expected_meta = FileMeta::from_path(&cfg_path).expect("lstat ok");
     assert_ne!(expected_meta, dummy_meta());
 
-    let _ = rig
-        .driver
-        .dispatch_reload(ReloadTrigger::Sighup, Instant::now());
+    let _ = rig.driver.dispatch_reload(ReloadTrigger::Sighup, Instant::now());
 
     assert_eq!(rig.driver.loader.config_meta(), expected_meta);
     assert_eq!(rig.driver.loader.current_config(), &initial);
-    let sid_after = rig
-        .driver
-        .engine
-        .subs()
-        .find_by_name("build")
-        .expect("still attached");
+    let sid_after = rig.driver.engine.subs().find_by_name("build").expect("still attached");
     assert_eq!(sid_before, sid_after);
 
     let _ = rig.driver.begin_shutdown();
@@ -1425,9 +1241,7 @@ actions   = [{{ exec = ["true"] }}]
     let v2_lstat = FileMeta::from_path(&cfg_path).expect("v2 lstat ok");
     assert_ne!(v1_meta, v2_lstat);
 
-    let _ = rig
-        .driver
-        .dispatch_reload(ReloadTrigger::Sighup, Instant::now());
+    let _ = rig.driver.dispatch_reload(ReloadTrigger::Sighup, Instant::now());
 
     assert_eq!(rig.driver.loader.config_meta(), v2_lstat);
     assert_eq!(rig.driver.loader.current_config(), &v1_config);
@@ -1461,25 +1275,15 @@ level       = "info"
     let initial_log = initial.log.clone();
 
     let mut rig = rig_for(initial, cfg_path.clone());
-    rig.driver
-        .loader
-        .rotate_meta_only(FileMeta::from_path(&cfg_path).expect("v1 lstat ok"));
+    rig.driver.loader.rotate_meta_only(FileMeta::from_path(&cfg_path).expect("v1 lstat ok"));
 
-    assert_eq!(
-        rig.driver.loader.current_log().destination,
-        specter_config::LogDestination::File,
-    );
+    assert_eq!(rig.driver.loader.current_log().destination, specter_config::LogDestination::File);
 
     std::thread::sleep(Duration::from_millis(10));
     std::fs::write(&cfg_path, v_stderr).unwrap();
-    let _ = rig
-        .driver
-        .dispatch_reload(ReloadTrigger::Sighup, Instant::now());
+    let _ = rig.driver.dispatch_reload(ReloadTrigger::Sighup, Instant::now());
 
-    assert_eq!(
-        rig.driver.loader.current_log().destination,
-        specter_config::LogDestination::File,
-    );
+    assert_eq!(rig.driver.loader.current_log().destination, specter_config::LogDestination::File);
     assert_eq!(rig.driver.loader.current_log().path, initial_log.path);
 }
 
@@ -1562,28 +1366,16 @@ actions   = [{{ exec = ["true"] }}]
     let mut rig = rig_for(initial.clone(), cfg_path);
     rig.driver.loader.rotate_meta_only(real_meta);
     let _ = rig.driver.run_initial_attach();
-    let sid_snapshot = rig
-        .driver
-        .engine
-        .subs()
-        .find_by_name("build")
-        .expect("attached");
+    let sid_snapshot = rig.driver.engine.subs().find_by_name("build").expect("attached");
 
     let deadline = Instant::now();
     rig.driver.config_settle_until = Some(deadline);
-    let _ = rig
-        .driver
-        .apply_config_settle_expiry(deadline + Duration::from_millis(1));
+    let _ = rig.driver.apply_config_settle_expiry(deadline + Duration::from_millis(1));
 
     assert_eq!(rig.driver.config_settle_until, None);
     assert_eq!(rig.driver.loader.config_meta(), real_meta);
     assert_eq!(rig.driver.loader.current_config(), &initial);
-    let sid_after = rig
-        .driver
-        .engine
-        .subs()
-        .find_by_name("build")
-        .expect("still attached");
+    let sid_after = rig.driver.engine.subs().find_by_name("build").expect("still attached");
     assert_eq!(sid_snapshot, sid_after);
 
     let _ = rig.driver.begin_shutdown();
@@ -1634,9 +1426,7 @@ actions   = [{{ exec = ["true"] }}]
 
     let deadline = Instant::now();
     rig.driver.config_settle_until = Some(deadline);
-    let _ = rig
-        .driver
-        .apply_config_settle_expiry(deadline + Duration::from_millis(1));
+    let _ = rig.driver.apply_config_settle_expiry(deadline + Duration::from_millis(1));
 
     assert_eq!(rig.driver.config_settle_until, None);
     assert_eq!(rig.driver.loader.config_meta(), v2_lstat);
@@ -1658,9 +1448,7 @@ fn apply_config_settle_expiry_treats_missing_path_as_changed() {
 
     let deadline = Instant::now();
     rig.driver.config_settle_until = Some(deadline);
-    let _ = rig
-        .driver
-        .apply_config_settle_expiry(deadline + Duration::from_millis(1));
+    let _ = rig.driver.apply_config_settle_expiry(deadline + Duration::from_millis(1));
 
     assert_eq!(rig.driver.config_settle_until, None);
     assert_eq!(rig.driver.loader.config_meta(), pre_meta);
@@ -1709,16 +1497,10 @@ actions   = [{{ exec = ["true"] }}]
     assert!(rig.driver.driver_state.last_reload.is_none());
 
     std::fs::write(&cfg_path, &v2_text).unwrap();
-    let _ = rig
-        .driver
-        .dispatch_reload(ReloadTrigger::Sighup, Instant::now());
+    let _ = rig.driver.dispatch_reload(ReloadTrigger::Sighup, Instant::now());
 
     assert_eq!(rig.driver.driver_state.reload_count, 1);
-    let lr = rig
-        .driver
-        .driver_state
-        .last_reload
-        .expect("record_reload populated the pair");
+    let lr = rig.driver.driver_state.last_reload.expect("record_reload populated the pair");
     assert_eq!(lr.via, ReloadTrigger::Sighup);
 
     let _ = rig.driver.begin_shutdown();
@@ -1768,16 +1550,10 @@ actions   = [{{ exec = ["true"] }}]
 
     let deadline = Instant::now();
     rig.driver.config_settle_until = Some(deadline);
-    let _ = rig
-        .driver
-        .apply_config_settle_expiry(deadline + Duration::from_millis(1));
+    let _ = rig.driver.apply_config_settle_expiry(deadline + Duration::from_millis(1));
 
     assert_eq!(rig.driver.driver_state.reload_count, 1);
-    let lr = rig
-        .driver
-        .driver_state
-        .last_reload
-        .expect("record_reload populated the pair");
+    let lr = rig.driver.driver_state.last_reload.expect("record_reload populated the pair");
     assert_eq!(lr.via, ReloadTrigger::AutoReload);
 
     let _ = rig.driver.begin_shutdown();
@@ -1793,9 +1569,7 @@ fn dispatch_reload_does_not_bump_counters_on_parse_fail() {
     let config = Config::from_str("").expect("empty config parses");
     let mut rig = rig_for(config, cfg_path);
 
-    let _ = rig
-        .driver
-        .dispatch_reload(ReloadTrigger::Sighup, Instant::now());
+    let _ = rig.driver.dispatch_reload(ReloadTrigger::Sighup, Instant::now());
 
     assert_eq!(rig.driver.driver_state.reload_count, 0);
     assert!(rig.driver.driver_state.last_reload.is_none());
@@ -1870,9 +1644,7 @@ actions   = [{{ exec = ["true"] }}]
     // Step 2 — startup-TOCTOU dispatch_reload sees the drifted file, computes `diff(boot, drift)` =
     // `{added: [bar, logs]}`, and applies. With the engine in sync with the loader's pre-rotation
     // boot state, the `added` bucket dispatches cleanly.
-    let _ = rig
-        .driver
-        .dispatch_reload(ReloadTrigger::Startup, Instant::now());
+    let _ = rig.driver.dispatch_reload(ReloadTrigger::Startup, Instant::now());
 
     assert!(rig.driver.engine.subs().find_by_name("foo").is_some());
     assert!(rig.driver.engine.subs().find_by_name("bar").is_some());
@@ -1882,27 +1654,13 @@ actions   = [{{ exec = ["true"] }}]
         .subs()
         .find_by_name("logs")
         .expect("template 'logs' attached exactly once");
-    assert!(
-        rig.driver
-            .engine
-            .subs()
-            .get(logs_sid)
-            .expect("live Sub")
-            .is_template()
-    );
-    assert_eq!(
-        rig.driver.engine.subs().len(),
-        3,
-        "foo + bar + logs each attached exactly once",
-    );
+    assert!(rig.driver.engine.subs().get(logs_sid).expect("live Sub").is_template());
+    assert_eq!(rig.driver.engine.subs().len(), 3, "foo + bar + logs each attached exactly once");
 
     // The trigger surfaces as `Startup` on the next `status` query — operators distinguish boot-time
     // drift apply from a later SIGHUP / IPC reload.
-    let lr = rig
-        .driver
-        .driver_state
-        .last_reload
-        .expect("Startup dispatch_reload populated the pair");
+    let lr =
+        rig.driver.driver_state.last_reload.expect("Startup dispatch_reload populated the pair");
     assert_eq!(lr.via, ReloadTrigger::Startup);
 
     let _ = rig.driver.begin_shutdown();
@@ -1959,11 +1717,7 @@ fn forward_dispatches_cancel_before_submit_on_effects_tx() {
     while let Ok(op) = rig.actuator_side.effects_rx.try_recv() {
         received.push(op);
     }
-    assert_eq!(
-        received.len(),
-        3,
-        "two cancels + one submit reached the wire"
-    );
+    assert_eq!(received.len(), 3, "two cancels + one submit reached the wire");
     assert!(
         matches!(received[0], EffectOp::Cancel { profile } if profile == pid_a),
         "first dispatched op must be the lower-keyed cancel; got {:?}",
@@ -1998,12 +1752,7 @@ fn drop_after_begin_shutdown_is_silent_with_armed_probe() {
 
     let _ = rig.driver.run_initial_attach();
     // The Seed burst left a probe armed on the attached Profile.
-    let sid = rig
-        .driver
-        .engine
-        .subs()
-        .find_by_name("build")
-        .expect("attached");
+    let sid = rig.driver.engine.subs().find_by_name("build").expect("attached");
     let pid = rig
         .driver
         .engine
@@ -2017,10 +1766,7 @@ fn drop_after_begin_shutdown_is_silent_with_armed_probe() {
     );
 
     let _ = rig.driver.begin_shutdown();
-    assert!(
-        rig.driver.engine.pending_probe_for(pid).is_none(),
-        "begin_shutdown drained the probe",
-    );
+    assert!(rig.driver.engine.pending_probe_for(pid).is_none(), "begin_shutdown drained the probe");
 
     // Drop is silent — no `ProbeSlot::drop` tripwire panic. Test passing IS the assertion.
     drop(rig);
@@ -2051,16 +1797,11 @@ fn watch_op_rejection_queues_deferred_input_and_replays_next_tick() {
 
     let _ = rig.driver.run_initial_attach();
 
-    assert_eq!(
-        rig.driver.deferred_inputs.len(),
-        1,
-        "rejected watch op queued for replay",
-    );
+    assert_eq!(rig.driver.deferred_inputs.len(), 1, "rejected watch op queued for replay");
     match &rig.driver.deferred_inputs[0] {
-        Input::WatchOpRejected { failure, .. } => assert_eq!(
-            *failure,
-            specter_sensor::WatchFailure::Pressure { errno: 24 },
-        ),
+        Input::WatchOpRejected { failure, .. } => {
+            assert_eq!(*failure, specter_sensor::WatchFailure::Pressure { errno: 24 });
+        }
         other => panic!("expected Input::WatchOpRejected, got {other:?}"),
     }
 
@@ -2148,15 +1889,9 @@ max_settle = "500ms"
     assert_eq!(unfiltered.modified_identity.len(), 1);
     assert_eq!(unfiltered.modified_params.len(), 1);
 
-    for name in [
-        "to_be_added",
-        "to_be_removed",
-        "to_be_modified_identity",
-        "to_be_modified_params",
-    ] {
-        rig.driver
-            .disabled_runtime
-            .insert(CompactString::const_new(name));
+    for name in ["to_be_added", "to_be_removed", "to_be_modified_identity", "to_be_modified_params"]
+    {
+        rig.driver.disabled_runtime.insert(CompactString::const_new(name));
     }
 
     let filtered = rig.driver.compute_watch_diff(&new);
@@ -2212,28 +1947,14 @@ enabled   = false
     let mut rig = rig_for(initial, cfg_path);
 
     for name in ["kept_active", "kept_toml_disabled", "gone_from_toml"] {
-        rig.driver
-            .disabled_runtime
-            .insert(CompactString::const_new(name));
+        rig.driver.disabled_runtime.insert(CompactString::const_new(name));
     }
 
     rig.driver.prune_disabled_runtime_against_current_config();
 
-    assert!(
-        rig.driver
-            .disabled_runtime
-            .contains(&CompactString::const_new("kept_active")),
-    );
-    assert!(
-        rig.driver
-            .disabled_runtime
-            .contains(&CompactString::const_new("kept_toml_disabled")),
-    );
-    assert!(
-        !rig.driver
-            .disabled_runtime
-            .contains(&CompactString::const_new("gone_from_toml")),
-    );
+    assert!(rig.driver.disabled_runtime.contains(&CompactString::const_new("kept_active")));
+    assert!(rig.driver.disabled_runtime.contains(&CompactString::const_new("kept_toml_disabled")));
+    assert!(!rig.driver.disabled_runtime.contains(&CompactString::const_new("gone_from_toml")));
     assert_eq!(rig.driver.disabled_runtime.len(), 2);
 }
 
@@ -2255,14 +1976,10 @@ actions   = [{{ exec = ["true"] }}]
     let initial = Config::from_str(&v1_text).expect("v1 parses");
 
     let mut rig = rig_for(initial, cfg_path.clone());
-    rig.driver
-        .disabled_runtime
-        .insert(CompactString::const_new("doomed"));
+    rig.driver.disabled_runtime.insert(CompactString::const_new("doomed"));
 
     std::fs::write(&cfg_path, "").unwrap();
-    let _ = rig
-        .driver
-        .dispatch_reload(ReloadTrigger::Sighup, Instant::now());
+    let _ = rig.driver.dispatch_reload(ReloadTrigger::Sighup, Instant::now());
 
     assert!(rig.driver.disabled_runtime.is_empty());
 }
@@ -2286,10 +2003,7 @@ fn ipc_status_replies_with_projection() {
     let reply = ipc_round_trip(&mut rig, &mut client, &WireRequest::Status);
     match reply {
         ResponsePayload::Status(status) => {
-            assert_eq!(
-                status.socket_path,
-                crate::ipc::wire::WirePath::from(&expected_socket),
-            );
+            assert_eq!(status.socket_path, crate::ipc::wire::WirePath::from(&expected_socket));
             assert_eq!(status.sub_total, 0);
         }
         other => panic!("expected Status, got {other:?}"),
@@ -2306,11 +2020,7 @@ fn ipc_subscribe_unfiltered_acks_and_registers_subscriber() {
     let mut rig = rig_for(config, cfg_path);
     let mut client = ipc_connect(&rig);
 
-    let reply = ipc_round_trip(
-        &mut rig,
-        &mut client,
-        &WireRequest::Subscribe { name: None },
-    );
+    let reply = ipc_round_trip(&mut rig, &mut client, &WireRequest::Subscribe { name: None });
     match reply {
         ResponsePayload::SubscribeAck { sub: None } => {}
         other => panic!("expected SubscribeAck(None), got {other:?}"),
@@ -2333,9 +2043,7 @@ fn ipc_subscribe_unknown_name_errors_without_registering() {
     let reply = ipc_round_trip(
         &mut rig,
         &mut client,
-        &WireRequest::Subscribe {
-            name: Some(CompactString::const_new("nope")),
-        },
+        &WireRequest::Subscribe { name: Some(CompactString::const_new("nope")) },
     );
     match reply {
         ResponsePayload::Err { code, error } => {
@@ -2361,20 +2069,13 @@ fn ipc_subscribe_known_name_resolves_and_acks() {
     let mut rig = rig_for(config, cfg_path);
     let _ = rig.driver.run_initial_attach();
 
-    let expected_sid = rig
-        .driver
-        .engine
-        .subs()
-        .find_by_name("build")
-        .expect("build attached");
+    let expected_sid = rig.driver.engine.subs().find_by_name("build").expect("build attached");
 
     let mut client = ipc_connect(&rig);
     let reply = ipc_round_trip(
         &mut rig,
         &mut client,
-        &WireRequest::Subscribe {
-            name: Some(CompactString::const_new("build")),
-        },
+        &WireRequest::Subscribe { name: Some(CompactString::const_new("build")) },
     );
     match reply {
         ResponsePayload::SubscribeAck { sub: Some(wire_id) } => {
@@ -2405,11 +2106,7 @@ fn subscribe_twice_returns_err_already_subscribed() {
 
     // First Subscribe: `name = None` → unfiltered tail. The handler acks with `sub = None` and flips
     // the conn role to `Sub { filter: None, missed: MissedWindow::Closed }`.
-    let reply1 = ipc_round_trip(
-        &mut rig,
-        &mut client,
-        &WireRequest::Subscribe { name: None },
-    );
+    let reply1 = ipc_round_trip(&mut rig, &mut client, &WireRequest::Subscribe { name: None });
     assert!(
         matches!(reply1, ResponsePayload::SubscribeAck { sub: None }),
         "first Subscribe acks with sub=None; got {reply1:?}",
@@ -2418,19 +2115,9 @@ fn subscribe_twice_returns_err_already_subscribed() {
     // First accepted conn lands on `TOKEN_CONN_BASE`.
     let token = mio::Token(TOKEN_CONN_BASE);
     {
-        let conn = rig
-            .driver
-            .ipc
-            .conn_ref(token)
-            .expect("conn lives across the first round-trip");
+        let conn = rig.driver.ipc.conn_ref(token).expect("conn lives across the first round-trip");
         assert!(
-            matches!(
-                conn.role,
-                ConnRole::Sub {
-                    filter: None,
-                    missed: MissedWindow::Closed,
-                }
-            ),
+            matches!(conn.role, ConnRole::Sub { filter: None, missed: MissedWindow::Closed }),
             "post-first-Subscribe role is fresh Sub state",
         );
     }
@@ -2440,9 +2127,7 @@ fn subscribe_twice_returns_err_already_subscribed() {
     let reply2 = ipc_round_trip(
         &mut rig,
         &mut client,
-        &WireRequest::Subscribe {
-            name: Some(CompactString::const_new("build")),
-        },
+        &WireRequest::Subscribe { name: Some(CompactString::const_new("build")) },
     );
     match reply2 {
         ResponsePayload::Err { code, error } => {
@@ -2457,19 +2142,9 @@ fn subscribe_twice_returns_err_already_subscribed() {
 
     // The first subscription's role is untouched — `filter == None` (not `Some(sid_build)`), missed
     // window still `Closed` (none opened).
-    let conn = rig
-        .driver
-        .ipc
-        .conn_ref(token)
-        .expect("conn still in map after refusal");
+    let conn = rig.driver.ipc.conn_ref(token).expect("conn still in map after refusal");
     assert!(
-        matches!(
-            conn.role,
-            ConnRole::Sub {
-                filter: None,
-                missed: MissedWindow::Closed,
-            }
-        ),
+        matches!(conn.role, ConnRole::Sub { filter: None, missed: MissedWindow::Closed }),
         "the first subscription's state survives; got {:?}",
         conn.role,
     );
@@ -2490,28 +2165,17 @@ fn subscribe_after_err_does_not_overwrite_prior_subscription() {
     let _ = rig.driver.run_initial_attach();
 
     let mut client = ipc_connect(&rig);
-    let _ = ipc_round_trip(
-        &mut rig,
-        &mut client,
-        &WireRequest::Subscribe { name: None },
-    );
+    let _ = ipc_round_trip(&mut rig, &mut client, &WireRequest::Subscribe { name: None });
     let token = mio::Token(TOKEN_CONN_BASE);
 
     // Synthesize a pre-existing missed window on the conn. Direct mutation lets the test pin gate
     // behavior without driving the full fan-out throttle path.
     let stamped_at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     {
-        let conn = rig
-            .driver
-            .ipc
-            .conn_mut(token)
-            .expect("conn lives after Subscribe ack flushed");
+        let conn = rig.driver.ipc.conn_mut(token).expect("conn lives after Subscribe ack flushed");
         match &mut conn.role {
             ConnRole::Sub { missed, .. } => {
-                *missed = MissedWindow::Open {
-                    count: 7,
-                    since: stamped_at,
-                };
+                *missed = MissedWindow::Open { count: 7, since: stamped_at };
             }
             ConnRole::Reqs => panic!("expected Sub after first Subscribe"),
         }
@@ -2521,9 +2185,7 @@ fn subscribe_after_err_does_not_overwrite_prior_subscription() {
     let reply = ipc_round_trip(
         &mut rig,
         &mut client,
-        &WireRequest::Subscribe {
-            name: Some(CompactString::const_new("build")),
-        },
+        &WireRequest::Subscribe { name: Some(CompactString::const_new("build")) },
     );
     assert!(
         matches!(reply, ResponsePayload::Err { code, .. } if code == WireErrorCode::AlreadySubscribed),
@@ -2532,19 +2194,12 @@ fn subscribe_after_err_does_not_overwrite_prior_subscription() {
 
     // The missed bookkeeping survives the refusal: gate fires before `transition_to_sub` runs, so
     // the window is not reset.
-    let conn = rig
-        .driver
-        .ipc
-        .conn_ref(token)
-        .expect("conn still in map after refusal");
+    let conn = rig.driver.ipc.conn_ref(token).expect("conn still in map after refusal");
     match &conn.role {
         ConnRole::Sub { missed, .. } => {
             assert_eq!(
                 *missed,
-                MissedWindow::Open {
-                    count: 7,
-                    since: stamped_at,
-                },
+                MissedWindow::Open { count: 7, since: stamped_at },
                 "missed window preserved across refused Subscribe",
             );
         }
@@ -2584,19 +2239,12 @@ fn oversize_response_emits_response_too_big_then_flushes_then_terminates() {
     // run_until_response polling loop.
     arm_zero_timeout(&mut rig);
     let _ = rig.driver.tick();
-    assert_eq!(
-        rig.driver.ipc.conn_count(),
-        1,
-        "client accepted on the first tick",
-    );
+    assert_eq!(rig.driver.ipc.conn_count(), 1, "client accepted on the first tick");
 
     let token = mio::Token(TOKEN_CONN_BASE);
 
     let padding = "x".repeat(ACCEPT_CAP + 1);
-    let huge = ResponsePayload::Err {
-        code: WireErrorCode::Busy,
-        error: padding,
-    };
+    let huge = ResponsePayload::Err { code: WireErrorCode::Busy, error: padding };
     let outcome = rig.driver.ipc.enqueue_response(token, &huge);
     assert_eq!(
         outcome,
@@ -2615,10 +2263,7 @@ fn oversize_response_emits_response_too_big_then_flushes_then_terminates() {
     {
         let conn = rig.driver.ipc.conn_ref(token).expect("conn lives");
         assert!(conn.close_after_flush, "close armed by the Refused arm");
-        assert!(
-            !conn.write_queue.is_empty(),
-            "ResponseTooBig Err line queued into the reserve",
-        );
+        assert!(!conn.write_queue.is_empty(), "ResponseTooBig Err line queued into the reserve");
     }
 
     // Read the Err line off the wire — drives ticks until the bytes surface on the client end. The
@@ -2649,15 +2294,8 @@ fn oversize_response_emits_response_too_big_then_flushes_then_terminates() {
             break;
         }
     }
-    assert_eq!(
-        rig.driver.ipc.conn_count(),
-        0,
-        "flushed-then-terminated within a handful of ticks",
-    );
-    assert!(
-        rig.driver.ipc.conn_ref(token).is_none(),
-        "conn removed from map",
-    );
+    assert_eq!(rig.driver.ipc.conn_count(), 0, "flushed-then-terminated within a handful of ticks");
+    assert!(rig.driver.ipc.conn_ref(token).is_none(), "conn removed from map");
 
     let _ = rig.driver.begin_shutdown();
 }
@@ -2686,28 +2324,15 @@ fn oversize_response_arms_close_then_flushes_then_terminates() {
     // Queue a normal-sized response first so the write_queue is non-empty when the oversize one is
     // refused.
     let small = ResponsePayload::Ok;
-    assert_eq!(
-        rig.driver.ipc.enqueue_response(token, &small),
-        EnqueueOutcome::Accepted,
-    );
+    assert_eq!(rig.driver.ipc.enqueue_response(token, &small), EnqueueOutcome::Accepted);
 
     let padding = "x".repeat(ACCEPT_CAP + 1);
-    let huge = ResponsePayload::Err {
-        code: WireErrorCode::Busy,
-        error: padding,
-    };
-    assert_eq!(
-        rig.driver.ipc.enqueue_response(token, &huge),
-        EnqueueOutcome::Refused,
-    );
+    let huge = ResponsePayload::Err { code: WireErrorCode::Busy, error: padding };
+    assert_eq!(rig.driver.ipc.enqueue_response(token, &huge), EnqueueOutcome::Refused);
 
     // Inline-terminate did NOT fire — queue still holds the small response. close_after_flush is
     // armed for the next drain.
-    assert_eq!(
-        rig.driver.ipc.conn_count(),
-        1,
-        "conn lives, queue non-empty"
-    );
+    assert_eq!(rig.driver.ipc.conn_count(), 1, "conn lives, queue non-empty");
     {
         let conn = rig.driver.ipc.conn_ref(token).expect("conn lives");
         assert!(conn.close_after_flush, "armed");
@@ -2723,11 +2348,7 @@ fn oversize_response_arms_close_then_flushes_then_terminates() {
             break;
         }
     }
-    assert_eq!(
-        rig.driver.ipc.conn_count(),
-        0,
-        "flushed-then-terminated within a handful of ticks",
-    );
+    assert_eq!(rig.driver.ipc.conn_count(), 0, "flushed-then-terminated within a handful of ticks");
 
     let _ = rig.driver.begin_shutdown();
 }
@@ -2748,28 +2369,15 @@ fn missed_marker_uses_first_dropped_at_when_flushed() {
     let config = config_with_one_watch(tmp.path());
     let mut rig = rig_for(config, cfg_path);
     let _ = rig.driver.run_initial_attach();
-    let sid = rig
-        .driver
-        .engine
-        .subs()
-        .find_by_name("build")
-        .expect("build attached");
+    let sid = rig.driver.engine.subs().find_by_name("build").expect("build attached");
 
     let mut client = ipc_connect(&rig);
-    let _ = ipc_round_trip(
-        &mut rig,
-        &mut client,
-        &WireRequest::Subscribe { name: None },
-    );
+    let _ = ipc_round_trip(&mut rig, &mut client, &WireRequest::Subscribe { name: None });
     let token = mio::Token(TOKEN_CONN_BASE);
 
     // Sanity: the conn is in Sub mode after the ack flushed.
     {
-        let conn = rig
-            .driver
-            .ipc
-            .conn_ref(token)
-            .expect("conn lives post-Subscribe");
+        let conn = rig.driver.ipc.conn_ref(token).expect("conn lives post-Subscribe");
         assert!(matches!(conn.role, ConnRole::Sub { .. }));
     }
 
@@ -2788,20 +2396,12 @@ fn missed_marker_uses_first_dropped_at_when_flushed() {
         name: CompactString::const_new("build"),
         minted_by: None,
     };
-    rig.driver
-        .ipc
-        .dispatch_to_subscribers(&diag, at_drop, &wire_at_drop, None);
+    rig.driver.ipc.dispatch_to_subscribers(&diag, at_drop, &wire_at_drop, None);
     {
         let conn = rig.driver.ipc.conn_ref(token).expect("conn lives");
         match &conn.role {
             ConnRole::Sub { missed, .. } => {
-                assert_eq!(
-                    *missed,
-                    MissedWindow::Open {
-                        count: 1,
-                        since: at_drop,
-                    },
-                );
+                assert_eq!(*missed, MissedWindow::Open { count: 1, since: at_drop });
             }
             ConnRole::Reqs => panic!("expected Sub role"),
         }
@@ -2817,26 +2417,17 @@ fn missed_marker_uses_first_dropped_at_when_flushed() {
     // as its `at`.
     let at_flush = SystemTime::UNIX_EPOCH + Duration::from_secs(500);
     let wire_at_flush = WireTime::from(at_flush);
-    rig.driver
-        .ipc
-        .dispatch_to_subscribers(&diag, at_flush, &wire_at_flush, None);
+    rig.driver.ipc.dispatch_to_subscribers(&diag, at_flush, &wire_at_flush, None);
     let conn = rig.driver.ipc.conn_ref(token).expect("conn lives");
     match &conn.role {
         ConnRole::Sub { missed, .. } => {
-            assert_eq!(
-                *missed,
-                MissedWindow::Closed,
-                "window resets to Closed on the flush edge",
-            );
+            assert_eq!(*missed, MissedWindow::Closed, "window resets to Closed on the flush edge");
         }
         ConnRole::Reqs => panic!("expected Sub role"),
     }
 
     let queued: Vec<u8> = conn.write_queue.iter().copied().collect();
-    let lines: Vec<&[u8]> = queued
-        .split(|&b| b == b'\n')
-        .filter(|l| !l.is_empty())
-        .collect();
+    let lines: Vec<&[u8]> = queued.split(|&b| b == b'\n').filter(|l| !l.is_empty()).collect();
     assert_eq!(lines.len(), 2, "marker + diag");
 
     let marker_v: serde_json::Value =
@@ -2872,20 +2463,14 @@ fn ipc_reload_via_pipeline_records_ipc_trigger() {
     std::fs::write(&cfg_path, "").expect("write empty config");
     let config = Config::from_str("").expect("empty config parses");
     let mut rig = rig_for(config, cfg_path.clone());
-    rig.driver
-        .loader
-        .rotate_meta_only(FileMeta::from_path(&cfg_path).expect("lstat ok"));
+    rig.driver.loader.rotate_meta_only(FileMeta::from_path(&cfg_path).expect("lstat ok"));
     let mut client = ipc_connect(&rig);
 
     let reply = ipc_round_trip(&mut rig, &mut client, &WireRequest::Reload);
     assert!(matches!(reply, ResponsePayload::Ok), "got {reply:?}");
 
     assert_eq!(rig.driver.driver_state.reload_count, 1);
-    let lr = rig
-        .driver
-        .driver_state
-        .last_reload
-        .expect("IPC reload populated the pair");
+    let lr = rig.driver.driver_state.last_reload.expect("IPC reload populated the pair");
     assert_eq!(lr.via, ReloadTrigger::Ipc);
 }
 
@@ -2903,18 +2488,12 @@ fn ipc_disable_static_sub_detaches_and_records_override() {
     let reply = ipc_round_trip(
         &mut rig,
         &mut client,
-        &WireRequest::Disable {
-            name: CompactString::const_new("build"),
-        },
+        &WireRequest::Disable { name: CompactString::const_new("build") },
     );
     assert!(matches!(reply, ResponsePayload::Ok), "got {reply:?}");
 
     assert!(rig.driver.engine.subs().find_by_name("build").is_none());
-    assert!(
-        rig.driver
-            .disabled_runtime
-            .contains(&CompactString::const_new("build")),
-    );
+    assert!(rig.driver.disabled_runtime.contains(&CompactString::const_new("build")));
 
     let _ = rig.driver.begin_shutdown();
 }
@@ -2930,9 +2509,7 @@ fn ipc_disable_unknown_name_returns_err() {
     let reply = ipc_round_trip(
         &mut rig,
         &mut client,
-        &WireRequest::Disable {
-            name: CompactString::const_new("ghost"),
-        },
+        &WireRequest::Disable { name: CompactString::const_new("ghost") },
     );
     match reply {
         ResponsePayload::Err { code, error } => {
@@ -2955,9 +2532,7 @@ fn ipc_disable_unknown_dynamic_shape_name_returns_unknown_sub() {
     let reply = ipc_round_trip(
         &mut rig,
         &mut client,
-        &WireRequest::Disable {
-            name: CompactString::const_new("template@/tmp/x"),
-        },
+        &WireRequest::Disable { name: CompactString::const_new("template@/tmp/x") },
     );
     match reply {
         ResponsePayload::Err { code, error } => {
@@ -2978,21 +2553,10 @@ fn ipc_disable_minted_sub_returns_minted_sub_no_op() {
     let config = Config::from_str("").expect("empty config parses");
     let mut rig = rig_for(config, cfg_path);
     let [minted] = mint(&mut rig.driver.engine, ["a"]);
-    let name = rig
-        .driver
-        .engine
-        .subs()
-        .get(minted)
-        .expect("live")
-        .name
-        .clone();
+    let name = rig.driver.engine.subs().get(minted).expect("live").name.clone();
 
     let mut client = ipc_connect(&rig);
-    let reply = ipc_round_trip(
-        &mut rig,
-        &mut client,
-        &WireRequest::Disable { name: name.clone() },
-    );
+    let reply = ipc_round_trip(&mut rig, &mut client, &WireRequest::Disable { name: name.clone() });
     match reply {
         ResponsePayload::Err { code, error } => {
             assert_eq!(code, WireErrorCode::MintedSubNoOp);
@@ -3020,12 +2584,7 @@ fn ipc_disable_and_enable_discovery_template_round_trip() {
     let config = config_with_one_discovery(tmp.path());
     let mut rig = rig_for(config, cfg_path);
     let _ = rig.driver.run_initial_attach();
-    let sid = rig
-        .driver
-        .engine
-        .subs()
-        .find_by_name("logs")
-        .expect("template attached");
+    let sid = rig.driver.engine.subs().find_by_name("logs").expect("template attached");
     let sub = rig.driver.engine.subs().get(sid).expect("live sub");
     assert!(sub.is_template(), "fixture lowered to a template");
     assert_eq!(sub.minted_by(), None, "a template is operator-declared");
@@ -3034,41 +2593,23 @@ fn ipc_disable_and_enable_discovery_template_round_trip() {
     let reply = ipc_round_trip(
         &mut rig,
         &mut client_a,
-        &WireRequest::Disable {
-            name: CompactString::const_new("logs"),
-        },
+        &WireRequest::Disable { name: CompactString::const_new("logs") },
     );
     assert!(matches!(reply, ResponsePayload::Ok), "got {reply:?}");
     assert!(rig.driver.engine.subs().find_by_name("logs").is_none());
-    assert!(
-        rig.driver
-            .disabled_runtime
-            .contains(&CompactString::const_new("logs")),
-    );
+    assert!(rig.driver.disabled_runtime.contains(&CompactString::const_new("logs")));
 
     let mut client_b = ipc_connect(&rig);
     let reply = ipc_round_trip(
         &mut rig,
         &mut client_b,
-        &WireRequest::Enable {
-            name: CompactString::const_new("logs"),
-        },
+        &WireRequest::Enable { name: CompactString::const_new("logs") },
     );
     assert!(matches!(reply, ResponsePayload::Ok), "got {reply:?}");
     assert!(rig.driver.disabled_runtime.is_empty());
-    let sid = rig
-        .driver
-        .engine
-        .subs()
-        .find_by_name("logs")
-        .expect("template re-attached");
+    let sid = rig.driver.engine.subs().find_by_name("logs").expect("template re-attached");
     assert!(
-        rig.driver
-            .engine
-            .subs()
-            .get(sid)
-            .expect("live sub")
-            .is_template(),
+        rig.driver.engine.subs().get(sid).expect("live sub").is_template(),
         "re-attach went through the discovery lowering",
     );
 
@@ -3084,9 +2625,7 @@ fn ipc_disable_already_disabled_returns_err() {
     let config = config_with_one_watch(tmp.path());
     let mut rig = rig_for(config, cfg_path);
     let _ = rig.driver.run_initial_attach();
-    let disable = WireRequest::Disable {
-        name: CompactString::const_new("build"),
-    };
+    let disable = WireRequest::Disable { name: CompactString::const_new("build") };
 
     let mut first = ipc_connect(&rig);
     let reply = ipc_round_trip(&mut rig, &mut first, &disable);
@@ -3116,9 +2655,7 @@ fn ipc_enable_clears_override_and_reattaches() {
     let _ = ipc_round_trip(
         &mut rig,
         &mut client_a,
-        &WireRequest::Disable {
-            name: CompactString::const_new("build"),
-        },
+        &WireRequest::Disable { name: CompactString::const_new("build") },
     );
     assert!(rig.driver.engine.subs().find_by_name("build").is_none());
     assert_eq!(rig.driver.disabled_runtime.len(), 1);
@@ -3127,9 +2664,7 @@ fn ipc_enable_clears_override_and_reattaches() {
     let reply = ipc_round_trip(
         &mut rig,
         &mut client_b,
-        &WireRequest::Enable {
-            name: CompactString::const_new("build"),
-        },
+        &WireRequest::Enable { name: CompactString::const_new("build") },
     );
     assert!(matches!(reply, ResponsePayload::Ok), "got {reply:?}");
     assert!(rig.driver.engine.subs().find_by_name("build").is_some());
@@ -3149,9 +2684,7 @@ fn ipc_enable_not_disabled_returns_err() {
     let reply = ipc_round_trip(
         &mut rig,
         &mut client,
-        &WireRequest::Enable {
-            name: CompactString::const_new("nothing"),
-        },
+        &WireRequest::Enable { name: CompactString::const_new("nothing") },
     );
     match reply {
         ResponsePayload::Err { code, .. } => assert_eq!(code, WireErrorCode::NotDisabled),
@@ -3167,17 +2700,13 @@ fn ipc_enable_toml_disabled_clears_override_returns_err() {
     let cfg_path = tmp.path().join("specter.toml");
     let config = Config::from_str("").expect("empty config parses");
     let mut rig = rig_for(config, cfg_path);
-    rig.driver
-        .disabled_runtime
-        .insert(CompactString::const_new("orphan"));
+    rig.driver.disabled_runtime.insert(CompactString::const_new("orphan"));
 
     let mut client = ipc_connect(&rig);
     let reply = ipc_round_trip(
         &mut rig,
         &mut client,
-        &WireRequest::Enable {
-            name: CompactString::const_new("orphan"),
-        },
+        &WireRequest::Enable { name: CompactString::const_new("orphan") },
     );
     match reply {
         ResponsePayload::Err { code, .. } => assert_eq!(code, WireErrorCode::TomlDisabled),
@@ -3199,10 +2728,7 @@ fn ipc_absorb_unknown_name_returns_unknown_sub() {
     let reply = ipc_round_trip(
         &mut rig,
         &mut client,
-        &WireRequest::Absorb {
-            name: CompactString::const_new("ghost"),
-            duration_ms: None,
-        },
+        &WireRequest::Absorb { name: CompactString::const_new("ghost"), duration_ms: None },
     );
     match reply {
         ResponsePayload::Err { code, error } => {
@@ -3222,24 +2748,11 @@ fn ipc_absorb_minted_sub_returns_minted_sub_no_op() {
     let config = Config::from_str("").expect("empty config parses");
     let mut rig = rig_for(config, cfg_path);
     let [minted] = mint(&mut rig.driver.engine, ["a"]);
-    let name = rig
-        .driver
-        .engine
-        .subs()
-        .get(minted)
-        .expect("live")
-        .name
-        .clone();
+    let name = rig.driver.engine.subs().get(minted).expect("live").name.clone();
 
     let mut client = ipc_connect(&rig);
-    let reply = ipc_round_trip(
-        &mut rig,
-        &mut client,
-        &WireRequest::Absorb {
-            name,
-            duration_ms: None,
-        },
-    );
+    let reply =
+        ipc_round_trip(&mut rig, &mut client, &WireRequest::Absorb { name, duration_ms: None });
     match reply {
         ResponsePayload::Err { code, .. } => assert_eq!(code, WireErrorCode::MintedSubNoOp),
         other => panic!("expected Err(MintedSubNoOp), got {other:?}"),
@@ -3257,27 +2770,10 @@ fn ipc_absorb_static_sub_acks_ok_and_arms_window() {
     let config = config_with_one_watch(tmp.path());
     let mut rig = rig_for(config, cfg_path);
     let _ = rig.driver.run_initial_attach();
-    let sid = rig
-        .driver
-        .engine
-        .subs()
-        .find_by_name("build")
-        .expect("build attached");
-    let profile = rig
-        .driver
-        .engine
-        .subs()
-        .get(sid)
-        .expect("live sub")
-        .profile();
+    let sid = rig.driver.engine.subs().find_by_name("build").expect("build attached");
+    let profile = rig.driver.engine.subs().get(sid).expect("live sub").profile();
     assert!(
-        rig.driver
-            .engine
-            .profiles()
-            .get(profile)
-            .expect("live profile")
-            .absorb_window()
-            .is_none(),
+        rig.driver.engine.profiles().get(profile).expect("live profile").absorb_window().is_none(),
         "no window armed before the absorb verb",
     );
 
@@ -3285,20 +2781,11 @@ fn ipc_absorb_static_sub_acks_ok_and_arms_window() {
     let reply = ipc_round_trip(
         &mut rig,
         &mut client,
-        &WireRequest::Absorb {
-            name: CompactString::const_new("build"),
-            duration_ms: Some(30_000),
-        },
+        &WireRequest::Absorb { name: CompactString::const_new("build"), duration_ms: Some(30_000) },
     );
     assert!(matches!(reply, ResponsePayload::Ok), "got {reply:?}");
     assert!(
-        rig.driver
-            .engine
-            .profiles()
-            .get(profile)
-            .expect("live profile")
-            .absorb_window()
-            .is_some(),
+        rig.driver.engine.profiles().get(profile).expect("live profile").absorb_window().is_some(),
         "absorb verb armed a window on the Sub's Profile",
     );
 
@@ -3315,33 +2802,17 @@ fn ipc_absorb_refused_mid_shutdown_with_shutting_down_code() {
     let config = config_with_one_watch(tmp.path());
     let mut rig = rig_for(config, cfg_path);
     let _ = rig.driver.run_initial_attach();
-    let sid = rig
-        .driver
-        .engine
-        .subs()
-        .find_by_name("build")
-        .expect("build attached");
-    let profile = rig
-        .driver
-        .engine
-        .subs()
-        .get(sid)
-        .expect("live sub")
-        .profile();
+    let sid = rig.driver.engine.subs().find_by_name("build").expect("build attached");
+    let profile = rig.driver.engine.subs().get(sid).expect("live sub").profile();
 
-    let _ = rig
-        .driver
-        .dispatch_signal(signal_hook::consts::SIGINT, Instant::now());
+    let _ = rig.driver.dispatch_signal(signal_hook::consts::SIGINT, Instant::now());
     assert!(rig.driver.first_term.is_some());
 
     let mut client = ipc_connect(&rig);
     let reply = ipc_round_trip(
         &mut rig,
         &mut client,
-        &WireRequest::Absorb {
-            name: CompactString::const_new("build"),
-            duration_ms: None,
-        },
+        &WireRequest::Absorb { name: CompactString::const_new("build"), duration_ms: None },
     );
     match reply {
         ResponsePayload::Err { code, error } => {
@@ -3351,13 +2822,7 @@ fn ipc_absorb_refused_mid_shutdown_with_shutting_down_code() {
         other => panic!("expected Err(ShuttingDown), got {other:?}"),
     }
     assert!(
-        rig.driver
-            .engine
-            .profiles()
-            .get(profile)
-            .expect("live profile")
-            .absorb_window()
-            .is_none(),
+        rig.driver.engine.profiles().get(profile).expect("live profile").absorb_window().is_none(),
         "absorb refused without arming a window",
     );
 
@@ -3391,17 +2856,10 @@ fn subscribe_ack_precedes_diag_on_wire() {
     let config = config_with_one_watch(tmp.path());
     let mut rig = rig_for(config, cfg_path);
     let _ = rig.driver.run_initial_attach();
-    let sid = rig
-        .driver
-        .engine
-        .subs()
-        .find_by_name("build")
-        .expect("attached");
+    let sid = rig.driver.engine.subs().find_by_name("build").expect("attached");
 
     let mut client = ipc_connect(&rig);
-    client
-        .set_read_timeout(Some(Duration::from_millis(50)))
-        .expect("set read timeout");
+    client.set_read_timeout(Some(Duration::from_millis(50))).expect("set read timeout");
     write_request(&mut client, &WireRequest::Subscribe { name: None });
 
     // Drive ticks until the ack lands on the wire. The presence of the ack proves the role flipped
@@ -3572,10 +3030,7 @@ fn fs_event_and_effect_complete_both_drain_in_one_tick() {
     // Inject an FsEvent via the MockFsWatcher (sets a readable edge on the watcher fd; drain_watcher
     // reads it on the next poll).
     let r = ResourceId::default();
-    rig.driver
-        .reactor
-        .watcher_mut()
-        .inject(r, specter_core::FsEvent::ContentChanged);
+    rig.driver.reactor.watcher_mut().inject(r, specter_core::FsEvent::ContentChanged);
     // Queue an EffectComplete via the wake'd channel.
     rig.effect_complete_tx()
         .send(Input::EffectComplete(specter_core::EffectCompletion {
@@ -3651,9 +3106,7 @@ mod dispatch_signal_inner_tests {
 
     impl ExitRecorder {
         fn new() -> Self {
-            Self {
-                code: Mutex::new(None),
-            }
+            Self { code: Mutex::new(None) }
         }
         fn record(&self, code: i32) {
             *self.code.lock().expect("ExitRecorder mutex poisoned") = Some(code);
@@ -3695,10 +3148,7 @@ mod dispatch_signal_inner_tests {
         });
         assert_eq!(action, SignalAction::Shutdown);
         assert_eq!(first_term, Some(now));
-        assert!(
-            !fixture.shutdown_actuator_rx.is_empty(),
-            "shutdown pulse queued",
-        );
+        assert!(!fixture.shutdown_actuator_rx.is_empty(), "shutdown pulse queued");
         assert!(
             fixture.hard_shutdown_actuator_rx.is_empty(),
             "hard-shutdown must NOT fire on first observation",
@@ -3731,10 +3181,7 @@ mod dispatch_signal_inner_tests {
         let recorder = ExitRecorder::new();
         // Plant the actuator's "phase 3 done" pulse so the inner function's `recv_timeout` returns
         // `Ok(())` immediately rather than waiting the full HARD_SHUTDOWN_CONFIRM_TIMEOUT.
-        fixture
-            .hard_shutdown_done_tx
-            .try_send(())
-            .expect("plant confirm pulse");
+        fixture.hard_shutdown_done_tx.try_send(()).expect("plant confirm pulse");
         let mut first_term: Option<Instant> = None;
 
         let t0 = Instant::now();
@@ -3748,7 +3195,7 @@ mod dispatch_signal_inner_tests {
             recorder.record(c);
         });
         assert_eq!(action, SignalAction::HardExit);
-        assert_eq!(recorder.taken(), Some(crate::signals::HARD_EXIT_CODE),);
+        assert_eq!(recorder.taken(), Some(crate::signals::HARD_EXIT_CODE));
         assert!(
             !fixture.hard_shutdown_actuator_rx.is_empty(),
             "second SIGINT must fire hard-shutdown pulse",

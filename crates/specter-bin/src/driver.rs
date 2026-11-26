@@ -230,16 +230,9 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// new driver would write the constructor call in the same syntactic shape as the struct.
     #[must_use]
     pub(crate) fn new(
-        engine: Engine,
-        loader: Loader,
-        config_path: PathBuf,
-        socket_path: PathBuf,
-        cli_log_overrides: CliLogOverrides,
-        obs_handle: ObservabilityHandle,
-        prober: Arc<dyn Prober>,
-        actuator_io: ActuatorIO,
-        ipc: Hub,
-        reactor: Reactor<W>,
+        engine: Engine, loader: Loader, config_path: PathBuf, socket_path: PathBuf,
+        cli_log_overrides: CliLogOverrides, obs_handle: ObservabilityHandle,
+        prober: Arc<dyn Prober>, actuator_io: ActuatorIO, ipc: Hub, reactor: Reactor<W>,
     ) -> Self {
         Self {
             engine,
@@ -287,12 +280,7 @@ impl<W: FsWatcher> EngineDriver<W> {
         let now = Instant::now();
         // Snapshot the active spec list: `self.engine.step` needs `&mut self`, so the `&self` borrow
         // on `loader.current_config` cannot be held across the loop.
-        let watch_specs: Vec<_> = self
-            .loader
-            .current_config()
-            .active_watches()
-            .cloned()
-            .collect();
+        let watch_specs: Vec<_> = self.loader.current_config().active_watches().cloned().collect();
         for spec in watch_specs {
             let req = spec.to_attach_request();
             let out = self.engine.step(Input::AttachSub(req), now);
@@ -362,10 +350,7 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// driver), so the second-tap hard-exit handshake stays installed across the entire
     /// actuator-grace window — no handshake is orphaned mid-grace.
     pub(crate) fn dispatch_signal_with_exit_fn<F: FnOnce(i32)>(
-        &mut self,
-        sig: i32,
-        now: Instant,
-        exit_fn: F,
+        &mut self, sig: i32, now: Instant, exit_fn: F,
     ) -> ControlFlow<()> {
         let action =
             dispatch_signal_inner(sig, now, &mut self.first_term, &self.actuator_io, exit_fn);
@@ -448,11 +433,7 @@ enum SignalAction {
 /// ([`EngineDriver::dispatch_reload`]) needs — the inner function returns its action discriminator,
 /// then drops every borrow before the caller takes the `&mut self` it needs for the reload step.
 fn dispatch_signal_inner<F: FnOnce(i32)>(
-    sig: i32,
-    now: Instant,
-    first_term: &mut Option<Instant>,
-    io: &ActuatorIO,
-    exit_fn: F,
+    sig: i32, now: Instant, first_term: &mut Option<Instant>, io: &ActuatorIO, exit_fn: F,
 ) -> SignalAction {
     use crate::signals::{HARD_EXIT_CODE, HARD_EXIT_WINDOW, HARD_SHUTDOWN_CONFIRM_TIMEOUT};
     use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
@@ -484,9 +465,7 @@ fn dispatch_signal_inner<F: FnOnce(i32)>(
                 //     reap pending, parent safe to die.
                 //   - `Err(Timeout)` — fallback bound for a wedged actuator; parent dies, kernel
                 //     reaps on exit.
-                let _ = io
-                    .hard_shutdown_done_rx
-                    .recv_timeout(HARD_SHUTDOWN_CONFIRM_TIMEOUT);
+                let _ = io.hard_shutdown_done_rx.recv_timeout(HARD_SHUTDOWN_CONFIRM_TIMEOUT);
                 exit_fn(HARD_EXIT_CODE);
                 SignalAction::HardExit
             } else {

@@ -47,9 +47,7 @@ impl CombinedSignaler {
 /// varies is the per-stage method invoked, so the fan-out + log-then-retain-first shape lives in
 /// one place.
 fn fan_out<F>(
-    stages: &[Arc<dyn ChildSignaler>],
-    call_kind: &'static str,
-    mut call: F,
+    stages: &[Arc<dyn ChildSignaler>], call_kind: &'static str, mut call: F,
 ) -> io::Result<()>
 where
     F: FnMut(&Arc<dyn ChildSignaler>) -> io::Result<()>,
@@ -139,8 +137,7 @@ pub(crate) struct PipeWaiter {
 
 impl PipeWaiter {
     pub(crate) fn new(
-        waiters: Vec<Box<dyn ChildWaiter>>,
-        signalers: Arc<[Arc<dyn ChildSignaler>]>,
+        waiters: Vec<Box<dyn ChildWaiter>>, signalers: Arc<[Arc<dyn ChildSignaler>]>,
     ) -> Self {
         debug_assert_eq!(
             waiters.len(),
@@ -264,7 +261,7 @@ fn cascade_sigterm(signalers: &[Arc<dyn ChildSignaler>], failed_idx: usize) {
             continue;
         }
         if let Err(e) = s.signal_term() {
-            tracing::debug!(stage = s_idx, ?e, "PipeWaiter: cascade SIGTERM failed",);
+            tracing::debug!(stage = s_idx, ?e, "PipeWaiter: cascade SIGTERM failed");
         }
     }
 }
@@ -290,10 +287,7 @@ fn fold_reports(reports: Vec<Option<EffectOutcome>>) -> EffectOutcome {
             Termination::Internal => (None, None),
             Termination::Exit(c) => (Some(c), None),
             Termination::Signal(s) => (None, Some(s)),
-            Termination::PipeMixed {
-                last_exit,
-                first_signal: sig,
-            } => (Some(last_exit), Some(sig)),
+            Termination::PipeMixed { last_exit, first_signal: sig } => (Some(last_exit), Some(sig)),
         };
         if let Some(c) = exit {
             last_failed_exit = Some(c);
@@ -309,10 +303,7 @@ fn fold_reports(reports: Vec<Option<EffectOutcome>>) -> EffectOutcome {
         (None, None) => Termination::Internal,
         (Some(c), None) => Termination::Exit(c),
         (None, Some(s)) => Termination::Signal(s),
-        (Some(c), Some(s)) => Termination::PipeMixed {
-            last_exit: c,
-            first_signal: s,
-        },
+        (Some(c), Some(s)) => Termination::PipeMixed { last_exit: c, first_signal: s },
     })
 }
 
@@ -329,11 +320,8 @@ fn fold_reports(reports: Vec<Option<EffectOutcome>>) -> EffectOutcome {
 /// Returns the synthesised aggregate outcome [`Termination::Internal`] — semantically equivalent to
 /// a wait-thread spawn failure on a single-process step.
 fn recover_from_spawn_failure(
-    failed_idx: usize,
-    err: &io::Error,
-    signalers: &[Arc<dyn ChildSignaler>],
-    leftover: Vec<Box<dyn ChildWaiter>>,
-    spawned_handles: Vec<thread::JoinHandle<()>>,
+    failed_idx: usize, err: &io::Error, signalers: &[Arc<dyn ChildSignaler>],
+    leftover: Vec<Box<dyn ChildWaiter>>, spawned_handles: Vec<thread::JoinHandle<()>>,
     rx: &Receiver<StageReport>,
 ) -> EffectOutcome {
     tracing::error!(
@@ -349,18 +337,14 @@ fn recover_from_spawn_failure(
             continue;
         }
         if let Err(e) = s.signal_kill() {
-            tracing::debug!(stage = s_idx, ?e, "PipeWaiter recovery: SIGKILL failed",);
+            tracing::debug!(stage = s_idx, ?e, "PipeWaiter recovery: SIGKILL failed");
         }
     }
 
     // Reap the orphan whose waiter was lost — without this the kernel keeps the zombie until process
     // exit.
     if let Err(e) = signalers[failed_idx].reap_blocking() {
-        tracing::warn!(
-            stage = failed_idx,
-            ?e,
-            "PipeWaiter recovery: orphan reap_blocking failed",
-        );
+        tracing::warn!(stage = failed_idx, ?e, "PipeWaiter recovery: orphan reap_blocking failed");
     }
 
     // Synchronously drain the unspawned waiters. SIGKILL above ensures wait returns quickly; the
@@ -407,11 +391,7 @@ mod tests {
 
     impl Probe {
         fn new() -> Self {
-            Self {
-                dead: DeadFlag::new(),
-                term: AtomicU32::new(0),
-                kill: AtomicU32::new(0),
-            }
+            Self { dead: DeadFlag::new(), term: AtomicU32::new(0), kill: AtomicU32::new(0) }
         }
     }
 
@@ -451,10 +431,7 @@ mod tests {
     }
 
     fn probes_into_signalers(probes: &[Arc<Probe>]) -> Arc<[Arc<dyn ChildSignaler>]> {
-        probes
-            .iter()
-            .map(|p| Arc::clone(p) as Arc<dyn ChildSignaler>)
-            .collect()
+        probes.iter().map(|p| Arc::clone(p) as Arc<dyn ChildSignaler>).collect()
     }
 
     /// Probe paired with a [`BlockingWaiter`]: the waiter blocks on a crossbeam channel until any
@@ -490,10 +467,7 @@ mod tests {
                 return_outcome,
                 unblock: tx,
             });
-            let waiter = BlockingWaiter {
-                rx,
-                probe: Arc::clone(&probe),
-            };
+            let waiter = BlockingWaiter { rx, probe: Arc::clone(&probe) };
             (probe, waiter)
         }
     }
@@ -551,22 +525,11 @@ mod tests {
         let signalers = probes_into_signalers(&[p0.clone(), p1.clone(), p2.clone()]);
 
         let waiters: Vec<Box<dyn ChildWaiter>> = vec![
-            Box::new(StaticWaiter {
-                outcome: Ok(EffectOutcome::Ok),
-                dead: Arc::clone(&p0),
-            }),
-            Box::new(StaticWaiter {
-                outcome: Ok(EffectOutcome::Ok),
-                dead: Arc::clone(&p1),
-            }),
-            Box::new(StaticWaiter {
-                outcome: Ok(EffectOutcome::Ok),
-                dead: Arc::clone(&p2),
-            }),
+            Box::new(StaticWaiter { outcome: Ok(EffectOutcome::Ok), dead: Arc::clone(&p0) }),
+            Box::new(StaticWaiter { outcome: Ok(EffectOutcome::Ok), dead: Arc::clone(&p1) }),
+            Box::new(StaticWaiter { outcome: Ok(EffectOutcome::Ok), dead: Arc::clone(&p2) }),
         ];
-        let outcome = Box::new(PipeWaiter::new(waiters, signalers))
-            .wait()
-            .unwrap();
+        let outcome = Box::new(PipeWaiter::new(waiters, signalers)).wait().unwrap();
         assert_eq!(outcome, EffectOutcome::Ok);
         assert_eq!(p0.term.load(Ordering::SeqCst), 0);
         assert_eq!(p1.term.load(Ordering::SeqCst), 0);
@@ -600,14 +563,9 @@ mod tests {
             Box::new(p1_waiter),
             Box::new(p2_waiter),
         ];
-        let outcome = Box::new(PipeWaiter::new(waiters, signalers))
-            .wait()
-            .unwrap();
+        let outcome = Box::new(PipeWaiter::new(waiters, signalers)).wait().unwrap();
         match outcome {
-            EffectOutcome::Failed(Termination::PipeMixed {
-                last_exit,
-                first_signal,
-            }) => {
+            EffectOutcome::Failed(Termination::PipeMixed { last_exit, first_signal }) => {
                 assert_eq!(last_exit, 7, "last non-zero exit propagates");
                 assert_eq!(
                     first_signal, 15,
@@ -645,14 +603,9 @@ mod tests {
                 dead: Arc::clone(&p2),
             }),
         ];
-        let outcome = Box::new(PipeWaiter::new(waiters, signalers))
-            .wait()
-            .unwrap();
+        let outcome = Box::new(PipeWaiter::new(waiters, signalers)).wait().unwrap();
         match outcome {
-            EffectOutcome::Failed(Termination::PipeMixed {
-                last_exit,
-                first_signal,
-            }) => {
+            EffectOutcome::Failed(Termination::PipeMixed { last_exit, first_signal }) => {
                 // last_exit = last non-zero in spawn order = 9 (stage 2); first_signal = first
                 // observed in spawn order = 15 (stage 0).
                 assert_eq!(last_exit, 9);
@@ -660,21 +613,9 @@ mod tests {
             }
             other => panic!("expected Failed(PipeMixed); got {other:?}"),
         }
-        assert_eq!(
-            p0.term.load(Ordering::SeqCst),
-            1,
-            "stage 0 cascaded (backward)"
-        );
-        assert_eq!(
-            p1.term.load(Ordering::SeqCst),
-            1,
-            "stage 1 cascaded (backward)"
-        );
-        assert_eq!(
-            p2.term.load(Ordering::SeqCst),
-            0,
-            "stage 2 (failing) not cascaded"
-        );
+        assert_eq!(p0.term.load(Ordering::SeqCst), 1, "stage 0 cascaded (backward)");
+        assert_eq!(p1.term.load(Ordering::SeqCst), 1, "stage 1 cascaded (backward)");
+        assert_eq!(p2.term.load(Ordering::SeqCst), 0, "stage 2 (failing) not cascaded");
     }
 
     /// Stage 0's waiter blocks indefinitely (modelled as [`BlockingWaiter`]); stage 1 reports Failed
@@ -701,30 +642,21 @@ mod tests {
             }),
         ];
         let start = Instant::now();
-        let outcome = Box::new(PipeWaiter::new(waiters, signalers))
-            .wait()
-            .unwrap();
+        let outcome = Box::new(PipeWaiter::new(waiters, signalers)).wait().unwrap();
         let elapsed = start.elapsed();
         assert!(
             elapsed < Duration::from_secs(5),
             "parallel waiter must not block on stage 0 (elapsed = {elapsed:?})",
         );
         match outcome {
-            EffectOutcome::Failed(Termination::PipeMixed {
-                last_exit,
-                first_signal,
-            }) => {
+            EffectOutcome::Failed(Termination::PipeMixed { last_exit, first_signal }) => {
                 assert_eq!(last_exit, 3);
                 assert_eq!(first_signal, 15);
             }
             other => panic!("expected Failed(PipeMixed); got {other:?}"),
         }
         assert_eq!(p0.term.load(Ordering::SeqCst), 1, "stage 0 cascaded");
-        assert_eq!(
-            p1.term.load(Ordering::SeqCst),
-            0,
-            "stage 1 (failing) not cascaded"
-        );
+        assert_eq!(p1.term.load(Ordering::SeqCst), 0, "stage 1 (failing) not cascaded");
     }
 
     /// Multiple failures: aggregated exit_code is the LAST non-zero exit in spawn order; signal is
@@ -753,14 +685,9 @@ mod tests {
                 dead: Arc::clone(&p2),
             }),
         ];
-        let outcome = Box::new(PipeWaiter::new(waiters, signalers))
-            .wait()
-            .unwrap();
+        let outcome = Box::new(PipeWaiter::new(waiters, signalers)).wait().unwrap();
         match outcome {
-            EffectOutcome::Failed(Termination::PipeMixed {
-                last_exit,
-                first_signal,
-            }) => {
+            EffectOutcome::Failed(Termination::PipeMixed { last_exit, first_signal }) => {
                 assert_eq!(last_exit, 7, "last non-zero exit (stage 2)");
                 assert_eq!(first_signal, 15, "first observed signal (stage 0)");
             }
@@ -782,14 +709,9 @@ mod tests {
                 outcome: Ok(EffectOutcome::Failed(Termination::Exit(1))),
                 dead: Arc::clone(&p0),
             }),
-            Box::new(StaticWaiter {
-                outcome: Ok(EffectOutcome::Ok),
-                dead: Arc::clone(&p1),
-            }),
+            Box::new(StaticWaiter { outcome: Ok(EffectOutcome::Ok), dead: Arc::clone(&p1) }),
         ];
-        let _ = Box::new(PipeWaiter::new(waiters, signalers))
-            .wait()
-            .unwrap();
+        let _ = Box::new(PipeWaiter::new(waiters, signalers)).wait().unwrap();
         assert_eq!(
             p1.term.load(Ordering::SeqCst),
             0,
@@ -870,19 +792,11 @@ mod tests {
         let signalers = probes_into_signalers(&[p0.clone(), p1.clone(), p2.clone()]);
 
         let waiters: Vec<Box<dyn ChildWaiter>> = vec![
-            Box::new(StaticWaiter {
-                outcome: Ok(EffectOutcome::Ok),
-                dead: Arc::clone(&p0),
-            }),
+            Box::new(StaticWaiter { outcome: Ok(EffectOutcome::Ok), dead: Arc::clone(&p0) }),
             Box::new(PanickingWaiter),
-            Box::new(StaticWaiter {
-                outcome: Ok(EffectOutcome::Ok),
-                dead: Arc::clone(&p2),
-            }),
+            Box::new(StaticWaiter { outcome: Ok(EffectOutcome::Ok), dead: Arc::clone(&p2) }),
         ];
-        let _ = Box::new(PipeWaiter::new(waiters, signalers))
-            .wait()
-            .unwrap();
+        let _ = Box::new(PipeWaiter::new(waiters, signalers)).wait().unwrap();
 
         assert!(
             p1.is_dead(),

@@ -52,11 +52,7 @@ impl ProgramOp {
     /// Assemble a node. Builder-only — see [`Self`] for why no public constructor exists.
     #[must_use]
     pub(super) const fn new(body: SpawnBody, on_ok: BranchTarget, on_failed: BranchTarget) -> Self {
-        Self {
-            body,
-            on_ok,
-            on_failed,
-        }
+        Self { body, on_ok, on_failed }
     }
 
     /// The spawn body — single `Exec` or N-stage `Pipe`.
@@ -95,10 +91,9 @@ impl ProgramOp {
     pub fn references_diff_derived(&self) -> bool {
         match &self.body {
             SpawnBody::Exec(e) => e.references_diff_derived(),
-            SpawnBody::Pipe(stages) => stages
-                .stages()
-                .iter()
-                .any(ExecAction::references_diff_derived),
+            SpawnBody::Pipe(stages) => {
+                stages.stages().iter().any(ExecAction::references_diff_derived)
+            }
         }
     }
 }
@@ -128,9 +123,7 @@ impl MultiStage {
     /// reified cross-crate.)
     pub fn new(stages: Arc<[ExecAction]>) -> Result<Self, ProgramError> {
         if stages.len() < 2 {
-            return Err(ProgramError::DegeneratePipe {
-                stages: stages.len(),
-            });
+            return Err(ProgramError::DegeneratePipe { stages: stages.len() });
         }
         Ok(Self(stages))
     }
@@ -238,12 +231,7 @@ mod tests {
     }
 
     fn exec_arc(literals: &[&str]) -> Arc<[ExecAction]> {
-        Arc::from(
-            literals
-                .iter()
-                .map(|s| exec_with(ArgPart::literal(*s)))
-                .collect::<Vec<_>>(),
-        )
+        Arc::from(literals.iter().map(|s| exec_with(ArgPart::literal(*s))).collect::<Vec<_>>())
     }
 
     /// `MultiStage::new` is the spawn-body-shape seal: a pipe with fewer than two stages is a
@@ -251,16 +239,10 @@ mod tests {
     #[test]
     fn multi_stage_new_rejects_fewer_than_two_stages() {
         let zero: Arc<[ExecAction]> = Arc::from(Vec::<ExecAction>::new());
-        assert_eq!(
-            MultiStage::new(zero),
-            Err(ProgramError::DegeneratePipe { stages: 0 }),
-        );
+        assert_eq!(MultiStage::new(zero), Err(ProgramError::DegeneratePipe { stages: 0 }));
 
         let one = exec_arc(&["/bin/solo"]);
-        assert_eq!(
-            MultiStage::new(one),
-            Err(ProgramError::DegeneratePipe { stages: 1 }),
-        );
+        assert_eq!(MultiStage::new(one), Err(ProgramError::DegeneratePipe { stages: 1 }));
     }
 
     /// ≥2 stages construct; `stages()` returns the slice verbatim with length preserved.
@@ -296,10 +278,7 @@ mod tests {
             BranchTarget::Continue(BranchIndex::new(3)),
             BranchTarget::Terminate,
         );
-        assert_eq!(
-            op.target(&EffectOutcome::Ok),
-            BranchTarget::Continue(BranchIndex::new(3)),
-        );
+        assert_eq!(op.target(&EffectOutcome::Ok), BranchTarget::Continue(BranchIndex::new(3)));
     }
 
     #[test]

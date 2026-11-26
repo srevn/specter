@@ -46,19 +46,12 @@ fn first_probe_request(out: &StepOutput) -> Option<&ProbeRequest> {
 }
 
 fn count_probes(out: &StepOutput) -> usize {
-    out.probe_ops()
-        .iter()
-        .filter(|op| matches!(op, ProbeOp::Probe { .. }))
-        .count()
+    out.probe_ops().iter().filter(|op| matches!(op, ProbeOp::Probe { .. })).count()
 }
 
 /// [`attach_returning`] at a pre-placed anchor with the suite's recursive `Subtree` config.
 fn attach_at(
-    e: &mut Engine,
-    name: &str,
-    anchor: ResourceId,
-    events: ClassSet,
-    max_settle: Duration,
+    e: &mut Engine, name: &str, anchor: ResourceId, events: ClassSet, max_settle: Duration,
     now: Instant,
 ) -> (SubId, ProfileId, StepOutput) {
     attach_returning(
@@ -75,10 +68,8 @@ fn attach_at(
 /// Pre-place `/watch/app.log` — a File anchor under a Dir parent, the atomic-save fixture shape.
 fn place_file_anchor(e: &mut Engine) -> (ResourceId, ResourceId) {
     let parent = pre_place_dir(e, &["watch"]);
-    let anchor = e
-        .tree_mut()
-        .ensure_child(parent, "app.log", ResourceRole::User)
-        .expect("test live parent");
+    let anchor =
+        e.tree_mut().ensure_child(parent, "app.log", ResourceRole::User).expect("test live parent");
     e.tree_mut().set_kind(anchor, ResourceKind::File);
     (parent, anchor)
 }
@@ -89,21 +80,11 @@ fn place_file_anchor(e: &mut Engine) -> (ResourceId, ResourceId) {
 /// a triggered Seed — Batching-first — whose settle expiry surfaces the verify probe. Returns
 /// (effects fired by the recovery verdict, instant after).
 fn replace_cycle(
-    e: &mut Engine,
-    pid: ProfileId,
-    parent: ResourceId,
-    inode: u64,
-    now: Instant,
+    e: &mut Engine, pid: ProfileId, parent: ResourceId, inode: u64, now: Instant,
 ) -> (usize, Instant) {
     let anchor = e.profiles().get(pid).unwrap().resource();
     let t1 = now + Duration::from_millis(10);
-    let _ = e.step(
-        Input::FsEvent {
-            resource: anchor,
-            event: FsEvent::Removed,
-        },
-        t1,
-    );
+    let _ = e.step(Input::FsEvent { resource: anchor, event: FsEvent::Removed }, t1);
     {
         let p = e.profiles().get(pid).expect("profile survives anchor loss");
         assert!(
@@ -115,13 +96,7 @@ fn replace_cycle(
     // Parent STRUCTURE event (the rename's dir notification): the live descent absorbs it — the latch
     // is already set and the I5 gate drops the re-probe.
     let t2 = t1 + Duration::from_millis(1);
-    let _ = e.step(
-        Input::FsEvent {
-            resource: parent,
-            event: FsEvent::StructureChanged,
-        },
-        t2,
-    );
+    let _ = e.step(Input::FsEvent { resource: parent, event: FsEvent::StructureChanged }, t2);
     // Descent finds the replacement file -> materialize -> triggered Seed (Batching-first).
     let out = descent_advance(e, pid, Some(EntryKind::File), t2);
     assert!(out.effects().is_empty(), "descent itself never fires");
@@ -153,36 +128,20 @@ fn recovery_from_file_to_dir_anchor_uses_subtree_probe() {
     let mut e = Engine::new();
     let parent = e.tree_mut().ensure_root("var", ResourceRole::User);
     e.tree_mut().set_kind(parent, ResourceKind::Dir);
-    let anchor = e
-        .tree_mut()
-        .ensure_child(parent, "log", ResourceRole::User)
-        .expect("test live parent");
+    let anchor =
+        e.tree_mut().ensure_child(parent, "log", ResourceRole::User).expect("test live parent");
     e.tree_mut().set_kind(anchor, ResourceKind::File);
 
     // Q first — completes its Seed (File anchor → AnchorOk) → Idle, kind=Some(File).
     let t_q = Instant::now();
-    let (_sid_q, pid_q, out_q) = attach_at(
-        &mut e,
-        "Q",
-        anchor,
-        ClassSet::EMPTY,
-        MAX_SETTLE + Duration::from_secs(1),
-        t_q,
-    );
+    let (_sid_q, pid_q, out_q) =
+        attach_at(&mut e, "Q", anchor, ClassSet::EMPTY, MAX_SETTLE + Duration::from_secs(1), t_q);
     assert!(
         first_probe_correlation(&out_q).is_some(),
         "cold-arm Seed: probe emitted at burst construction",
     );
-    let _ = seed_to_idle_with(
-        &mut e,
-        pid_q,
-        || anchor_ok(file_leaf(EntryKind::File, 1)),
-        t_q,
-    );
-    assert_eq!(
-        e.profiles().get(pid_q).unwrap().kind(),
-        Some(ResourceKind::File),
-    );
+    let _ = seed_to_idle_with(&mut e, pid_q, || anchor_ok(file_leaf(EntryKind::File, 1)), t_q);
+    assert_eq!(e.profiles().get(pid_q).unwrap().kind(), Some(ResourceKind::File));
 
     // P next — Active(PreFire(Seed Batching)) right after attach (no probe yet). Attach strictly
     // after Q's two settle windows.
@@ -194,10 +153,7 @@ fn recovery_from_file_to_dir_anchor_uses_subtree_probe() {
     );
     // `Profile.kind` is pinned at construction from the anchor's classified kind, independent of
     // the Batching-first Seed.
-    assert_eq!(
-        e.profiles().get(pid_p).unwrap().kind(),
-        Some(ResourceKind::File),
-    );
+    assert_eq!(e.profiles().get(pid_p).unwrap().kind(), Some(ResourceKind::File));
     // Both Profiles claim the anchor → watch_demand = 2 (each claim is installed at attach by
     // `seed_at_anchor`, before the Seed).
     assert_eq!(e.tree().get(anchor).unwrap().watch_demand(), 2);
@@ -249,14 +205,8 @@ fn recovery_from_file_to_dir_anchor_uses_subtree_probe() {
     let probe_at = mat_at + SETTLE;
     let mut p_probe_out = None;
     while let Some(en) = e.pop_expired(probe_at) {
-        let o = e.step(
-            Input::TimerExpired {
-                profile: en.profile,
-                kind: en.kind,
-                id: en.id,
-            },
-            probe_at,
-        );
+        let o =
+            e.step(Input::TimerExpired { profile: en.profile, kind: en.kind, id: en.id }, probe_at);
         if first_probe_request(&o).is_some() {
             p_probe_out = Some(o);
         }
@@ -285,22 +235,14 @@ fn recovery_from_dir_to_file_anchor_bounded_to_one_round_trip() {
     let mut e = Engine::new();
     let parent = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(parent, ResourceKind::Dir);
-    let anchor = e
-        .tree_mut()
-        .ensure_child(parent, "build", ResourceRole::User)
-        .expect("test live parent");
+    let anchor =
+        e.tree_mut().ensure_child(parent, "build", ResourceRole::User).expect("test live parent");
     e.tree_mut().set_kind(anchor, ResourceKind::Dir);
 
     // Q's Seed (Dir anchor → SubtreeProven) → Idle.
     let t_q = Instant::now();
-    let (_sid_q, pid_q, out_q) = attach_at(
-        &mut e,
-        "Q",
-        anchor,
-        ClassSet::EMPTY,
-        MAX_SETTLE + Duration::from_secs(1),
-        t_q,
-    );
+    let (_sid_q, pid_q, out_q) =
+        attach_at(&mut e, "Q", anchor, ClassSet::EMPTY, MAX_SETTLE + Duration::from_secs(1), t_q);
     assert!(
         first_probe_correlation(&out_q).is_some(),
         "cold-arm Seed: probe emitted at burst construction",
@@ -316,10 +258,7 @@ fn recovery_from_dir_to_file_anchor_bounded_to_one_round_trip() {
         first_probe_correlation(&out_p).is_some(),
         "cold-arm Seed: probe emitted at burst construction",
     );
-    assert_eq!(
-        e.profiles().get(pid_p).unwrap().kind(),
-        Some(ResourceKind::Dir),
-    );
+    assert_eq!(e.profiles().get(pid_p).unwrap().kind(), Some(ResourceKind::Dir));
 
     // Expire P's first settle window → first Seed probe; drive it to Vanished. The loss step clears
     // P.kind and re-enters descent at the parent.
@@ -333,10 +272,7 @@ fn recovery_from_dir_to_file_anchor_bounded_to_one_round_trip() {
         p_at,
     );
     assert!(e.profiles().get(pid_p).unwrap().kind().is_none());
-    assert!(matches!(
-        e.profiles().get(pid_p).unwrap().state(),
-        ProfileState::Pending(_),
-    ));
+    assert!(matches!(e.profiles().get(pid_p).unwrap().state(), ProfileState::Pending(_)));
 
     // The descent probe re-classifies the anchor: `build` is a File now. Materialization opens the
     // triggered Seed Batching-first.
@@ -354,14 +290,8 @@ fn recovery_from_dir_to_file_anchor_bounded_to_one_round_trip() {
     let probe_at = mat_at + SETTLE;
     let mut settle_out = None;
     while let Some(en) = e.pop_expired(probe_at) {
-        let o = e.step(
-            Input::TimerExpired {
-                profile: en.profile,
-                kind: en.kind,
-                id: en.id,
-            },
-            probe_at,
-        );
+        let o =
+            e.step(Input::TimerExpired { profile: en.profile, kind: en.kind, id: en.id }, probe_at);
         if first_probe_request(&o).is_some() {
             settle_out = Some(o);
         }
@@ -373,10 +303,7 @@ fn recovery_from_dir_to_file_anchor_bounded_to_one_round_trip() {
         .chain(settle_out.probe_ops().iter())
         .filter(|op| matches!(op, ProbeOp::Probe { request } if request.owner() == pid_p))
         .count();
-    assert_eq!(
-        p_probe_count, 1,
-        "exactly one anchor probe emitted for P during recovery",
-    );
+    assert_eq!(p_probe_count, 1, "exactly one anchor probe emitted for P during recovery");
     let p_probe = first_probe_request(&settle_out).expect("recovery probe emitted");
     assert!(
         matches!(p_probe, ProbeRequest::AnchorFile { .. }),
@@ -392,32 +319,19 @@ fn anchor_loss_via_probe_failed_clears_kind_and_recovers_via_subtree() {
     let mut e = Engine::new();
     let parent = e.tree_mut().ensure_root("var", ResourceRole::User);
     e.tree_mut().set_kind(parent, ResourceKind::Dir);
-    let anchor = e
-        .tree_mut()
-        .ensure_child(parent, "log", ResourceRole::User)
-        .expect("test live parent");
+    let anchor =
+        e.tree_mut().ensure_child(parent, "log", ResourceRole::User).expect("test live parent");
     e.tree_mut().set_kind(anchor, ResourceKind::File);
 
     // Q's Seed (File anchor → AnchorOk) → Idle.
     let t_q = Instant::now();
-    let (_sid_q, pid_q, out_q) = attach_at(
-        &mut e,
-        "Q",
-        anchor,
-        ClassSet::EMPTY,
-        MAX_SETTLE + Duration::from_secs(1),
-        t_q,
-    );
+    let (_sid_q, pid_q, out_q) =
+        attach_at(&mut e, "Q", anchor, ClassSet::EMPTY, MAX_SETTLE + Duration::from_secs(1), t_q);
     assert!(
         first_probe_correlation(&out_q).is_some(),
         "cold-arm Seed: probe emitted at burst construction",
     );
-    let _ = seed_to_idle_with(
-        &mut e,
-        pid_q,
-        || anchor_ok(file_leaf(EntryKind::File, 1)),
-        t_q,
-    );
+    let _ = seed_to_idle_with(&mut e, pid_q, || anchor_ok(file_leaf(EntryKind::File, 1)), t_q);
 
     // P attaches strictly after Q's two settle windows; Batching-first.
     let t_p = t_q + SETTLE * 3;
@@ -444,18 +358,10 @@ fn anchor_loss_via_probe_failed_clears_kind_and_recovers_via_subtree() {
     // event-scan recovery arm (which selects a `Parked` Profile whose own anchor slot is the event
     // resource) into a Pending descent — the descent probe materializes at the parent prefix.
     let recovery_t0 = p_at + SETTLE;
-    let recovery_out = e.step(
-        Input::FsEvent {
-            resource: anchor,
-            event: FsEvent::ContentChanged,
-        },
-        recovery_t0,
-    );
+    let recovery_out =
+        e.step(Input::FsEvent { resource: anchor, event: FsEvent::ContentChanged }, recovery_t0);
     assert!(
-        matches!(
-            e.profiles().get(pid_p).unwrap().state(),
-            ProfileState::Pending(_)
-        ),
+        matches!(e.profiles().get(pid_p).unwrap().state(), ProfileState::Pending(_)),
         "recovery from a probe-Failed park re-enters descent",
     );
     assert_eq!(
@@ -489,20 +395,9 @@ fn replace_of_fired_anchor_recovery_fires() {
     let (parent, anchor) = place_file_anchor(&mut e);
 
     let now = Instant::now();
-    let (sid, pid, _) = attach_at(
-        &mut e,
-        "static-fired",
-        anchor,
-        ClassSet::DEFAULT_SUBTREE_ROOT,
-        MAX_SETTLE,
-        now,
-    );
-    let t0 = seed_to_idle_with(
-        &mut e,
-        pid,
-        || anchor_ok(file_leaf(EntryKind::File, 1)),
-        now,
-    );
+    let (sid, pid, _) =
+        attach_at(&mut e, "static-fired", anchor, ClassSet::DEFAULT_SUBTREE_ROOT, MAX_SETTLE, now);
+    let t0 = seed_to_idle_with(&mut e, pid, || anchor_ok(file_leaf(EntryKind::File, 1)), now);
     let t1 = fire_standard_once(&mut e, sid, anchor, 2, t0 + SETTLE);
     assert!(e.subs().get(sid).unwrap().has_fired());
 
@@ -529,32 +424,18 @@ fn replace_of_never_fired_anchor_fires_first_fire() {
         MAX_SETTLE,
         now,
     );
-    let t0 = seed_to_idle_with(
-        &mut e,
-        pid,
-        || anchor_ok(file_leaf(EntryKind::File, 1)),
-        now,
-    );
+    let t0 = seed_to_idle_with(&mut e, pid, || anchor_ok(file_leaf(EntryKind::File, 1)), now);
 
     // Replace 1 -> 2: the witnessed loss owes — and fires — the first fire.
     let (fired, t1) = replace_cycle(&mut e, pid, parent, 2, t0 + SETTLE);
-    assert_eq!(
-        fired, 1,
-        "never-fired Sub: the witnessed replace fires (FreshSeedFire)",
-    );
+    assert_eq!(fired, 1, "never-fired Sub: the witnessed replace fires (FreshSeedFire)");
     assert!(e.subs().get(sid).unwrap().has_fired());
 
     // Drain the fire cycle: effect Ok -> rebase -> Idle.
-    let key = specter_core::DedupKey::Subtree {
-        sub: sid,
-        profile: pid,
-    };
+    let key = specter_core::DedupKey::Subtree { sub: sid, profile: pid };
     let _ = complete_effect_to_rebasing(&mut e, sid, key, t1);
     let _ = respond_anchor_file(&mut e, pid, 2, t1);
-    assert!(matches!(
-        e.profiles().get(pid).unwrap().state(),
-        ProfileState::Idle
-    ));
+    assert!(matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Idle));
     let _ = e.cancel_all_in_flight_probes();
 }
 
@@ -568,61 +449,28 @@ fn parent_event_before_terminal_still_recovers_and_fires() {
     let (parent, anchor) = place_file_anchor(&mut e);
 
     let now = Instant::now();
-    let (sid, pid, _) = attach_at(
-        &mut e,
-        "ordering-race",
-        anchor,
-        ClassSet::DEFAULT_SUBTREE_ROOT,
-        MAX_SETTLE,
-        now,
-    );
-    let t0 = seed_to_idle_with(
-        &mut e,
-        pid,
-        || anchor_ok(file_leaf(EntryKind::File, 1)),
-        now,
-    );
+    let (sid, pid, _) =
+        attach_at(&mut e, "ordering-race", anchor, ClassSet::DEFAULT_SUBTREE_ROOT, MAX_SETTLE, now);
+    let t0 = seed_to_idle_with(&mut e, pid, || anchor_ok(file_leaf(EntryKind::File, 1)), now);
     let t1 = fire_standard_once(&mut e, sid, anchor, 2, t0 + SETTLE);
 
     // The parent notification lands FIRST: the Profile is still healthy, so nothing moves.
     let t2 = t1 + Duration::from_millis(10);
-    let _ = e.step(
-        Input::FsEvent {
-            resource: parent,
-            event: FsEvent::StructureChanged,
-        },
-        t2,
-    );
-    assert!(matches!(
-        e.profiles().get(pid).unwrap().state(),
-        ProfileState::Idle
-    ));
+    let _ = e.step(Input::FsEvent { resource: parent, event: FsEvent::StructureChanged }, t2);
+    assert!(matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Idle));
     assert!(e.pending_probe_for(pid).is_none());
 
     // The terminal lands second — and is itself the recovery driver. No further parent event is
     // delivered for the rest of the test.
     let t3 = t2 + Duration::from_millis(1);
-    let _ = e.step(
-        Input::FsEvent {
-            resource: anchor,
-            event: FsEvent::Removed,
-        },
-        t3,
-    );
-    assert!(matches!(
-        e.profiles().get(pid).unwrap().state(),
-        ProfileState::Pending(_)
-    ));
+    let _ = e.step(Input::FsEvent { resource: anchor, event: FsEvent::Removed }, t3);
+    assert!(matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Pending(_)));
     let out = descent_advance(&mut e, pid, Some(EntryKind::File), t3);
     assert!(out.effects().is_empty());
     let t4 = t3 + SETTLE * 2;
     drain_due(&mut e, t4);
     let out = respond_anchor_file(&mut e, pid, 3, t4);
-    assert_eq!(
-        out.effects().len(),
-        1,
-        "recovery fires with no post-terminal parent event",
-    );
+    assert_eq!(out.effects().len(), 1, "recovery fires with no post-terminal parent event");
     let _ = e.cancel_all_in_flight_probes();
 }
 
@@ -635,35 +483,17 @@ fn standard_vanished_at_descendant_lca_recovers_live_anchor_and_fires() {
     let mut e = Engine::new();
     let dir = pre_place_dir(&mut e, &["watch", "data"]);
     let now = Instant::now();
-    let (sid, pid, _) = attach_at(
-        &mut e,
-        "descendant-lca",
-        dir,
-        ClassSet::DEFAULT_SUBTREE_ROOT,
-        MAX_SETTLE,
-        now,
-    );
-    let t0 = seed_to_idle_with(
-        &mut e,
-        pid,
-        || proven(dir_snap(&[("f.txt", EntryKind::File, 1)])),
-        now,
-    );
-    let child = e
-        .tree()
-        .lookup(Some(dir), "f.txt")
-        .expect("per-file reconcile created the child slot");
+    let (sid, pid, _) =
+        attach_at(&mut e, "descendant-lca", dir, ClassSet::DEFAULT_SUBTREE_ROOT, MAX_SETTLE, now);
+    let t0 =
+        seed_to_idle_with(&mut e, pid, || proven(dir_snap(&[("f.txt", EntryKind::File, 1)])), now);
+    let child =
+        e.tree().lookup(Some(dir), "f.txt").expect("per-file reconcile created the child slot");
 
     // A change at the child opens a Standard burst whose dirty-LCA — and probe target — is the child
     // itself.
     let t1 = t0 + SETTLE;
-    let _ = e.step(
-        Input::FsEvent {
-            resource: child,
-            event: FsEvent::ContentChanged,
-        },
-        t1,
-    );
+    let _ = e.step(Input::FsEvent { resource: child, event: FsEvent::ContentChanged }, t1);
     let t2 = t1 + SETTLE * 2;
     drain_due(&mut e, t2);
     let corr = e.pending_probe_for(pid).expect("verify probe in flight");
@@ -676,10 +506,7 @@ fn standard_vanished_at_descendant_lca_recovers_live_anchor_and_fires() {
         t2,
     );
     assert!(
-        matches!(
-            e.profiles().get(pid).unwrap().state(),
-            ProfileState::Pending(_)
-        ),
+        matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Pending(_)),
         "descendant-LCA Vanished re-enters descent rather than parking a dead watch",
     );
 
@@ -716,20 +543,9 @@ fn replace_storm_within_settle_window_fires_once() {
     let (_parent, anchor) = place_file_anchor(&mut e);
 
     let now = Instant::now();
-    let (sid, pid, _) = attach_at(
-        &mut e,
-        "storm",
-        anchor,
-        ClassSet::DEFAULT_SUBTREE_ROOT,
-        MAX_SETTLE,
-        now,
-    );
-    let t0 = seed_to_idle_with(
-        &mut e,
-        pid,
-        || anchor_ok(file_leaf(EntryKind::File, 1)),
-        now,
-    );
+    let (sid, pid, _) =
+        attach_at(&mut e, "storm", anchor, ClassSet::DEFAULT_SUBTREE_ROOT, MAX_SETTLE, now);
+    let t0 = seed_to_idle_with(&mut e, pid, || anchor_ok(file_leaf(EntryKind::File, 1)), now);
 
     // Three replaces 10ms apart — all inside one settle window. The anchor's slot id is stable across
     // replaces ((parent, segment) identity).
@@ -737,26 +553,14 @@ fn replace_storm_within_settle_window_fires_once() {
     let mut fired_during_storm = 0;
     for _ in 0..3 {
         t += Duration::from_millis(10);
-        let _ = e.step(
-            Input::FsEvent {
-                resource: anchor,
-                event: FsEvent::Removed,
-            },
-            t,
-        );
+        let _ = e.step(Input::FsEvent { resource: anchor, event: FsEvent::Removed }, t);
         assert!(
-            matches!(
-                e.profiles().get(pid).unwrap().state(),
-                ProfileState::Pending(_)
-            ),
+            matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Pending(_)),
             "every terminal in the storm re-enters descent",
         );
         let out = descent_advance(&mut e, pid, Some(EntryKind::File), t);
         fired_during_storm += out.effects().len();
-        assert!(
-            e.pending_probe_for(pid).is_none(),
-            "each cycle re-opens Batching",
-        );
+        assert!(e.pending_probe_for(pid).is_none(), "each cycle re-opens Batching");
     }
     assert_eq!(fired_during_storm, 0, "nothing fires inside the storm");
 
@@ -780,55 +584,25 @@ fn repeated_terminal_mid_verifying_cancels_and_recovers() {
     let (_parent, anchor) = place_file_anchor(&mut e);
 
     let now = Instant::now();
-    let (sid, pid, _) = attach_at(
-        &mut e,
-        "mid-verify",
-        anchor,
-        ClassSet::DEFAULT_SUBTREE_ROOT,
-        MAX_SETTLE,
-        now,
-    );
-    let t0 = seed_to_idle_with(
-        &mut e,
-        pid,
-        || anchor_ok(file_leaf(EntryKind::File, 1)),
-        now,
-    );
+    let (sid, pid, _) =
+        attach_at(&mut e, "mid-verify", anchor, ClassSet::DEFAULT_SUBTREE_ROOT, MAX_SETTLE, now);
+    let t0 = seed_to_idle_with(&mut e, pid, || anchor_ok(file_leaf(EntryKind::File, 1)), now);
 
     // First replace: descend, materialize (inode 2), drain the settle window -> Verifying with an
     // armed probe slot.
     let t1 = t0 + SETTLE;
-    let _ = e.step(
-        Input::FsEvent {
-            resource: anchor,
-            event: FsEvent::Removed,
-        },
-        t1,
-    );
+    let _ = e.step(Input::FsEvent { resource: anchor, event: FsEvent::Removed }, t1);
     let _ = descent_advance(&mut e, pid, Some(EntryKind::File), t1);
     let t2 = t1 + SETTLE * 2;
     drain_due(&mut e, t2);
-    let stale_corr = e
-        .pending_probe_for(pid)
-        .expect("recovery Seed verify probe in flight");
+    let stale_corr = e.pending_probe_for(pid).expect("recovery Seed verify probe in flight");
 
     // Second terminal lands mid-Verifying: cancel the armed slot, re-enter descent with a fresh
     // correlation.
     let t3 = t2 + Duration::from_millis(1);
-    let _ = e.step(
-        Input::FsEvent {
-            resource: anchor,
-            event: FsEvent::Removed,
-        },
-        t3,
-    );
-    assert!(matches!(
-        e.profiles().get(pid).unwrap().state(),
-        ProfileState::Pending(_)
-    ));
-    let descent_corr = e
-        .pending_probe_for(pid)
-        .expect("descent probe re-armed by the second loss");
+    let _ = e.step(Input::FsEvent { resource: anchor, event: FsEvent::Removed }, t3);
+    assert!(matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Pending(_)));
+    let descent_corr = e.pending_probe_for(pid).expect("descent probe re-armed by the second loss");
     assert_ne!(descent_corr, stale_corr, "fresh correlation minted");
 
     // The cancelled walk's late response drops stale; the descent is undisturbed.
@@ -841,9 +615,7 @@ fn repeated_terminal_mid_verifying_cancels_and_recovers() {
         t3,
     );
     assert!(
-        out.diagnostics
-            .iter()
-            .any(|d| matches!(d, Diagnostic::StaleProbeResponse { .. })),
+        out.diagnostics.iter().any(|d| matches!(d, Diagnostic::StaleProbeResponse { .. })),
         "late verify response drops stale",
     );
     assert_eq!(e.pending_probe_for(pid), Some(descent_corr));
@@ -878,23 +650,12 @@ fn delete_then_write_parks_narrated_then_recovers() {
         MAX_SETTLE,
         now,
     );
-    let t0 = seed_to_idle_with(
-        &mut e,
-        pid,
-        || anchor_ok(file_leaf(EntryKind::File, 1)),
-        now,
-    );
+    let t0 = seed_to_idle_with(&mut e, pid, || anchor_ok(file_leaf(EntryKind::File, 1)), now);
 
     // The delete: the loss step re-enters descent witnessed; the write hasn't landed yet, so the
     // parent listing lacks the segment — the descent parks, narrated.
     let t1 = t0 + SETTLE;
-    let _ = e.step(
-        Input::FsEvent {
-            resource: anchor,
-            event: FsEvent::Removed,
-        },
-        t1,
-    );
+    let _ = e.step(Input::FsEvent { resource: anchor, event: FsEvent::Removed }, t1);
     let parked = descent_advance(&mut e, pid, None, t1);
     assert!(
         parked.diagnostics.iter().any(|d| matches!(
@@ -905,25 +666,13 @@ fn delete_then_write_parks_narrated_then_recovers() {
         "witnessed park narrates the awaited segment; got {:?}",
         parked.diagnostics,
     );
-    assert!(matches!(
-        e.profiles().get(pid).unwrap().state(),
-        ProfileState::Pending(_)
-    ));
-    assert!(
-        e.pending_probe_for(pid).is_none(),
-        "parked descent awaits the next event",
-    );
+    assert!(matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Pending(_)));
+    assert!(e.pending_probe_for(pid).is_none(), "parked descent awaits the next event");
 
     // The write lands: the parent notification re-probes; the advancing response materialises the
     // triggered Seed (Batching-first) without narrating a park.
     let t2 = t1 + Duration::from_millis(5);
-    let _ = e.step(
-        Input::FsEvent {
-            resource: parent,
-            event: FsEvent::StructureChanged,
-        },
-        t2,
-    );
+    let _ = e.step(Input::FsEvent { resource: parent, event: FsEvent::StructureChanged }, t2);
     let advanced = descent_advance(&mut e, pid, Some(EntryKind::File), t2);
     assert!(
         !advanced
@@ -932,19 +681,12 @@ fn delete_then_write_parks_narrated_then_recovers() {
             .any(|d| matches!(d, Diagnostic::PendingPathAwaitingSegment { .. })),
         "an advancing response never narrates a park",
     );
-    assert!(
-        e.pending_probe_for(pid).is_none(),
-        "triggered Seed opens Batching-first",
-    );
+    assert!(e.pending_probe_for(pid).is_none(), "triggered Seed opens Batching-first");
 
     // The latch persisted through the park: the recovery owes — and fires — the save's fire.
     let t3 = t2 + SETTLE * 2;
     drain_due(&mut e, t3);
     let out = respond_anchor_file(&mut e, pid, 2, t3);
-    assert_eq!(
-        out.effects().len(),
-        1,
-        "the delete-then-write save fires once recovered",
-    );
+    assert_eq!(out.effects().len(), 1, "the delete-then-write save fires once recovered");
     let _ = e.cancel_all_in_flight_probes();
 }

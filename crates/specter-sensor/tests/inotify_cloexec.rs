@@ -48,10 +48,7 @@ fn watcher_fds_are_cloexec() {
     // Spawn-and-introspect a long-running child. The pre_exec hook mirrors `OsSpawner::spawn` so
     // the spawn path is fork+exec rather than posix_spawn (the actuator's production discipline).
     let mut cmd = Command::new("/bin/sleep");
-    cmd.arg("2")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+    cmd.arg("2").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     // SAFETY: pre_exec hook is an empty `Ok(())`; matches the actuator's `OsSpawner::spawn`
     // discipline. The hook performs no I/O, no allocation, no signal-unsafe work.
     #[allow(unsafe_code)]

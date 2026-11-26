@@ -180,9 +180,7 @@ where
 /// re-serialized form mirrors the original's shape modulo `Option::None` differences — but the no-op
 /// fallback arm keeps the helper total.
 fn reject_unknown_keys(
-    orig: &serde_json::Value,
-    rt: &serde_json::Value,
-    path: &mut String,
+    orig: &serde_json::Value, rt: &serde_json::Value, path: &mut String,
 ) -> Result<(), String> {
     use serde_json::Value;
     use std::fmt::Write as _;

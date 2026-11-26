@@ -33,9 +33,7 @@ struct TestProberSink {
 
 impl ProberResponseSender for TestProberSink {
     fn send(&self, response: ProbeResponse) -> Result<(), SendError> {
-        self.tx
-            .send(Input::ProbeResponse(response))
-            .map_err(|_| SendError::Disconnected)
+        self.tx.send(Input::ProbeResponse(response)).map_err(|_| SendError::Disconnected)
     }
 }
 
@@ -68,10 +66,7 @@ fn subtree_request(profile: ProfileId, target_path: PathBuf, correlation: u64) -
 }
 
 fn recv_response(rx: &crossbeam::channel::Receiver<Input>) -> specter_core::ProbeResponse {
-    match rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("response within timeout")
-    {
+    match rx.recv_timeout(Duration::from_secs(2)).expect("response within timeout") {
         Input::ProbeResponse(r) => r,
         other => panic!("unexpected input: {other:?}"),
     }
@@ -119,16 +114,10 @@ fn subtree_round_trip_emits_subtree_ok_with_children() {
     let ProbeOutcome::SubtreeProven { snapshot: arc, .. } = resp.outcome else {
         panic!("expected SubtreeProven");
     };
-    let names: Vec<&str> = arc
-        .entries()
-        .keys()
-        .map(compact_str::CompactString::as_str)
-        .collect();
+    let names: Vec<&str> = arc.entries().keys().map(compact_str::CompactString::as_str).collect();
     assert!(names.contains(&"a.c"));
     assert!(names.contains(&"sub"));
-    let sub_arc = arc
-        .lookup_covered_dir("sub")
-        .expect("recursive subtree present");
+    let sub_arc = arc.lookup_covered_dir("sub").expect("recursive subtree present");
     assert!(sub_arc.entries().contains_key("b.c"));
 
     let _ = prober.shutdown();

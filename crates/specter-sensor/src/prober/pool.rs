@@ -112,9 +112,7 @@ pub(super) type ExpectedMap = Arc<Mutex<BTreeMap<ProfileId, ProbeCorrelation>>>;
 pub(super) fn lock_expected(
     expected: &ExpectedMap,
 ) -> std::sync::MutexGuard<'_, BTreeMap<ProfileId, ProbeCorrelation>> {
-    expected
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+    expected.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Multi-threaded probe pool. See module rustdoc for the cancellation contract and lifecycle.
@@ -131,9 +129,7 @@ pub struct WorkerProber {
 
 impl std::fmt::Debug for WorkerProber {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("WorkerProber")
-            .field("workers", &self.workers.len())
-            .finish_non_exhaustive()
+        f.debug_struct("WorkerProber").field("workers", &self.workers.len()).finish_non_exhaustive()
     }
 }
 
@@ -181,14 +177,10 @@ impl WorkerProber {
         for i in 0..concurrency {
             let rx = queue_rx.clone();
             let out_worker = if i + 1 == concurrency {
-                remaining_out
-                    .take()
-                    .expect("present until taken on the final iteration")
+                remaining_out.take().expect("present until taken on the final iteration")
             } else {
                 Arc::clone(
-                    remaining_out
-                        .as_ref()
-                        .expect("present until the final iteration takes it"),
+                    remaining_out.as_ref().expect("present until the final iteration takes it"),
                 )
             };
             let expected_clone = Arc::clone(&expected);
@@ -222,11 +214,7 @@ impl WorkerProber {
                 }
             }
         }
-        Ok(Self {
-            queue_tx: Some(queue_tx),
-            workers,
-            expected,
-        })
+        Ok(Self { queue_tx: Some(queue_tx), workers, expected })
     }
 
     /// Drop the queue sender (workers exit on `Disconnected` at next `recv`) and join every worker
@@ -346,11 +334,7 @@ pub(super) fn run_probe(req: &ProbeRequest) -> ProbeOutcome {
             obligation,
             *forced,
         ),
-        ProbeRequest::Descent {
-            target_path,
-            segment,
-            ..
-        } => probe_descent(target_path, segment),
+        ProbeRequest::Descent { target_path, segment, .. } => probe_descent(target_path, segment),
     }
 }
 
@@ -362,10 +346,7 @@ pub(super) fn run_probe(req: &ProbeRequest) -> ProbeOutcome {
 /// from inside `catch_unwind(AssertUnwindSafe(...))`, so a test-injected panic is recovered exactly
 /// as a production panic would be.
 pub(super) fn run_worker<F>(
-    rx: &Receiver<ProbeRequest>,
-    out: &dyn ProberResponseSender,
-    expected: &ExpectedMap,
-    probe: F,
+    rx: &Receiver<ProbeRequest>, out: &dyn ProberResponseSender, expected: &ExpectedMap, probe: F,
 ) where
     F: Fn(&ProbeRequest) -> ProbeOutcome,
 {
@@ -378,7 +359,7 @@ pub(super) fn run_worker<F>(
         // closed the per-owner probe channel on cancel-emit, so a missing response is harmless.
         let still_wanted = lock_expected(expected).get(&owner).copied() == Some(correlation);
         if !still_wanted {
-            tracing::debug!(?owner, ?correlation, "probe cancelled before dispatch",);
+            tracing::debug!(?owner, ?correlation, "probe cancelled before dispatch");
             continue;
         }
 
@@ -401,11 +382,7 @@ pub(super) fn run_worker<F>(
             }
         }
 
-        let response = ProbeResponse {
-            owner,
-            correlation,
-            outcome,
-        };
+        let response = ProbeResponse { owner, correlation, outcome };
         if out.send(response).is_err() {
             tracing::debug!("prober response sink disconnected; worker exiting");
             return;

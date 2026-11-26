@@ -58,11 +58,7 @@ fn dir_snap_sized_file(name: &str, inode: u64, size: u64) -> Arc<DirSnapshot> {
             FsIdentity::synthetic(inode, 0),
         )),
     );
-    Arc::new(DirSnapshot::new(
-        DirMeta::synthetic(UNIX_EPOCH, FsIdentity::synthetic(0, 0)),
-        0,
-        map,
-    ))
+    Arc::new(DirSnapshot::new(DirMeta::synthetic(UNIX_EPOCH, FsIdentity::synthetic(0, 0)), 0, map))
 }
 
 /// Deliver one Seed probe response for `pid`: if the burst is in Batching, expire its own settle
@@ -75,26 +71,14 @@ fn seed_cycle(e: &mut Engine, pid: ProfileId, snap: &Arc<DirSnapshot>, at: Insta
     if !matches!(
         e.profiles().get(pid).unwrap().state(),
         ProfileState::Active(
-            ActiveBurst::PreFire(PreFireBurst {
-                phase: PreFirePhase::Verifying { .. },
-                ..
-            }),
+            ActiveBurst::PreFire(PreFireBurst { phase: PreFirePhase::Verifying { .. }, .. }),
             _,
         )
     ) {
         let settle_id = batching_settle_id(e, pid);
-        e.step(
-            Input::TimerExpired {
-                profile: pid,
-                kind: TimerKind::Settle,
-                id: settle_id,
-            },
-            at,
-        );
+        e.step(Input::TimerExpired { profile: pid, kind: TimerKind::Settle, id: settle_id }, at);
     }
-    let correlation = e
-        .pending_probe_for(pid)
-        .expect("Seed Verifying probe in flight");
+    let correlation = e.pending_probe_for(pid).expect("Seed Verifying probe in flight");
     e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: pid,
@@ -110,20 +94,10 @@ fn seed_cycle(e: &mut Engine, pid: ProfileId, snap: &Arc<DirSnapshot>, at: Insta
 /// to prove the Profile now behaves as a Standard burst. `snap_new` differs from the established
 /// baseline so the Standard verdict is a genuine fire (not B1-dedup-suppressed).
 fn drive_standard_fire_once(
-    e: &mut Engine,
-    pid: ProfileId,
-    sid: SubId,
-    r: ResourceId,
-    snap_new: &Arc<DirSnapshot>,
+    e: &mut Engine, pid: ProfileId, sid: SubId, r: ResourceId, snap_new: &Arc<DirSnapshot>,
     t0: Instant,
 ) {
-    e.step(
-        Input::FsEvent {
-            resource: r,
-            event: FsEvent::ContentChanged,
-        },
-        t0,
-    );
+    e.step(Input::FsEvent { resource: r, event: FsEvent::ContentChanged }, t0);
     // The verify response against the seed baseline fires directly on its first Authoritative sample.
     // The drain loop is defensive in case the first response routes through a
     // `QuiescenceVerdict::Retry`.
@@ -134,11 +108,7 @@ fn drive_standard_fire_once(
         let mut probe_corr: Option<ProbeCorrelation> = None;
         while let Some(entry) = e.pop_expired(t) {
             let s = e.step(
-                Input::TimerExpired {
-                    profile: entry.profile,
-                    kind: entry.kind,
-                    id: entry.id,
-                },
+                Input::TimerExpired { profile: entry.profile, kind: entry.kind, id: entry.id },
                 t,
             );
             if let Some(c) = first_probe_correlation(&s) {
@@ -200,11 +170,7 @@ fn cold_seed_on_structure_only_pins_in_one_sample_without_loop() {
 
     let snap = dir_snap(&[]);
     let done = seed_to_idle(&mut e, pid, &snap, now);
-    assert_eq!(
-        done,
-        now + SETTLE,
-        "cold-Seed bypass: one Authoritative sample (no retry loop)",
-    );
+    assert_eq!(done, now + SETTLE, "cold-Seed bypass: one Authoritative sample (no retry loop)");
     assert!(
         e.profiles().get(pid).unwrap().baseline_is_some(),
         "cold-Seed bypass establishes the baseline on the first sample",
@@ -230,20 +196,14 @@ fn fresh_seed_with_activity_fires_exactly_one_effect() {
         first_probe_correlation(&out).is_some(),
         "cold-arm Seed: attach emits the cold walk probe at burst construction",
     );
-    assert!(
-        !e.profiles().get(pid).unwrap().baseline_is_some(),
-        "fresh attach has no baseline yet",
-    );
+    assert!(!e.profiles().get(pid).unwrap().baseline_is_some(), "fresh attach has no baseline yet");
 
     // Witness real activity: an anchor ContentChanged during the cold-arm Verifying phase. Anchor
     // events bypass the class filter, so the NO_EVENTS mask still routes it through
     // `event_drives_batching`, which Cancels the cold-arm verify slot and reschedules Batching with
     // the trigger in `dirty`.
     let act_out = e.step(
-        Input::FsEvent {
-            resource: r,
-            event: FsEvent::ContentChanged,
-        },
+        Input::FsEvent { resource: r, event: FsEvent::ContentChanged },
         now + Duration::from_millis(1),
     );
     assert!(
@@ -260,10 +220,7 @@ fn fresh_seed_with_activity_fires_exactly_one_effect() {
         ),
         "anchor event during cold-arm Verifying re-enters PreFire(Batching) (Cancel + re-armed settle)",
     );
-    assert!(
-        act_out.effects().is_empty(),
-        "the bare event does not itself fire",
-    );
+    assert!(act_out.effects().is_empty(), "the bare event does not itself fire");
 
     // The first Authoritative response fires: `seed_owes_first_fire` reads `!dirty.is_empty()`,
     // routing the fresh-with-activity Seed through `FreshSeedFire`.
@@ -295,10 +252,7 @@ fn fresh_seed_with_activity_fires_exactly_one_effect() {
         e.profiles().get(pid).unwrap().baseline_is_some(),
         "post-fire rebase establishes a settled baseline",
     );
-    assert!(
-        e.subs().any_fired(pid),
-        "the Sub recorded its fire (no longer a fresh Profile)",
-    );
+    assert!(e.subs().any_fired(pid), "the Sub recorded its fire (no longer a fresh Profile)");
 
     // A subsequent FsEvent + settle now drives a *Standard* fire (a second Effect), proving the
     // Profile is no longer fresh.
@@ -332,10 +286,7 @@ fn fresh_seed_with_activity_growing_leaf_fires_one() {
     // cold-arm verify slot, re-enters Batching with `dirty` non-empty (triggered Seed — owes a
     // quiescence proof).
     e.step(
-        Input::FsEvent {
-            resource: r,
-            event: FsEvent::ContentChanged,
-        },
+        Input::FsEvent { resource: r, event: FsEvent::ContentChanged },
         now + Duration::from_millis(1),
     );
     assert!(
@@ -416,16 +367,10 @@ fn fresh_seed_after_forced_ceiling_single_event_fires_one() {
     // in-flight response will dispatch with `forced` observed.
     let bd_id = burst_deadline_id(&e, pid);
     e.step(
-        Input::TimerExpired {
-            profile: pid,
-            kind: TimerKind::BurstDeadline,
-            id: bd_id,
-        },
+        Input::TimerExpired { profile: pid, kind: TimerKind::BurstDeadline, id: bd_id },
         now + MAX_SETTLE + Duration::from_millis(1),
     );
-    let corr = e
-        .pending_probe_for(pid)
-        .expect("forced Seed verify probe still in flight");
+    let corr = e.pending_probe_for(pid).expect("forced Seed verify probe still in flight");
     // `ProofAuthority::Undischarged` + forced ⇒ the fold projects to `QuiescenceVerdict::Abandon`
     // (the ceiling terminal): finish to Idle, NO apply_snapshot, NO rebase_baseline.
     let unread: Arc<std::path::Path> = Arc::from(std::path::Path::new("/src/unreadable"));
@@ -440,10 +385,7 @@ fn fresh_seed_after_forced_ceiling_single_event_fires_one() {
         }),
         now + MAX_SETTLE + Duration::from_millis(2),
     );
-    assert!(
-        ceil_out.effects().is_empty(),
-        "the forced ceiling terminal fires nothing",
-    );
+    assert!(ceil_out.effects().is_empty(), "the forced ceiling terminal fires nothing");
     assert!(
         matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Idle),
         "Abandon (Undischarged + forced) is a terminal — the burst finishes to Idle",
@@ -456,17 +398,9 @@ fn fresh_seed_after_forced_ceiling_single_event_fires_one() {
     // A single FsEvent: Idle + !baseline ⇒ `start_seed_burst` (a fresh Seed). The trigger is recorded
     // in `dirty`, so this fresh-with-activity Seed fires one Effect at its stable verdict.
     let trigger_at = now + MAX_SETTLE + Duration::from_millis(3);
-    let trig_out = e.step(
-        Input::FsEvent {
-            resource: r,
-            event: FsEvent::ContentChanged,
-        },
-        trigger_at,
-    );
-    assert!(
-        trig_out.effects().is_empty(),
-        "the bare trigger event does not itself fire",
-    );
+    let trig_out =
+        e.step(Input::FsEvent { resource: r, event: FsEvent::ContentChanged }, trigger_at);
+    assert!(trig_out.effects().is_empty(), "the bare trigger event does not itself fire");
     assert!(
         matches!(
             e.profiles().get(pid).unwrap().state(),
@@ -506,10 +440,7 @@ fn fresh_seed_after_forced_ceiling_single_event_fires_one() {
 fn fresh_seed_with_activity_gated_by_draining_then_fires_one() {
     let mut e = Engine::new();
     let src = anchor_dir(&mut e, "src");
-    let foo = e
-        .tree_mut()
-        .ensure_child(src, "foo", ResourceRole::User)
-        .expect("test live parent");
+    let foo = e.tree_mut().ensure_child(src, "foo", ResourceRole::User).expect("test live parent");
     e.tree_mut().set_kind(foo, ResourceKind::Dir);
 
     let now = Instant::now();
@@ -544,10 +475,7 @@ fn fresh_seed_with_activity_gated_by_draining_then_fires_one() {
     let child_at = now + SETTLE;
     let _ = seed_cycle(&mut e, pid_child, &child_snap, child_at);
     assert!(
-        matches!(
-            e.profiles().get(pid_child).unwrap().state(),
-            ProfileState::Idle
-        ),
+        matches!(e.profiles().get(pid_child).unwrap().state(), ProfileState::Idle),
         "child Seed pinned → Idle",
     );
     assert!(
@@ -558,41 +486,21 @@ fn fresh_seed_with_activity_gated_by_draining_then_fires_one() {
     // Child enters an Active Standard burst (FsEvent at its anchor), then advance it to Verifying
     // so it parks (no expirable settle timer) and keeps gating the parent.
     let t_child_burst = child_at + Duration::from_millis(5);
-    e.step(
-        Input::FsEvent {
-            resource: foo,
-            event: FsEvent::ContentChanged,
-        },
-        t_child_burst,
-    );
+    e.step(Input::FsEvent { resource: foo, event: FsEvent::ContentChanged }, t_child_burst);
     let child_settle = batching_settle_id(&e, pid_child);
     e.step(
-        Input::TimerExpired {
-            profile: pid_child,
-            kind: TimerKind::Settle,
-            id: child_settle,
-        },
+        Input::TimerExpired { profile: pid_child, kind: TimerKind::Settle, id: child_settle },
         t_child_burst + SETTLE,
     );
     assert!(
-        e.profiles()
-            .get(pid_child)
-            .unwrap()
-            .state()
-            .in_active_standard_burst(),
+        e.profiles().get(pid_child).unwrap().state().in_active_standard_burst(),
         "child is mid-Standard-burst and gates the parent",
     );
 
     // The parent witnesses activity (anchor ContentChanged during its Seed Batching), then its verify
     // is driven to Stable while the child gates.
     let t_parent_act = t_child_burst + SETTLE + Duration::from_millis(1);
-    e.step(
-        Input::FsEvent {
-            resource: src,
-            event: FsEvent::ContentChanged,
-        },
-        t_parent_act,
-    );
+    e.step(Input::FsEvent { resource: src, event: FsEvent::ContentChanged }, t_parent_act);
     assert!(
         matches!(
             e.profiles().get(pid_parent).unwrap().state(),
@@ -625,11 +533,7 @@ fn fresh_seed_with_activity_gated_by_draining_then_fires_one() {
     // the exact topology `has_active_standard_descendant` detects. This confirms the gate input is
     // valid: `gated_fire` consults it for the parent's fresh-with-activity Seed (`FreshSeedFire`).
     assert!(
-        e.profiles()
-            .get(pid_child)
-            .unwrap()
-            .state()
-            .in_active_standard_burst(),
+        e.profiles().get(pid_child).unwrap().state().in_active_standard_burst(),
         "child is still mid-Standard-burst when the parent stabilises (gate input is valid)",
     );
 
@@ -642,10 +546,7 @@ fn fresh_seed_with_activity_gated_by_draining_then_fires_one() {
     let parent_entered_draining = matches!(
         e.profiles().get(pid_parent).unwrap().state(),
         ProfileState::Active(
-            ActiveBurst::PreFire(PreFireBurst {
-                phase: PreFirePhase::Draining,
-                ..
-            }),
+            ActiveBurst::PreFire(PreFireBurst { phase: PreFirePhase::Draining, .. }),
             BurstFinish::ReturnToIdle
         )
     );
@@ -687,9 +588,7 @@ fn fresh_seed_with_activity_gated_by_draining_then_fires_one() {
 
         // A single Authoritative verify response fires the child's Effect. The child never fired ⇒
         // Emit (not B1 dedup).
-        let child_corr = e
-            .pending_probe_for(pid_child)
-            .expect("child Verifying probe in flight");
+        let child_corr = e.pending_probe_for(pid_child).expect("child Verifying probe in flight");
         let child_fire_out = e.step(
             Input::ProbeResponse(ProbeResponse {
                 owner: pid_child,
@@ -739,25 +638,15 @@ fn fresh_seed_with_activity_gated_by_draining_then_fires_one() {
         )
         .finish;
         assert!(
-            matches!(
-                e.profiles().get(pid_child).unwrap().state(),
-                ProfileState::Idle
-            ),
+            matches!(e.profiles().get(pid_child).unwrap().state(), ProfileState::Idle),
             "idempotent rebase loop closes Stable → Idle",
         );
         assert!(
-            matches!(
-                e.profiles().get(pid_child).unwrap().state(),
-                ProfileState::Idle
-            ),
+            matches!(e.profiles().get(pid_child).unwrap().state(), ProfileState::Idle),
             "child Standard burst completed its full fire → rebase cycle and reached Idle",
         );
         assert!(
-            !e.profiles()
-                .get(pid_child)
-                .unwrap()
-                .state()
-                .in_active_standard_burst(),
+            !e.profiles().get(pid_child).unwrap().state().in_active_standard_burst(),
             "child no longer gates the parent (Draining gate input is now false)",
         );
 
@@ -772,11 +661,7 @@ fn fresh_seed_with_activity_gated_by_draining_then_fires_one() {
             // which witnessed-event instant pinned `last_event_time`).
             let p_settle = batching_settle_id(&e, pid_parent);
             let rc = e.step(
-                Input::TimerExpired {
-                    profile: pid_parent,
-                    kind: TimerKind::Settle,
-                    id: p_settle,
-                },
+                Input::TimerExpired { profile: pid_parent, kind: TimerKind::Settle, id: p_settle },
                 p2 + SETTLE * 4,
             );
             first_probe_correlation(&rc)
@@ -802,11 +687,8 @@ fn fresh_seed_with_activity_gated_by_draining_then_fires_one() {
         // until an Effect is emitted. The `pop_expired` drain advances `t` by `SETTLE * 4` per
         // iteration, always well past `last_event_time + SETTLE`, so each re-armed settle expiry
         // transitions to Verifying rather than rescheduling.
-        let mut fire_out = if reconfirm_out.effects().is_empty() {
-            None
-        } else {
-            Some(reconfirm_out)
-        };
+        let mut fire_out =
+            if reconfirm_out.effects().is_empty() { None } else { Some(reconfirm_out) };
         if fire_out.is_none() {
             let mut t = p2 + SETTLE * 3;
             for _ in 0..6 {
@@ -823,9 +705,7 @@ fn fresh_seed_with_activity_gated_by_draining_then_fires_one() {
                     );
                     if let Some(c) = first_probe_correlation(&s)
                         && matches!(
-                            e.profiles()
-                                .get(pid_parent)
-                                .map(specter_core::Profile::state),
+                            e.profiles().get(pid_parent).map(specter_core::Profile::state),
                             Some(ProfileState::Active(ActiveBurst::PreFire(_), _))
                         )
                     {

@@ -29,13 +29,7 @@ pub(crate) fn run(args: &ListArgs) -> ExitCode {
         return connect::fail_response(&args.client, "list", resp);
     };
 
-    connect::render_response(
-        &args.client,
-        "list",
-        args.output,
-        &list,
-        |buf, resp, sty| {
-            list::render(buf, resp, args.wide, sty);
-        },
-    )
+    connect::render_response(&args.client, "list", args.output, &list, |buf, resp, sty| {
+        list::render(buf, resp, args.wide, sty);
+    })
 }

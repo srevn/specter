@@ -46,11 +46,7 @@ pub fn dir_snap(children: &[(&str, EntryKind, u64)]) -> Arc<DirSnapshot> {
         };
         map.insert(CompactString::new(name), child);
     }
-    Arc::new(DirSnapshot::new(
-        DirMeta::synthetic(UNIX_EPOCH, FsIdentity::synthetic(0, 0)),
-        0,
-        map,
-    ))
+    Arc::new(DirSnapshot::new(DirMeta::synthetic(UNIX_EPOCH, FsIdentity::synthetic(0, 0)), 0, map))
 }
 
 /// A synthetic file `LeafEntry` for [`anchor_ok`] / File-anchored quiescence proofs.
@@ -164,10 +160,7 @@ pub fn dirty_provenance(entries: &[(ResourceId, &str)]) -> DirtyProvenance {
 /// `SubtreeProven { snapshot, authority: ProofAuthority::Authoritative }` literal.
 #[must_use]
 pub const fn proven(snapshot: Arc<DirSnapshot>) -> ProbeOutcome {
-    ProbeOutcome::SubtreeProven {
-        snapshot,
-        authority: ProofAuthority::Authoritative,
-    }
+    ProbeOutcome::SubtreeProven { snapshot, authority: ProofAuthority::Authoritative }
 }
 
 /// A `Descent` structural answer about the awaited head segment — `Some(kind)` present, `None` absent
@@ -216,14 +209,8 @@ impl SubAttachRequest {
     /// what config lowering writes as a struct.
     #[must_use]
     pub fn for_anchor(
-        name: CompactString,
-        anchor: SubAttachAnchor,
-        scan: SubtreeScan,
-        max_settle: Duration,
-        settle: Duration,
-        program: Arc<ActionProgram>,
-        scope: EffectScope,
-        events: ClassSet,
+        name: CompactString, anchor: SubAttachAnchor, scan: SubtreeScan, max_settle: Duration,
+        settle: Duration, program: Arc<ActionProgram>, scope: EffectScope, events: ClassSet,
     ) -> Self {
         Self {
             name,
@@ -231,10 +218,7 @@ impl SubAttachRequest {
             scan,
             max_settle,
             events,
-            params: SubParams {
-                settle,
-                spawn: SpawnSpec::new(program, scope),
-            },
+            params: SubParams { settle, spawn: SpawnSpec::new(program, scope) },
         }
     }
 }

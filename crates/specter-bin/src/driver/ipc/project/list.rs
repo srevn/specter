@@ -35,10 +35,7 @@ use super::{project_wall, settle_ms};
 /// outlives every borrow and round-trips into [`ListRow::name`] without a second allocation —
 /// [`BTreeMap::into_values`] consumes the map.
 pub(crate) fn list(
-    engine: &Engine,
-    ds: &DriverState,
-    disabled_runtime: &BTreeSet<CompactString>,
-    config: &Config,
+    engine: &Engine, ds: &DriverState, disabled_runtime: &BTreeSet<CompactString>, config: &Config,
 ) -> ListResponse {
     let mut rows: BTreeMap<String, ListRow> = BTreeMap::new();
 
@@ -56,9 +53,7 @@ pub(crate) fn list(
             .or_insert_with(|| disabled_row(spec.name.as_str(), DisabledSource::Toml));
     }
 
-    ListResponse {
-        rows: rows.into_values().collect(),
-    }
+    ListResponse { rows: rows.into_values().collect() }
 }
 
 /// Project a registry-attached `(SubId, &Sub)` into a [`ListRow`].
@@ -70,15 +65,12 @@ pub(crate) fn list(
 fn project_attached(sid: SubId, sub: &Sub, engine: &Engine, ds: &DriverState) -> ListRow {
     let profile = engine.profiles().get(sub.profile());
     let state = profile.map(|p| WireStateLabel::from(p.state().label()));
-    let anchor = profile
-        .and_then(|p| engine.tree().path_of(p.resource()))
-        .map(|arc| WirePath::from(&arc));
+    let anchor =
+        profile.and_then(|p| engine.tree().path_of(p.resource())).map(|arc| WirePath::from(&arc));
     // Honest render across the reaction sum: a template has no fire history — its stat columns stay
     // `None`, attributed by the `reaction` discriminator.
     let history = sub.fire_history();
-    let last_fired_at = history
-        .and_then(|h| h.last_fired_at)
-        .map(|t| project_wall(ds, t));
+    let last_fired_at = history.and_then(|h| h.last_fired_at).map(|t| project_wall(ds, t));
     ListRow {
         name: sub.name.to_string(),
         state,
@@ -128,10 +120,8 @@ mod tests {
     /// All three sources contribute rows; output is name-keyed and alphabetic.
     #[test]
     fn list_unions_engine_disabled_runtime_toml() {
-        let config = config_from_watches(&[
-            ("attached_a", "/tmp/a", true),
-            ("toml_off", "/tmp/b", false),
-        ]);
+        let config =
+            config_from_watches(&[("attached_a", "/tmp/a", true), ("toml_off", "/tmp/b", false)]);
         let guard = EngineGuard::wrap(engine_with(&config));
         let mut disabled = BTreeSet::new();
         disabled.insert(CompactString::const_new("runtime_off"));
@@ -150,10 +140,7 @@ mod tests {
 
         // Field discrimination by source.
         let attached = &resp.rows[0];
-        assert!(
-            attached.disabled.is_none(),
-            "engine row carries no disabled"
-        );
+        assert!(attached.disabled.is_none(), "engine row carries no disabled");
         assert!(attached.state.is_some(), "engine row carries state");
         assert!(attached.sub.is_some(), "engine row carries SubId");
 
@@ -184,10 +171,7 @@ mod tests {
         assert_eq!(resp.rows.len(), 1, "engine row absorbs the conflict");
         let row = &resp.rows[0];
         assert_eq!(row.name, "alpha");
-        assert!(
-            row.disabled.is_none(),
-            "engine row wins; disabled stays None"
-        );
+        assert!(row.disabled.is_none(), "engine row wins; disabled stays None");
         assert!(row.sub.is_some(), "engine row carries SubId");
     }
 
@@ -226,11 +210,7 @@ mod tests {
         assert!(row.state.is_some(), "attached row carries state");
         assert!(row.sub.is_some(), "attached row carries SubId");
         assert!(row.profile.is_some(), "attached row carries ProfileId");
-        assert_eq!(
-            row.fire_count,
-            Some(0),
-            "never-fired Sub carries Some(0), not None",
-        );
+        assert_eq!(row.fire_count, Some(0), "never-fired Sub carries Some(0), not None");
         assert_eq!(row.dedup_suppressed_count, Some(0));
         assert!(row.settle_ms.is_some(), "attached row carries settle_ms");
         assert_eq!(
@@ -269,10 +249,7 @@ mod tests {
     fn list_minted_sub_carries_minted_by() {
         let mut engine = Engine::new();
         let [minted] = mint(&mut engine, ["a"]);
-        let template = engine
-            .subs()
-            .find_by_name("disc")
-            .expect("template attached");
+        let template = engine.subs().find_by_name("disc").expect("template attached");
         let guard = EngineGuard::wrap(engine);
 
         let resp = list(

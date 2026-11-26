@@ -94,17 +94,11 @@ struct Tail {
 
 impl Tail {
     const fn on_ok(handle: OpHandle) -> Self {
-        Self {
-            handle,
-            edge: Edge::OnOk,
-        }
+        Self { handle, edge: Edge::OnOk }
     }
 
     const fn on_failed(handle: OpHandle) -> Self {
-        Self {
-            handle,
-            edge: Edge::OnFailed,
-        }
+        Self { handle, edge: Edge::OnFailed }
     }
 }
 
@@ -170,11 +164,7 @@ fn lower_action(action: &Action, b: &mut ProgramBuilder) -> Result<Vec<Tail>, Pr
         Action::Pipe { stages } => {
             lower_spawn(SpawnBody::Pipe(MultiStage::new(Arc::clone(stages))?), b)
         }
-        Action::Conditional {
-            when,
-            then,
-            otherwise,
-        } => {
+        Action::Conditional { when, then, otherwise } => {
             let pred = b.emit(SpawnBody::Exec(when.clone()));
             let mut tails: Vec<Tail> = Vec::new();
 
@@ -282,10 +272,8 @@ mod tests {
     /// re-allocation.
     #[test]
     fn pipe_lowers_to_one_op_sharing_arc() {
-        let stages: Arc<[ExecAction]> = Arc::from(vec![
-            exec_with_literal("/bin/a"),
-            exec_with_literal("/bin/b"),
-        ]);
+        let stages: Arc<[ExecAction]> =
+            Arc::from(vec![exec_with_literal("/bin/a"), exec_with_literal("/bin/b")]);
         let stages_for_assert = Arc::clone(&stages);
         let tree = [Action::Pipe { stages }];
         let program = lower_to_program(&tree).expect("lowering succeeds");
@@ -307,10 +295,8 @@ mod tests {
     /// Pipe and Exec mix freely; each lowers to one op; order preserved.
     #[test]
     fn pipe_and_exec_mixed_preserves_order() {
-        let stages: Arc<[ExecAction]> = Arc::from(vec![
-            exec_with_literal("/bin/pipe-a"),
-            exec_with_literal("/bin/pipe-b"),
-        ]);
+        let stages: Arc<[ExecAction]> =
+            Arc::from(vec![exec_with_literal("/bin/pipe-a"), exec_with_literal("/bin/pipe-b")]);
         let tree = [
             Action::Exec(exec_with_literal("/bin/pre")),
             Action::Pipe { stages },
@@ -423,13 +409,9 @@ mod tests {
             then: Box::new([Action::Conditional {
                 when: exec_with_literal("/bin/inner"),
                 then: Box::new([Action::Exec(exec_with_literal("/bin/inner-then"))]),
-                otherwise: Some(Box::new([Action::Exec(exec_with_literal(
-                    "/bin/inner-else",
-                ))])),
+                otherwise: Some(Box::new([Action::Exec(exec_with_literal("/bin/inner-else"))])),
             }]),
-            otherwise: Some(Box::new([Action::Exec(exec_with_literal(
-                "/bin/outer-else",
-            ))])),
+            otherwise: Some(Box::new([Action::Exec(exec_with_literal("/bin/outer-else"))])),
         }];
         let program = lower_to_program(&tree).expect("lowering succeeds");
         assert_eq!(program.ops().len(), 5, "5 ops (was 7 with Jumps)");
@@ -484,9 +466,6 @@ mod tests {
     #[test]
     fn empty_tree_returns_empty_program_error() {
         let err = lower_to_program(&[]).expect_err("empty tree must error");
-        assert!(matches!(
-            err,
-            specter_core::program::ProgramError::EmptyProgram
-        ));
+        assert!(matches!(err, specter_core::program::ProgramError::EmptyProgram));
     }
 }

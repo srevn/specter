@@ -96,15 +96,10 @@ pub(crate) fn read_response(stream: &mut UnixStream) -> io::Result<ResponsePaylo
 enum ConnectFailure {
     /// An explicit `--socket` / `$SPECTER_SOCK` path that refused or was absent. There is no
     /// fall-through — a stale override is the operator's to fix, never silently retargeted.
-    Pinned {
-        candidate: SocketCandidate,
-        error: io::Error,
-    },
+    Pinned { candidate: SocketCandidate, error: io::Error },
     /// Every convention candidate was probed and none answered. `tried` is non-empty (a
     /// [`Resolution::Cascade`] always carries a head), in probe order.
-    Exhausted {
-        tried: Vec<(SocketCandidate, io::Error)>,
-    },
+    Exhausted { tried: Vec<(SocketCandidate, io::Error)> },
 }
 
 impl fmt::Display for ConnectFailure {
@@ -216,9 +211,7 @@ pub(crate) fn emit_hint(client: &ClientArgs, msg: fmt::Arguments<'_>) {
 /// form.
 #[must_use]
 pub(crate) fn fail_response(
-    client: &ClientArgs,
-    verb: &'static str,
-    resp: ResponsePayload,
+    client: &ClientArgs, verb: &'static str, resp: ResponsePayload,
 ) -> ExitCode {
     let sty = style::resolve(client.color, Stream::Stderr);
     match resp {
@@ -283,9 +276,7 @@ pub(crate) fn dial(client: &ClientArgs, verb: &'static str) -> Result<UnixStream
 /// Returns `Ok(response)` on a successful round trip; `Err(code)` after reporting the cause through
 /// [`emit_error`] — callers `return code` directly.
 pub(crate) fn round_trip(
-    client: &ClientArgs,
-    verb: &'static str,
-    request: &WireRequest,
+    client: &ClientArgs, verb: &'static str, request: &WireRequest,
 ) -> Result<ResponsePayload, ExitCode> {
     let mut stream = dial(client, verb)?;
     write_request(&mut stream, request).map_err(|e| {
@@ -309,9 +300,7 @@ pub(crate) fn round_trip(
 /// Centralises the Ok/non-Ok dispatch the unit-ack verbs would otherwise duplicate, so the
 /// operator-visible error surface stays uniform across `disable` / `enable` / `reload` / `absorb`.
 pub(crate) fn one_shot_unit(
-    client: &ClientArgs,
-    verb: &'static str,
-    request: &WireRequest,
+    client: &ClientArgs, verb: &'static str, request: &WireRequest,
 ) -> ExitCode {
     let resp = match round_trip(client, verb, request) {
         Ok(r) => r,
@@ -342,10 +331,7 @@ pub(crate) fn one_shot_unit(
 /// `print!` / `println!` panic on a broken pipe (Rust ignores `SIGPIPE`), whereas the explicit
 /// write/flush surfaces it as an `io::Error` this maps to a clean exit.
 pub(crate) fn emit_human_or_json<T: Serialize>(
-    client: &ClientArgs,
-    verb: &'static str,
-    output: OutputFormat,
-    value: &T,
+    client: &ClientArgs, verb: &'static str, output: OutputFormat, value: &T,
     render: impl FnOnce(&mut String, &T, Styler),
 ) -> Result<(), ExitCode> {
     let mut out = io::stdout().lock();
@@ -358,8 +344,7 @@ pub(crate) fn emit_human_or_json<T: Serialize>(
         }
         OutputFormat::Json => {
             let json = serde_json::to_string(value).expect("response always serializes");
-            out.write_all(json.as_bytes())
-                .and_then(|()| out.write_all(b"\n"))
+            out.write_all(json.as_bytes()).and_then(|()| out.write_all(b"\n"))
         }
     };
     match written.and_then(|()| out.flush()) {
@@ -381,10 +366,7 @@ pub(crate) fn emit_human_or_json<T: Serialize>(
 /// (or pipe-closed) render. Mirrors [`one_shot_unit`]'s relationship to [`round_trip`].
 #[must_use]
 pub(crate) fn render_response<T: Serialize>(
-    client: &ClientArgs,
-    verb: &'static str,
-    output: OutputFormat,
-    value: &T,
+    client: &ClientArgs, verb: &'static str, output: OutputFormat, value: &T,
     render: impl FnOnce(&mut String, &T, Styler),
 ) -> ExitCode {
     match emit_human_or_json(client, verb, output, value, render) {

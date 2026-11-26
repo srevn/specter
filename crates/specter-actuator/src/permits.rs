@@ -32,8 +32,7 @@ impl Permits {
         let n = n.get();
         let (tx, rx) = bounded::<()>(n);
         for _ in 0..n {
-            tx.send(())
-                .expect("bounded channel just constructed; send must succeed");
+            tx.send(()).expect("bounded channel just constructed; send must succeed");
         }
         Self { rx, tx }
     }
@@ -43,9 +42,7 @@ impl Permits {
     #[must_use]
     pub fn try_acquire(&self) -> Option<Permit> {
         match self.rx.try_recv() {
-            Ok(()) => Some(Permit {
-                tx: self.tx.clone(),
-            }),
+            Ok(()) => Some(Permit { tx: self.tx.clone() }),
             Err(_) => None,
         }
     }

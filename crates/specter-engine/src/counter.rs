@@ -33,10 +33,7 @@ pub(crate) struct MonotonicCounter<T> {
 
 impl<T> Default for MonotonicCounter<T> {
     fn default() -> Self {
-        Self {
-            value: 0,
-            _marker: PhantomData,
-        }
+        Self { value: 0, _marker: PhantomData }
     }
 }
 

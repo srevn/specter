@@ -55,11 +55,7 @@ use specter_core::{ClassSet, ContribKey, ResourceId, StepOutput, Tree, WatchOp};
 /// (the slot exists but a segment doesn't resolve — unreachable for live slots), the op carries
 /// `PathBuf::new()` and the Sensor reports `WatchOpRejected` on attempt.
 pub(crate) fn add_watch(
-    tree: &mut Tree,
-    r: ResourceId,
-    key: ContribKey,
-    mask: ClassSet,
-    out: &mut StepOutput,
+    tree: &mut Tree, r: ResourceId, key: ContribKey, mask: ClassSet, out: &mut StepOutput,
 ) {
     let Some(res) = tree.get_mut(r) else {
         return;
@@ -77,12 +73,7 @@ pub(crate) fn add_watch(
         // `res` use).
         let kind = res.kind_raw();
         let path = tree.path_of(r).unwrap_or_else(empty_path);
-        out.watch_ops.push(WatchOp::Watch {
-            resource: r,
-            path,
-            kind,
-            events: new_union,
-        });
+        out.watch_ops.push(WatchOp::Watch { resource: r, path, kind, events: new_union });
     }
 }
 
@@ -117,12 +108,7 @@ pub(crate) fn sub_watch(tree: &mut Tree, r: ResourceId, key: ContribKey, out: &m
     if new_union != prev_union {
         let kind = res.kind_raw();
         let path = tree.path_of(r).unwrap_or_else(empty_path);
-        out.watch_ops.push(WatchOp::Watch {
-            resource: r,
-            path,
-            kind,
-            events: new_union,
-        });
+        out.watch_ops.push(WatchOp::Watch { resource: r, path, kind, events: new_union });
     }
 }
 
@@ -160,10 +146,7 @@ pub(crate) fn sub_watch(tree: &mut Tree, r: ResourceId, key: ContribKey, out: &m
 ///   `release_*_claim` helpers in [`crate::claims`] this is enforced structurally: their
 ///   state-discard drops an armed `ProbeSlot` and trips its Drop tripwire.
 pub(crate) fn sub_watch_then_try_reap(
-    tree: &mut Tree,
-    r: ResourceId,
-    key: ContribKey,
-    out: &mut StepOutput,
+    tree: &mut Tree, r: ResourceId, key: ContribKey, out: &mut StepOutput,
 ) -> bool {
     sub_watch(tree, r, key, out);
     tree.try_reap(r, out)
@@ -198,9 +181,7 @@ mod tests {
         assert_eq!(tree.get(r).unwrap().events_union(), ClassSet::CONTENT);
         assert_eq!(out.watch_ops.len(), 1);
         match &out.watch_ops[0] {
-            WatchOp::Watch {
-                resource, events, ..
-            } => {
+            WatchOp::Watch { resource, events, .. } => {
                 assert_eq!(*resource, r);
                 assert_eq!(*events, ClassSet::CONTENT);
             }
@@ -223,23 +204,14 @@ mod tests {
         // Same key, same mask ⇒ no-op (map already has it; no union change).
         add_watch(&mut tree, r, key_a, ClassSet::CONTENT, &mut out);
         assert_eq!(tree.get(r).unwrap().watch_demand(), 1);
-        assert!(
-            out.watch_ops.is_empty(),
-            "no Watch emitted when (key, mask) idempotent",
-        );
+        assert!(out.watch_ops.is_empty(), "no Watch emitted when (key, mask) idempotent");
 
         // Distinct key, distinct mask ⇒ widens union ⇒ emit.
         add_watch(&mut tree, r, key_b, ClassSet::METADATA, &mut out);
         assert_eq!(tree.get(r).unwrap().watch_demand(), 2);
-        assert_eq!(
-            tree.get(r).unwrap().events_union(),
-            ClassSet::CONTENT | ClassSet::METADATA,
-        );
+        assert_eq!(tree.get(r).unwrap().events_union(), ClassSet::CONTENT | ClassSet::METADATA);
         assert_eq!(out.watch_ops.len(), 1);
-        assert_eq!(
-            last_watch_events(&out),
-            Some(ClassSet::CONTENT | ClassSet::METADATA),
-        );
+        assert_eq!(last_watch_events(&out), Some(ClassSet::CONTENT | ClassSet::METADATA));
     }
 
     #[test]
@@ -297,9 +269,7 @@ mod tests {
             "Watch emitted with the narrowed mask",
         );
         assert!(
-            !out.watch_ops
-                .iter()
-                .any(|op| matches!(op, WatchOp::Unwatch { .. })),
+            !out.watch_ops.iter().any(|op| matches!(op, WatchOp::Unwatch { .. })),
             "no Unwatch — contributions still non-empty",
         );
     }
@@ -320,10 +290,7 @@ mod tests {
         sub_watch(&mut tree, r, key_a, &mut out);
         assert_eq!(tree.get(r).unwrap().watch_demand(), 1);
         assert_eq!(tree.get(r).unwrap().events_union(), ClassSet::CONTENT);
-        assert!(
-            out.watch_ops.is_empty(),
-            "no Watch emitted when remaining union equals prior",
-        );
+        assert!(out.watch_ops.is_empty(), "no Watch emitted when remaining union equals prior");
     }
 
     #[test]
@@ -332,12 +299,7 @@ mod tests {
         // sub-walk drained this slot in the same step.
         let (mut tree, r) = fresh();
         let mut out = StepOutput::default();
-        sub_watch(
-            &mut tree,
-            r,
-            ContribKey::ProfileAnchor(ProfileId::default()),
-            &mut out,
-        );
+        sub_watch(&mut tree, r, ContribKey::ProfileAnchor(ProfileId::default()), &mut out);
         assert!(out.watch_ops.is_empty());
         assert_eq!(tree.get(r).unwrap().watch_demand(), 0);
     }
@@ -364,12 +326,7 @@ mod tests {
         let r = tree.ensure_root("ghost", ResourceRole::User);
         let mut out = StepOutput::default();
         assert!(tree.try_reap(r, &mut out));
-        sub_watch(
-            &mut tree,
-            r,
-            ContribKey::ProfileAnchor(ProfileId::default()),
-            &mut out,
-        );
+        sub_watch(&mut tree, r, ContribKey::ProfileAnchor(ProfileId::default()), &mut out);
         assert!(out.watch_ops.is_empty());
     }
 
@@ -409,10 +366,7 @@ mod tests {
 
         let reaped = sub_watch_then_try_reap(&mut tree, r, key, &mut out);
 
-        assert!(
-            reaped,
-            "role is metadata; slot reaps once contributions drain"
-        );
+        assert!(reaped, "role is metadata; slot reaps once contributions drain");
         assert!(tree.get(r).is_none(), "slot is gone");
         assert_eq!(out.watch_ops.len(), 1);
         assert!(matches!(
@@ -445,11 +399,7 @@ mod tests {
             Some(ClassSet::METADATA),
             "narrowed Watch emitted; no Unwatch",
         );
-        assert!(
-            !out.watch_ops
-                .iter()
-                .any(|op| matches!(op, WatchOp::Unwatch { .. })),
-        );
+        assert!(!out.watch_ops.iter().any(|op| matches!(op, WatchOp::Unwatch { .. })));
     }
 
     #[test]
@@ -461,9 +411,8 @@ mod tests {
         // frees the parent in the same step.
         let mut tree = Tree::new();
         let parent = tree.ensure_root("parent", ResourceRole::WatchRootParent);
-        let _anchor = tree
-            .ensure_child(parent, "anchor", ResourceRole::User)
-            .expect("test live parent");
+        let _anchor =
+            tree.ensure_child(parent, "anchor", ResourceRole::User).expect("test live parent");
         let mut out = StepOutput::default();
         let key = ContribKey::ProfileParent(ProfileId::default());
         add_watch(&mut tree, parent, key, ClassSet::STRUCTURE, &mut out);

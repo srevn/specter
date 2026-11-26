@@ -19,12 +19,7 @@ use specter_core::{ActionProgram, ArgPart, ArgTemplate, ExecAction, Placeholder}
 /// Render every op in the program as one line. Caller threads the returned lines into its
 /// [`crate::ipc::protocol::WireReaction`] payload.
 pub(crate) fn render(program: &ActionProgram) -> Vec<String> {
-    program
-        .ops()
-        .iter()
-        .enumerate()
-        .map(|(i, op)| render_op(i, op))
-        .collect()
+    program.ops().iter().enumerate().map(|(i, op)| render_op(i, op)).collect()
 }
 
 /// `"[i] <body>  ok→<edge> fail→<edge>"` — the canonical per-op shape every renderer reuses.
@@ -88,16 +83,10 @@ fn write_part(out: &mut String, p: &ArgPart) {
         ArgPart::Placeholder(ph) => {
             let _ = write!(out, "${{specter.{}}}", placeholder_token(*ph));
         }
-        ArgPart::EnvVar {
-            name,
-            default: None,
-        } => {
+        ArgPart::EnvVar { name, default: None } => {
             let _ = write!(out, "${{env.{name}}}");
         }
-        ArgPart::EnvVar {
-            name,
-            default: Some(d),
-        } => {
+        ArgPart::EnvVar { name, default: Some(d) } => {
             let _ = write!(out, "${{env.{name}:-{d}}}");
         }
     }
@@ -156,9 +145,7 @@ mod tests {
     }
 
     fn single_op_program(
-        body: SpawnBody,
-        on_ok: BranchTarget,
-        on_failed: BranchTarget,
+        body: SpawnBody, on_ok: BranchTarget, on_failed: BranchTarget,
     ) -> ActionProgram {
         let mut b = ProgramBuilder::new();
         let h = b.emit(body);
@@ -179,10 +166,7 @@ mod tests {
         let prog = single_op_program(body, BranchTarget::Escape, BranchTarget::Terminate);
         let lines = render(&prog);
         assert_eq!(lines.len(), 1);
-        assert_eq!(
-            lines[0],
-            "[0] exec /bin/build${specter.path}  ok→escape fail→terminate",
-        );
+        assert_eq!(lines[0], "[0] exec /bin/build${specter.path}  ok→escape fail→terminate");
     }
 
     /// `pipe(N)` prefix carries the stage count and stages join on ` | `. Pins both the
@@ -219,10 +203,7 @@ mod tests {
         ]));
         let prog = single_op_program(body, BranchTarget::Escape, BranchTarget::Terminate);
         let lines = render(&prog);
-        assert_eq!(
-            lines[0],
-            "[0] exec --input=${specter.path} /log  ok→escape fail→terminate",
-        );
+        assert_eq!(lines[0], "[0] exec --input=${specter.path} /log  ok→escape fail→terminate");
     }
 
     /// Both env forms render with the right delimiter. `default = None` is `${env.NAME}`; `default =
@@ -230,10 +211,7 @@ mod tests {
     #[test]
     fn render_env_var_with_and_without_default() {
         let body = SpawnBody::Exec(exec_with_args([
-            ArgTemplate::new([ArgPart::EnvVar {
-                name: "HOME".into(),
-                default: None,
-            }]),
+            ArgTemplate::new([ArgPart::EnvVar { name: "HOME".into(), default: None }]),
             ArgTemplate::new([ArgPart::EnvVar {
                 name: "EDITOR".into(),
                 default: Some("vi".into()),
@@ -241,10 +219,7 @@ mod tests {
         ]));
         let prog = single_op_program(body, BranchTarget::Escape, BranchTarget::Terminate);
         let lines = render(&prog);
-        assert_eq!(
-            lines[0],
-            "[0] exec ${env.HOME} ${env.EDITOR:-vi}  ok→escape fail→terminate",
-        );
+        assert_eq!(lines[0], "[0] exec ${env.HOME} ${env.EDITOR:-vi}  ok→escape fail→terminate");
     }
 
     /// Branch targets render to `#N` / `terminate` / `escape`. `Continue` is built via the builder's
@@ -272,16 +247,11 @@ mod tests {
     /// unannotated.
     #[test]
     fn render_exec_with_timeout_appends_suffix() {
-        let body = SpawnBody::Exec(exec_timed(
-            [ArgPart::literal("/bin/slow")],
-            Duration::from_secs(5),
-        ));
+        let body =
+            SpawnBody::Exec(exec_timed([ArgPart::literal("/bin/slow")], Duration::from_secs(5)));
         let prog = single_op_program(body, BranchTarget::Escape, BranchTarget::Terminate);
         let lines = render(&prog);
-        assert_eq!(
-            lines[0],
-            "[0] exec /bin/slow (timeout 5s)  ok→escape fail→terminate",
-        );
+        assert_eq!(lines[0], "[0] exec /bin/slow (timeout 5s)  ok→escape fail→terminate");
 
         // Negative control: default-untimed exec carries no suffix.
         let untimed = SpawnBody::Exec(exec_with([ArgPart::literal("/bin/fast")]));

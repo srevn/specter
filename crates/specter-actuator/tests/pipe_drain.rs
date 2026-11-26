@@ -27,18 +27,13 @@ fn pipe_program(stages: Vec<Vec<String>>) -> Arc<ActionProgram> {
     let action_stages: Arc<[ExecAction]> = stages
         .into_iter()
         .map(|argv| {
-            ExecAction::new(
-                argv.into_iter()
-                    .map(|s| ArgTemplate::new([ArgPart::literal(s)])),
-                None,
-            )
+            ExecAction::new(argv.into_iter().map(|s| ArgTemplate::new([ArgPart::literal(s)])), None)
         })
         .collect::<Vec<_>>()
         .into();
     let mut b = ProgramBuilder::new();
-    let h = b.emit(SpawnBody::Pipe(
-        MultiStage::new(action_stages).expect("test pipe has >=2 stages"),
-    ));
+    let h =
+        b.emit(SpawnBody::Pipe(MultiStage::new(action_stages).expect("test pipe has >=2 stages")));
     b.patch_on_ok(h, BranchTarget::Escape).unwrap();
     b.patch_on_failed(h, BranchTarget::Terminate).unwrap();
     Arc::new(b.build().unwrap())
@@ -84,10 +79,7 @@ fn pipe_drain_does_not_block_on_hung_stage_0() {
         Input::EffectComplete(c) => {
             assert_eq!(c.sub, unique_sub_id(sub_seed));
             match &c.outcome {
-                EffectOutcome::Failed(Termination::PipeMixed {
-                    last_exit,
-                    first_signal,
-                }) => {
+                EffectOutcome::Failed(Termination::PipeMixed { last_exit, first_signal }) => {
                     assert_eq!(*last_exit, 7, "stage 1's exit dominates");
                     assert_eq!(*first_signal, 15, "stage 0's cascade SIGTERM surfaces");
                 }
@@ -105,10 +97,8 @@ fn pipe_drain_does_not_block_on_hung_stage_0() {
 #[test]
 fn pipe_drain_all_ok_completes_ok() {
     let mut harness = Harness::new(nz(2));
-    let program = pipe_program(vec![
-        vec!["/bin/echo".into(), "hi".into()],
-        vec!["/bin/cat".into()],
-    ]);
+    let program =
+        pipe_program(vec![vec!["/bin/echo".into(), "hi".into()], vec!["/bin/cat".into()]]);
     let sub_seed: u64 = 0xf1_0002;
     harness.submit(perfile_effect_with_program(
         sub_seed,

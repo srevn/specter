@@ -127,10 +127,7 @@ pub fn run(args: DaemonArgs) -> ExitCode {
     //    `ValidationIssue` (not wrapped in `ConfigError::Validate`): the issue's own `Display`
     //    carries the field + detail + kind, so we forward it verbatim.
     let log_cfg =
-        match initial_config
-            .log
-            .clone()
-            .merge_cli(log_level, log_destination, log_path.as_deref())
+        match initial_config.log.clone().merge_cli(log_level, log_destination, log_path.as_deref())
         {
             Ok(c) => c,
             Err(issue) => {
@@ -270,19 +267,14 @@ pub fn run(args: DaemonArgs) -> ExitCode {
     //    — downstream consumers receive clones through [`Reactor::wake_handle`]. Every static Source
     //    is registered against the Reactor's [`mio::Poll`] before this call returns — a signal
     //    arriving during the rest of init will fire the reactor's `TOKEN_SIGNAL` on the first poll.
-    let reactor = match Reactor::new(
-        watcher,
-        config_watcher,
-        signals,
-        prober_rx,
-        effect_complete_rx,
-    ) {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::error!(?e, "Reactor construction failed");
-            return ExitCode::from(1);
-        }
-    };
+    let reactor =
+        match Reactor::new(watcher, config_watcher, signals, prober_rx, effect_complete_rx) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!(?e, "Reactor construction failed");
+                return ExitCode::from(1);
+            }
+        };
 
     // 9a. Mint the [`mio::Registry::try_clone()`] handle for the [`Hub`]. Fallible: the only failure
     // surface is kernel pressure (selector clone OOM); the call is structurally a `try_clone` syscall
@@ -315,9 +307,8 @@ pub fn run(args: DaemonArgs) -> ExitCode {
     //     [`crate::driver::wake`] module's `WakeHandle::new` is the sole `mio::Waker::new` site in
     //     the bin; constructing `WakingSink` requires holding a `WakeHandle`, so a future
     //     wake-bearing sink inherits the "one Waker" invariant by typing rather than convention.
-    let prober_sink: Arc<dyn ProberResponseSender> = Arc::new(WakingProberResponseSender(
-        WakingSink::new(prober_tx, reactor.wake_handle()),
-    ));
+    let prober_sink: Arc<dyn ProberResponseSender> =
+        Arc::new(WakingProberResponseSender(WakingSink::new(prober_tx, reactor.wake_handle())));
     let effect_sink: Box<dyn EffectCompleteSender> = Box::new(WakingEffectCompleteSender(
         WakingSink::new(effect_complete_tx, reactor.wake_handle()),
     ));
@@ -348,11 +339,8 @@ pub fn run(args: DaemonArgs) -> ExitCode {
     // 13. Engine driver — main thread. `config` and `log_path` move into the driver here; subsequent
     //     reads of the config path (the boot-time TOCTOU lstat at step #15) go through
     //     [`EngineDriver::config_path`].
-    let cli_log_overrides = CliLogOverrides {
-        level: log_level,
-        destination: log_destination,
-        path: log_path,
-    };
+    let cli_log_overrides =
+        CliLogOverrides { level: log_level, destination: log_destination, path: log_path };
     let mut driver = EngineDriver::new(
         Engine::new(),
         loader,
@@ -401,9 +389,7 @@ pub fn run(args: DaemonArgs) -> ExitCode {
         && post_meta != initial_meta
     {
         tracing::info!("config changed during startup; running reload now");
-        driver
-            .dispatch_reload(ReloadTrigger::Startup, Instant::now())
-            .is_break()
+        driver.dispatch_reload(ReloadTrigger::Startup, Instant::now()).is_break()
     } else {
         false
     };
@@ -557,22 +543,18 @@ impl EffectCompleteSender for WakingEffectCompleteSender {
 /// Returns [`io::Error`] on `thread::Builder::spawn` failure; the caller translates to a startup-fail
 /// [`ExitCode`], same shape as every other init path in [`run`].
 fn spawn_actuator_thread(
-    concurrency: NonZeroUsize,
-    wiring: RunWiring,
-    engine_in: Box<dyn EffectCompleteSender>,
+    concurrency: NonZeroUsize, wiring: RunWiring, engine_in: Box<dyn EffectCompleteSender>,
 ) -> io::Result<JoinHandle<()>> {
-    thread::Builder::new()
-        .name("specter-actuator".into())
-        .spawn(move || {
-            let spawner = default_spawner();
-            let mut act = SubprocessActuator::new(concurrency);
-            // No `catch_unwind` wrapper: on panic, the closure unwinds, `SubprocessActuator::drop`
-            // runs the SIGTERM + SIGKILL fanout safety net, and the thread exits with the panic
-            // payload intact. The caller's `actuator_handle.join()` becomes the load-bearing
-            // observation point — its `Err(payload)` arm extracts the panic message for operator
-            // logs (see `run`'s teardown).
-            act.run(wiring, &*engine_in, spawner.as_ref());
-        })
+    thread::Builder::new().name("specter-actuator".into()).spawn(move || {
+        let spawner = default_spawner();
+        let mut act = SubprocessActuator::new(concurrency);
+        // No `catch_unwind` wrapper: on panic, the closure unwinds, `SubprocessActuator::drop` runs
+        // the SIGTERM + SIGKILL fanout safety net, and the thread exits with the panic payload
+        // intact. The caller's `actuator_handle.join()` becomes the load-bearing observation point
+        // — its `Err(payload)` arm extracts the panic message for operator logs (see `run`'s
+        // teardown).
+        act.run(wiring, &*engine_in, spawner.as_ref());
+    })
 }
 
 #[cfg(test)]
@@ -618,8 +600,7 @@ mod tests {
         // The wake edge must be live: a poll with a generous timeout returns immediately with
         // TOKEN_WAKER ready.
         let mut events = Events::with_capacity(4);
-        poll.poll(&mut events, Some(Duration::from_secs(2)))
-            .expect("poll unblocks via wake");
+        poll.poll(&mut events, Some(Duration::from_secs(2))).expect("poll unblocks via wake");
         let observed: Vec<Token> = events.iter().map(mio::event::Event::token).collect();
         assert!(
             observed.contains(&waker_token),
@@ -654,8 +635,7 @@ mod tests {
         }
 
         let mut events = Events::with_capacity(4);
-        poll.poll(&mut events, Some(Duration::from_secs(2)))
-            .expect("poll unblocks via wake");
+        poll.poll(&mut events, Some(Duration::from_secs(2))).expect("poll unblocks via wake");
         let observed: Vec<Token> = events.iter().map(mio::event::Event::token).collect();
         assert!(
             observed.contains(&waker_token),

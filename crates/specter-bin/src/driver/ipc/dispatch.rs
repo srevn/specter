@@ -91,9 +91,7 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// [`ControlFlow::Continue`] — including malformed JSON, unknown names, and read failures, which
     /// surface to the operator as a structured `Err` response or a clean conn close.
     pub(in crate::driver) fn drain_ipc_lines(
-        &mut self,
-        read_tokens: &[Token],
-        now: Instant,
+        &mut self, read_tokens: &[Token], now: Instant,
     ) -> ControlFlow<()> {
         for &token in read_tokens {
             // Per-conn line buffer — re-allocated each loop iteration because the line bytes are
@@ -178,9 +176,8 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// only — flips `conn.role` without touching engine state) stay accessible so operators can
     /// `tail` the wind-down.
     fn handle_ipc_line(&mut self, token: Token, line: &[u8], now: Instant) -> ControlFlow<()> {
-        let trimmed = line
-            .strip_suffix(b"\n")
-            .expect("framing invariant: line carries trailing LF");
+        let trimmed =
+            line.strip_suffix(b"\n").expect("framing invariant: line carries trailing LF");
         let request: WireRequest = match parse_strict(trimmed) {
             Ok(r) => r,
             Err(e) => {
@@ -286,10 +283,8 @@ impl<W: FsWatcher> EngineDriver<W> {
     fn handle_subscribe(&mut self, token: Token, name: Option<&CompactString>) -> ControlFlow<()> {
         // Gate 1: refuse a second Subscribe with a structured error. `is_some_and` consumes the
         // conn_ref borrow before the following `respond`'s `&mut self` reach.
-        let already_subscribed = self
-            .ipc
-            .conn_ref(token)
-            .is_some_and(|c| matches!(c.role, ConnRole::Sub { .. }));
+        let already_subscribed =
+            self.ipc.conn_ref(token).is_some_and(|c| matches!(c.role, ConnRole::Sub { .. }));
         if already_subscribed {
             self.respond(
                 token,
@@ -317,13 +312,8 @@ impl<W: FsWatcher> EngineDriver<W> {
         // Ack-then-flip: enqueue the ack while `conn.role == Reqs` (fan-out skips this conn); flip
         // iff the ack landed (a Refused or ConnGone outcome means the conn is already on its way
         // out and the role flip would be a no-op against a gone conn or a flush-in-progress one).
-        let ack = ResponsePayload::SubscribeAck {
-            sub: resolved.map(WireId::from),
-        };
-        if matches!(
-            self.ipc.enqueue_response(token, &ack),
-            EnqueueOutcome::Accepted
-        ) {
+        let ack = ResponsePayload::SubscribeAck { sub: resolved.map(WireId::from) };
+        if matches!(self.ipc.enqueue_response(token, &ack), EnqueueOutcome::Accepted) {
             // Structural invariant: an `Accepted` outcome means the conn was in the map at enqueue
             // time, and the same `&mut self.ipc` borrow continues here — nothing between the two
             // reaches has had the opportunity to remove the entry. A `None` from `conn_mut` here
@@ -390,10 +380,7 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// regardless of whether `forward` observes shutdown mid-flight; the [`ControlFlow`] return
     /// propagates the shutdown signal so the tick can resolve cleanly.
     fn handle_disable(
-        &mut self,
-        token: Token,
-        name: CompactString,
-        now: Instant,
+        &mut self, token: Token, name: CompactString, now: Instant,
     ) -> ControlFlow<()> {
         if self.disabled_runtime.contains(name.as_str()) {
             self.respond(
@@ -457,9 +444,7 @@ impl<W: FsWatcher> EngineDriver<W> {
             );
             return ControlFlow::Continue(());
         };
-        let out = self
-            .engine
-            .step(Input::AttachSub(spec.to_attach_request()), now);
+        let out = self.engine.step(Input::AttachSub(spec.to_attach_request()), now);
         let outcome = self.forward(out);
         self.respond(token, &ResponsePayload::Ok);
         outcome
@@ -483,11 +468,7 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// The reply is acked unconditionally after the work — same discipline as
     /// [`Self::handle_disable`] / [`Self::handle_enable`].
     fn handle_absorb(
-        &mut self,
-        token: Token,
-        name: &str,
-        duration_ms: Option<u64>,
-        now: Instant,
+        &mut self, token: Token, name: &str, duration_ms: Option<u64>, now: Instant,
     ) -> ControlFlow<()> {
         let Some(sub) = self.admit_watch(token, name) else {
             return ControlFlow::Continue(());

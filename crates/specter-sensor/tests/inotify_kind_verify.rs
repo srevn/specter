@@ -30,9 +30,7 @@ fn dir_watch_on_regular_file_returns_resource_enotdir() {
     let res = w.watch(r, &file_path, ResourceKind::Dir, ClassSet::STRUCTURE);
     assert_eq!(
         res,
-        Err(WatchFailure::Resource {
-            errno: libc::ENOTDIR,
-        }),
+        Err(WatchFailure::Resource { errno: libc::ENOTDIR }),
         "expected Resource(ENOTDIR) on Dir-watch over regular file; got {res:?}"
     );
 
@@ -52,9 +50,7 @@ fn file_watch_on_directory_returns_resource_enotdir() {
     let res = w.watch(r, tmp.path(), ResourceKind::File, ClassSet::CONTENT);
     assert_eq!(
         res,
-        Err(WatchFailure::Resource {
-            errno: libc::ENOTDIR,
-        }),
+        Err(WatchFailure::Resource { errno: libc::ENOTDIR }),
         "expected Resource(ENOTDIR) on File-watch over directory; got {res:?}"
     );
 

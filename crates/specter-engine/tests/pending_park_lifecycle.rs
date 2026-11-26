@@ -63,9 +63,7 @@ fn third_door_event_at_co_watched_parked_anchor_must_not_fire_unanchored() {
     let t2 = t_p + SETTLE * 4;
     let _ = e.step(MockSensor::fs_event(log, FsEvent::ContentChanged), t2);
     let _ = drain_due(&mut e, t2 + SETTLE * 2);
-    let corr = e
-        .pending_probe_for(pid_p)
-        .expect("standard verify probe in flight");
+    let corr = e.pending_probe_for(pid_p).expect("standard verify probe in flight");
     let _ = e.step(
         MockSensor::probe_response(ProbeResponse {
             owner: pid_p,
@@ -88,10 +86,7 @@ fn third_door_event_at_co_watched_parked_anchor_must_not_fire_unanchored() {
     let t3 = t2 + SETTLE * 10;
     let _ = e.step(MockSensor::fs_event(log, FsEvent::StructureChanged), t3);
     assert!(
-        matches!(
-            e.profiles().get(pid_p).unwrap().state(),
-            ProfileState::Pending(_)
-        ),
+        matches!(e.profiles().get(pid_p).unwrap().state(), ProfileState::Pending(_)),
         "event at the parked anchor re-enters recovery descent",
     );
 
@@ -107,10 +102,7 @@ fn third_door_event_at_co_watched_parked_anchor_must_not_fire_unanchored() {
         "terminus re-installed the anchor claim (state = {:?})",
         p.state().discriminant(),
     );
-    assert_eq!(
-        fired, 0,
-        "a park exit is a descent, never an unanchored fire"
-    );
+    assert_eq!(fired, 0, "a park exit is a descent, never an unanchored fire");
     let _ = e.cancel_all_in_flight_probes();
 }
 
@@ -139,10 +131,7 @@ fn overflow_reseed_of_park_reanchors_or_descends() {
     // Park via kernel watch rejection on the anchor.
     let t1 = t_seeded + SETTLE;
     let _ = e.step(
-        Input::WatchOpRejected {
-            resource: src,
-            failure: WatchFailure::Pressure { errno: 24 },
-        },
+        Input::WatchOpRejected { resource: src, failure: WatchFailure::Pressure { errno: 24 } },
         t1,
     );
     {
@@ -155,17 +144,9 @@ fn overflow_reseed_of_park_reanchors_or_descends() {
 
     // Overflow: the Parked arm enters recovery descent at the cached channel.
     let t2 = t1 + SETTLE;
-    let _ = e.step(
-        Input::SensorOverflow {
-            scope: OverflowScope::Global,
-        },
-        t2,
-    );
+    let _ = e.step(Input::SensorOverflow { scope: OverflowScope::Global }, t2);
     assert!(
-        matches!(
-            e.profiles().get(pid).unwrap().state(),
-            ProfileState::Pending(_)
-        ),
+        matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Pending(_)),
         "overflow re-enters recovery descent",
     );
 
@@ -173,10 +154,7 @@ fn overflow_reseed_of_park_reanchors_or_descends() {
     let _ = descent_advance(&mut e, pid, Some(EntryKind::Dir), t2 + SETTLE);
 
     let p = e.profiles().get(pid).unwrap();
-    let src_demand = e
-        .tree()
-        .get(src)
-        .map_or(0, specter_core::Resource::watch_demand);
+    let src_demand = e.tree().get(src).map_or(0, specter_core::Resource::watch_demand);
     assert_eq!(
         p.anchor_claim(),
         AnchorClaim::Held,
@@ -209,26 +187,15 @@ fn parent_event_after_overflow_recovery_reprobes_descent() {
     );
     let t1 = t_seeded + SETTLE;
     let _ = e.step(
-        Input::WatchOpRejected {
-            resource: src,
-            failure: WatchFailure::Pressure { errno: 24 },
-        },
+        Input::WatchOpRejected { resource: src, failure: WatchFailure::Pressure { errno: 24 } },
         t1,
     );
     let t2 = t1 + SETTLE;
-    let _ = e.step(
-        Input::SensorOverflow {
-            scope: OverflowScope::Global,
-        },
-        t2,
-    );
+    let _ = e.step(Input::SensorOverflow { scope: OverflowScope::Global }, t2);
     // The overflow's recovery descent observes the awaited segment absent — the descent parks
     // disarmed, awaiting the next prefix signal.
     let _ = descent_advance(&mut e, pid, None, t2 + SETTLE);
-    assert!(
-        e.pending_probe_for(pid).is_none(),
-        "segment absent: descent awaits the next event",
-    );
+    assert!(e.pending_probe_for(pid).is_none(), "segment absent: descent awaits the next event");
 
     // The parent slot still holds P's watch_root_parent claim → the event passes the head guard and
     // drives a fresh descent probe.
@@ -266,18 +233,12 @@ fn attach_join_onto_parked_profile_rearms_recovery() {
         MAX_SETTLE,
         t0,
     );
-    assert!(matches!(
-        e.profiles().get(pid_a).unwrap().state(),
-        ProfileState::Pending(_)
-    ));
+    assert!(matches!(e.profiles().get(pid_a).unwrap().state(), ProfileState::Pending(_)));
 
     // Kernel rejects the descent-prefix watch → purge → channel-less park.
     let t1 = t0 + SETTLE;
     let _ = e.step(
-        Input::WatchOpRejected {
-            resource: watch,
-            failure: WatchFailure::Pressure { errno: 24 },
-        },
+        Input::WatchOpRejected { resource: watch, failure: WatchFailure::Pressure { errno: 24 } },
         t1,
     );
     {
@@ -331,16 +292,10 @@ fn reattach_over_never_observed_scaffold_classifies_pending() {
     );
     let t1 = t0 + SETTLE;
     let _ = e.step(
-        Input::WatchOpRejected {
-            resource: watch,
-            failure: WatchFailure::Pressure { errno: 24 },
-        },
+        Input::WatchOpRejected { resource: watch, failure: WatchFailure::Pressure { errno: 24 } },
         t1,
     );
-    assert!(matches!(
-        e.profiles().get(pid_a).unwrap().state(),
-        ProfileState::Parked
-    ));
+    assert!(matches!(e.profiles().get(pid_a).unwrap().state(), ProfileState::Parked));
 
     // Sub C: same path, different identity (max_settle folds into config_hash) → fresh Profile.
     let t2 = t1 + SETTLE;
@@ -524,11 +479,7 @@ fn descent_terminus_keeps_carrier_count_exact_on_next_event() {
         MAX_SETTLE,
         t0,
     );
-    assert_eq!(
-        e.profiles().nonsteady(),
-        1,
-        "a live descent is a counted carrier"
-    );
+    assert_eq!(e.profiles().nonsteady(), 1, "a live descent is a counted carrier");
 
     // Terminus: the awaited segment exists — materialize, then the cold Seed opens.
     let _ = descent_advance(&mut e, pid, Some(EntryKind::Dir), t0 + SETTLE);
@@ -540,10 +491,7 @@ fn descent_terminus_keeps_carrier_count_exact_on_next_event() {
 
     // The next delivered event runs the debug recount tripwire against the maintained count.
     let src = e.tree().lookup(Some(watch), "src").expect("materialized");
-    let _ = e.step(
-        MockSensor::fs_event(src, FsEvent::ContentChanged),
-        t0 + SETTLE * 2,
-    );
+    let _ = e.step(MockSensor::fs_event(src, FsEvent::ContentChanged), t0 + SETTLE * 2);
     let _ = e.cancel_all_in_flight_probes();
 }
 
@@ -600,10 +548,7 @@ fn parked_rejoin_rearms_recovery_for_channel_bearing_park() {
     );
     assert_eq!(pid_a, pid_b, "B joins the parked Profile");
     assert!(
-        matches!(
-            e.profiles().get(pid_b).unwrap().state(),
-            ProfileState::Pending(_)
-        ),
+        matches!(e.profiles().get(pid_b).unwrap().state(), ProfileState::Pending(_)),
         "rejoin re-enters recovery descent at the cached channel",
     );
     assert!(
@@ -635,10 +580,7 @@ fn overflow_on_channel_less_park_descends_once_and_rejection_reparks() {
     // Kernel rejects the descent-prefix watch → channel-less park.
     let t1 = t0 + SETTLE;
     let _ = e.step(
-        Input::WatchOpRejected {
-            resource: watch,
-            failure: WatchFailure::Pressure { errno: 24 },
-        },
+        Input::WatchOpRejected { resource: watch, failure: WatchFailure::Pressure { errno: 24 } },
         t1,
     );
     {
@@ -649,23 +591,12 @@ fn overflow_on_channel_less_park_descends_once_and_rejection_reparks() {
 
     // One descent attempt per overflow: prefix re-derived from the Tree, watch re-attempted.
     let t2 = t1 + SETTLE;
-    let out = e.step(
-        Input::SensorOverflow {
-            scope: OverflowScope::Global,
-        },
-        t2,
-    );
+    let out = e.step(Input::SensorOverflow { scope: OverflowScope::Global }, t2);
     assert!(
-        matches!(
-            e.profiles().get(pid).unwrap().state(),
-            ProfileState::Pending(_)
-        ),
+        matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Pending(_)),
         "overflow re-enters recovery descent",
     );
-    assert!(
-        first_probe_correlation(&out).is_some(),
-        "one descent probe per overflow",
-    );
+    assert!(first_probe_correlation(&out).is_some(), "one descent probe per overflow");
     assert!(
         out.watch_ops
             .iter()
@@ -677,21 +608,12 @@ fn overflow_on_channel_less_park_descends_once_and_rejection_reparks() {
     // The kernel rejects again — the purge re-parks, probe cancelled. Bounded by overflow rate.
     let t3 = t2 + SETTLE;
     let _ = e.step(
-        Input::WatchOpRejected {
-            resource: watch,
-            failure: WatchFailure::Pressure { errno: 24 },
-        },
+        Input::WatchOpRejected { resource: watch, failure: WatchFailure::Pressure { errno: 24 } },
         t3,
     );
     let p = e.profiles().get(pid).unwrap();
-    assert!(
-        matches!(p.state(), ProfileState::Parked),
-        "re-rejection re-parks"
-    );
-    assert!(
-        e.pending_probe_for(pid).is_none(),
-        "descent probe cancelled by the purge",
-    );
+    assert!(matches!(p.state(), ProfileState::Parked), "re-rejection re-parks");
+    assert!(e.pending_probe_for(pid).is_none(), "descent probe cancelled by the purge");
 }
 
 /// A park is narrated at entry, pins the carrier gate open while it lives, surfaces the honest
@@ -714,10 +636,7 @@ fn park_narrates_counts_as_carrier_and_detach_reaps_to_zero() {
     );
 
     let out = e.step(
-        Input::WatchOpRejected {
-            resource: watch,
-            failure: WatchFailure::Pressure { errno: 24 },
-        },
+        Input::WatchOpRejected { resource: watch, failure: WatchFailure::Pressure { errno: 24 } },
         t0 + SETTLE,
     );
     assert!(
@@ -736,11 +655,7 @@ fn park_narrates_counts_as_carrier_and_detach_reaps_to_zero() {
         assert!(matches!(p.state(), ProfileState::Parked));
         assert_eq!(p.state().label(), StateLabel::Parked, "honest operator row");
     }
-    assert_eq!(
-        e.profiles().nonsteady(),
-        1,
-        "a park pins the carrier gate open"
-    );
+    assert_eq!(e.profiles().nonsteady(), 1, "a park pins the carrier gate open");
 
     // Detaching the last Sub reaps the parked Profile synchronously and ends the nonsteady pin.
     let out = e.step(Input::DetachSub(sid), t0 + SETTLE * 2);

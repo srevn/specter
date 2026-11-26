@@ -27,10 +27,8 @@ fn attach_sub_path_pending_then_anchor_appears() {
     // remaining=[log, myapp]. Inject probe responses showing log appears, then myapp appears. Anchor
     // materializes; Seed burst starts.
     let mut e = Engine::new();
-    let var = e
-        .tree_mut()
-        .ensure_path(&["/", "var"], ResourceRole::User)
-        .expect("non-empty fixture");
+    let var =
+        e.tree_mut().ensure_path(&["/", "var"], ResourceRole::User).expect("non-empty fixture");
     e.tree_mut().set_kind(var, ResourceKind::Dir);
 
     let req = SubAttachRequest::for_anchor(
@@ -53,10 +51,7 @@ fn attach_sub_path_pending_then_anchor_appears() {
     // `Profile.state == ProfileState::Pending(_)`, not on the anchor's role.
     let log = e.tree().lookup(Some(var), "log").expect("log scaffold");
     let myapp = e.tree().lookup(Some(log), "myapp").expect("anchor slot");
-    assert!(matches!(
-        e.tree().get(log).unwrap().role,
-        ResourceRole::DescentScaffold,
-    ));
+    assert!(matches!(e.tree().get(log).unwrap().role, ResourceRole::DescentScaffold));
     assert!(
         matches!(e.tree().get(myapp).unwrap().role, ResourceRole::User),
         "anchor's role is User even when pending",
@@ -68,9 +63,7 @@ fn attach_sub_path_pending_then_anchor_appears() {
         Input::ProbeResponse(ProbeResponse {
             owner: pid,
             correlation: var_corr,
-            outcome: ProbeOutcome::SegmentObserved {
-                kind: Some(EntryKind::Dir),
-            },
+            outcome: ProbeOutcome::SegmentObserved { kind: Some(EntryKind::Dir) },
         }),
         now,
     );
@@ -82,18 +75,13 @@ fn attach_sub_path_pending_then_anchor_appears() {
         Input::ProbeResponse(ProbeResponse {
             owner: pid,
             correlation: log_corr,
-            outcome: ProbeOutcome::SegmentObserved {
-                kind: Some(EntryKind::Dir),
-            },
+            outcome: ProbeOutcome::SegmentObserved { kind: Some(EntryKind::Dir) },
         }),
         now,
     );
 
     // Anchor materialized: kind set from the snapshot's entry; role stays User (set at attach time).
-    assert!(matches!(
-        e.tree().get(myapp).unwrap().role,
-        ResourceRole::User,
-    ));
+    assert!(matches!(e.tree().get(myapp).unwrap().role, ResourceRole::User));
     assert_eq!(e.tree().get(myapp).unwrap().kind(), Some(ResourceKind::Dir));
 
     // Profile is now in Active(PreFire(Seed)) — the Seed burst was started at materialization. Under
@@ -150,35 +138,20 @@ fn pending_path_witnessed_appearance_fires() {
     let out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&out).expect("attach succeeded");
     let pid = e.subs().get(sid).unwrap().profile();
-    assert!(matches!(
-        e.profiles().get(pid).unwrap().state(),
-        ProfileState::Pending(_)
-    ));
+    assert!(matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Pending(_)));
 
     // First descent probe: file not there yet.
     let out = descent_advance(&mut e, pid, None, now);
     assert!(out.effects().is_empty());
-    assert!(matches!(
-        e.profiles().get(pid).unwrap().state(),
-        ProfileState::Pending(_)
-    ));
+    assert!(matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Pending(_)));
 
     // The file appears: the parent STRUCTURE event re-probes; the response finds the segment the
     // prior probe observed absent — the appearance witness — and materializes the anchor into a
     // TRIGGERED Seed: Batching-first, no probe until the settle window expires.
     let t1 = now + Duration::from_millis(50);
-    let _ = e.step(
-        Input::FsEvent {
-            resource: parent,
-            event: FsEvent::StructureChanged,
-        },
-        t1,
-    );
+    let _ = e.step(Input::FsEvent { resource: parent, event: FsEvent::StructureChanged }, t1);
     let out = descent_advance(&mut e, pid, Some(EntryKind::File), t1);
-    assert!(
-        out.effects().is_empty(),
-        "materialization itself never fires"
-    );
+    assert!(out.effects().is_empty(), "materialization itself never fires");
     assert!(
         e.pending_probe_for(pid).is_none(),
         "triggered Seed opens Batching-first — no cold walk in flight",
@@ -188,21 +161,14 @@ fn pending_path_witnessed_appearance_fires() {
     let t2 = t1 + SETTLE * 2;
     drain_due(&mut e, t2);
     let out = respond_anchor_file(&mut e, pid, 1, t2);
-    assert_eq!(
-        out.effects().len(),
-        1,
-        "the witnessed appearance fires once it settles",
-    );
+    assert_eq!(out.effects().len(), 1, "the witnessed appearance fires once it settles");
     assert!(e.subs().get(sid).unwrap().has_fired());
 
     // Drain the fire cycle: effect Ok -> rebase -> Idle.
     let key = out.effects()[0].key();
     let _ = complete_effect_to_rebasing(&mut e, sid, key, t2);
     let _ = respond_anchor_file(&mut e, pid, 1, t2);
-    assert!(matches!(
-        e.profiles().get(pid).unwrap().state(),
-        ProfileState::Idle
-    ));
+    assert!(matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Idle));
 
     // And the watch is healthy thereafter: an in-place change fires as Standard.
     let anchor = e.profiles().get(pid).unwrap().resource();
@@ -241,30 +207,20 @@ fn pending_path_event_racing_inflight_probe_repays_and_fires() {
     let out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&out).expect("attach succeeded");
     let pid = e.subs().get(sid).unwrap().profile();
-    let corr1 = e
-        .pending_probe_for(pid)
-        .expect("descent probe in flight at /watch");
+    let corr1 = e.pending_probe_for(pid).expect("descent probe in flight at /watch");
 
     // The file is being created: a STRUCTURE event lands at the prefix WHILE the descent probe is
     // still in flight. The walk behind corr1 may predate this event, so it cannot witness the
     // creation — the event is latched, not dropped, and no second probe is emitted yet.
     let t1 = now + Duration::from_millis(20);
-    let out = e.step(
-        Input::FsEvent {
-            resource: parent,
-            event: FsEvent::StructureChanged,
-        },
-        t1,
-    );
+    let out = e.step(Input::FsEvent { resource: parent, event: FsEvent::StructureChanged }, t1);
     assert_eq!(
         e.pending_probe_for(pid),
         Some(corr1),
         "racing event leaves the in-flight probe untouched (latched, not superseded)",
     );
     assert!(
-        !out.probe_ops()
-            .iter()
-            .any(|op| matches!(op, ProbeOp::Probe { .. })),
+        !out.probe_ops().iter().any(|op| matches!(op, ProbeOp::Probe { .. })),
         "racing event emits no probe — the debt is latched",
     );
 
@@ -272,10 +228,7 @@ fn pending_path_event_racing_inflight_probe_repays_and_fires() {
     // the absence half of the witness. The latch repays with a fresh probe that postdates the event.
     let out = descent_advance(&mut e, pid, None, t1);
     assert!(
-        matches!(
-            e.profiles().get(pid).unwrap().state(),
-            ProfileState::Pending(_)
-        ),
+        matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Pending(_)),
         "stale absent response parks the descent",
     );
     let corr2 = e
@@ -283,19 +236,14 @@ fn pending_path_event_racing_inflight_probe_repays_and_fires() {
         .expect("re-probe-owed debt repaid: a postdating descent probe is in flight");
     assert_ne!(corr1, corr2);
     assert!(
-        out.probe_ops()
-            .iter()
-            .any(|op| matches!(op, ProbeOp::Probe { .. })),
+        out.probe_ops().iter().any(|op| matches!(op, ProbeOp::Probe { .. })),
         "the repay probe is emitted in the park's dispatch step",
     );
 
     // The repay probe observes the now-present file → the absence→presence pair latches the
     // appearance witness → TRIGGERED Seed (Batching-first, no cold walk in flight).
     let out = descent_advance(&mut e, pid, Some(EntryKind::File), t1);
-    assert!(
-        out.effects().is_empty(),
-        "materialization itself never fires"
-    );
+    assert!(out.effects().is_empty(), "materialization itself never fires");
     assert!(
         e.pending_probe_for(pid).is_none(),
         "triggered Seed opens Batching-first — the latch preserved the witness through the wedge",
@@ -345,63 +293,36 @@ fn sibling_churn_during_attach_descent_pins_silently() {
     let out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&out).expect("attach succeeded");
     let pid = e.subs().get(sid).unwrap().profile();
-    assert!(
-        e.pending_probe_for(pid).is_some(),
-        "attach-time descent probe in flight",
-    );
+    assert!(e.pending_probe_for(pid).is_some(), "attach-time descent probe in flight");
 
     // Sibling churn at /watch while the attach-time probe is in flight: the I5 gate drops the
     // re-probe and nothing latches — the in-flight response already reflects the change.
     let t1 = now + Duration::from_millis(10);
-    let out = e.step(
-        Input::FsEvent {
-            resource: parent,
-            event: FsEvent::StructureChanged,
-        },
-        t1,
-    );
-    assert!(
-        out.probe_ops().is_empty(),
-        "I5: the in-flight probe absorbs the re-probe",
-    );
+    let out = e.step(Input::FsEvent { resource: parent, event: FsEvent::StructureChanged }, t1);
+    assert!(out.probe_ops().is_empty(), "I5: the in-flight probe absorbs the re-probe");
 
     // The response finds `a` present — first observation, no absence half — and advances; the
     // descent's fresh probe at /watch/a is immediately in flight.
     let out = descent_advance(&mut e, pid, Some(EntryKind::Dir), t1);
     assert!(out.effects().is_empty());
-    let a = e
-        .tree()
-        .lookup(Some(parent), "a")
-        .expect("descent advanced into /watch/a");
+    let a = e.tree().lookup(Some(parent), "a").expect("descent advanced into /watch/a");
     assert!(e.pending_probe_for(pid).is_some());
 
     // More sibling churn, now at the advanced prefix — same drop, same silence.
-    let out = e.step(
-        Input::FsEvent {
-            resource: a,
-            event: FsEvent::StructureChanged,
-        },
-        t1,
-    );
+    let out = e.step(Input::FsEvent { resource: a, event: FsEvent::StructureChanged }, t1);
     assert!(out.probe_ops().is_empty(), "I5 again at the deeper prefix");
 
     // The terminus finds `b` present on first observation: a COLD Seed — Verifying-first, the probe
     // emitted at burst construction — that pins silently.
     let out = descent_advance(&mut e, pid, Some(EntryKind::Dir), t1);
-    assert!(
-        out.effects().is_empty(),
-        "materialization itself never fires"
-    );
+    assert!(out.effects().is_empty(), "materialization itself never fires");
     assert!(
         e.pending_probe_for(pid).is_some(),
         "cold Seed opens Verifying-first — attach-over-existing, not an appearance",
     );
     let _ = seed_to_idle(&mut e, pid, &dir_snap(&[]), t1);
 
-    assert!(matches!(
-        e.profiles().get(pid).unwrap().state(),
-        ProfileState::Idle
-    ));
+    assert!(matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Idle));
     assert!(
         !e.subs().get(sid).unwrap().has_fired(),
         "sibling churn at descent prefixes must not fire an attach over an existing tree",
@@ -439,9 +360,7 @@ fn prefix_vanished_rewind_then_recompletion_fires() {
     // The advanced prefix vanishes out from under the descent (`rm -rf /watch/a` mid-attach): the
     // rewind re-injects `a` as the head and records the absence observation.
     let t1 = now + Duration::from_millis(10);
-    let corr = e
-        .pending_probe_for(pid)
-        .expect("probe at /watch/a in flight");
+    let corr = e.pending_probe_for(pid).expect("probe at /watch/a in flight");
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: pid,
@@ -451,9 +370,7 @@ fn prefix_vanished_rewind_then_recompletion_fires() {
         t1,
     );
     assert!(
-        out.diagnostics
-            .iter()
-            .any(|d| matches!(d, Diagnostic::PendingPathProbeVanished { .. })),
+        out.diagnostics.iter().any(|d| matches!(d, Diagnostic::PendingPathProbeVanished { .. })),
         "rewind narrated",
     );
 
@@ -461,14 +378,8 @@ fn prefix_vanished_rewind_then_recompletion_fires() {
     // appearance witness, so the terminus opens a TRIGGERED Seed — Batching-first.
     let _ = descent_advance(&mut e, pid, Some(EntryKind::Dir), t1);
     let out = descent_advance(&mut e, pid, Some(EntryKind::File), t1);
-    assert!(
-        out.effects().is_empty(),
-        "materialization itself never fires"
-    );
-    assert!(
-        e.pending_probe_for(pid).is_none(),
-        "triggered Seed opens Batching-first",
-    );
+    assert!(out.effects().is_empty(), "materialization itself never fires");
+    assert!(e.pending_probe_for(pid).is_none(), "triggered Seed opens Batching-first");
 
     let t2 = t1 + SETTLE * 2;
     drain_due(&mut e, t2);
@@ -485,10 +396,8 @@ fn prefix_vanished_rewind_then_recompletion_fires() {
 #[test]
 fn pending_path_failed_probe_retains_state() {
     let mut e = Engine::new();
-    let var = e
-        .tree_mut()
-        .ensure_path(&["/", "var"], ResourceRole::User)
-        .expect("non-empty fixture");
+    let var =
+        e.tree_mut().ensure_path(&["/", "var"], ResourceRole::User).expect("non-empty fixture");
     e.tree_mut().set_kind(var, ResourceKind::Dir);
 
     let req = SubAttachRequest::for_anchor(
@@ -517,17 +426,11 @@ fn pending_path_failed_probe_retains_state() {
 
     assert!(out.diagnostics.iter().any(|d| matches!(
         d,
-        Diagnostic::PendingPathProbeFailed {
-            failure: ProbeFailure::Denied { errno: 13 },
-            ..
-        },
+        Diagnostic::PendingPathProbeFailed { failure: ProbeFailure::Denied { errno: 13 }, .. },
     )));
     // Profile still pending (descent state lives on `ProfileState::Pending`, not on a separate
     // SecondaryMap).
-    assert!(matches!(
-        e.profiles().get(pid).unwrap().state(),
-        ProfileState::Pending(_),
-    ));
+    assert!(matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Pending(_)));
 }
 
 #[test]
@@ -535,10 +438,8 @@ fn pending_path_event_at_prefix_emits_fresh_probe() {
     // Pending descent waiting for /var/missing/. Drain in-flight probe with a no-progress response,
     // then inject FsEvent at /var (the prefix) to trigger a fresh probe (no settle).
     let mut e = Engine::new();
-    let var = e
-        .tree_mut()
-        .ensure_path(&["/", "var"], ResourceRole::User)
-        .expect("non-empty fixture");
+    let var =
+        e.tree_mut().ensure_path(&["/", "var"], ResourceRole::User).expect("non-empty fixture");
     e.tree_mut().set_kind(var, ResourceKind::Dir);
 
     let req = SubAttachRequest::for_anchor(
@@ -568,20 +469,13 @@ fn pending_path_event_at_prefix_emits_fresh_probe() {
         Instant::now(),
     );
     assert!(
-        !out.diagnostics
-            .iter()
-            .any(|d| matches!(d, Diagnostic::PendingPathAwaitingSegment { .. })),
+        !out.diagnostics.iter().any(|d| matches!(d, Diagnostic::PendingPathAwaitingSegment { .. })),
         "unwitnessed park narrates nothing",
     );
 
     // FsEvent at /var triggers a fresh descent probe.
-    let out = e.step(
-        Input::FsEvent {
-            resource: var,
-            event: FsEvent::StructureChanged,
-        },
-        Instant::now(),
-    );
+    let out =
+        e.step(Input::FsEvent { resource: var, event: FsEvent::StructureChanged }, Instant::now());
     let probes = out
         .probe_ops()
         .iter()
@@ -600,10 +494,8 @@ fn anchor_disappears_re_enters_pending_via_watch_root_parent() {
     // Both / and /src exist; /src is the anchor.
     let root_dir = e.tree_mut().ensure_root("root", ResourceRole::User);
     e.tree_mut().set_kind(root_dir, ResourceKind::Dir);
-    let src = e
-        .tree_mut()
-        .ensure_child(root_dir, "src", ResourceRole::User)
-        .expect("test live parent");
+    let src =
+        e.tree_mut().ensure_child(root_dir, "src", ResourceRole::User).expect("test live parent");
     e.tree_mut().set_kind(src, ResourceKind::Dir);
 
     let req = SubAttachRequest::for_anchor(
@@ -627,14 +519,8 @@ fn anchor_disappears_re_enters_pending_via_watch_root_parent() {
     );
     // Drive the Seed proof → Idle (`t0` is the attach instant).
     let seed_done = seed_to_idle(&mut e, pid, &dir_snap(&[]), now);
-    assert!(matches!(
-        e.profiles().get(pid).unwrap().state(),
-        ProfileState::Idle,
-    ));
-    assert_eq!(
-        e.profiles().get(pid).unwrap().watch_root_parent(),
-        Some(root_dir)
-    );
+    assert!(matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Idle));
+    assert_eq!(e.profiles().get(pid).unwrap().watch_root_parent(), Some(root_dir));
 
     // The Seed proof consumed two settle windows; keep instants monotonic for the recovery sequence
     // that follows.
@@ -642,13 +528,7 @@ fn anchor_disappears_re_enters_pending_via_watch_root_parent() {
 
     // Anchor gone (Removed event at /src): the loss step re-enters pending descent with prefix=/,
     // remaining=[src], and emits the descent probe at the watch_root_parent.
-    let out = e.step(
-        Input::FsEvent {
-            resource: src,
-            event: FsEvent::Removed,
-        },
-        after_seed,
-    );
+    let out = e.step(Input::FsEvent { resource: src, event: FsEvent::Removed }, after_seed);
     let p = e.profiles().get(pid).unwrap();
     assert!(
         matches!(p.state(), ProfileState::Pending(_)),
@@ -659,10 +539,7 @@ fn anchor_disappears_re_enters_pending_via_watch_root_parent() {
         .probe_ops()
         .iter()
         .any(|op| matches!(op, ProbeOp::Probe { request } if request.owner() == pid));
-    assert!(
-        recovery_probe,
-        "loss step emits the descent probe at watch_root_parent",
-    );
+    assert!(recovery_probe, "loss step emits the descent probe at watch_root_parent");
     let _ = e.cancel_all_in_flight_probes();
 }
 
@@ -670,10 +547,8 @@ fn anchor_disappears_re_enters_pending_via_watch_root_parent() {
 #[test]
 fn detach_pending_profile_with_inflight_descent_emits_cancel() {
     let mut e = Engine::new();
-    let var = e
-        .tree_mut()
-        .ensure_path(&["/", "var"], ResourceRole::User)
-        .expect("non-empty fixture");
+    let var =
+        e.tree_mut().ensure_path(&["/", "var"], ResourceRole::User).expect("non-empty fixture");
     e.tree_mut().set_kind(var, ResourceKind::Dir);
 
     let req = SubAttachRequest::for_anchor(
@@ -756,10 +631,7 @@ fn pending_profile_event_at_anchor_lands_in_no_consumer_branch() {
         ProfileState::Pending(d) => d.current_prefix(),
         s => panic!("expected Pending, got {s:?}"),
     };
-    assert_ne!(
-        prefix, anchor,
-        "FS-root bootstrap separates prefix from anchor"
-    );
+    assert_ne!(prefix, anchor, "FS-root bootstrap separates prefix from anchor");
     assert_eq!(
         e.tree().get(prefix).unwrap().watch_demand(),
         1,
@@ -776,23 +648,11 @@ fn pending_profile_event_at_anchor_lands_in_no_consumer_branch() {
     // Earlier this same Profile shape (a degenerate `prefix == anchor` fixture from a relative-path
     // attach against an empty Tree) routed through `finish_burst_to_idle` and underflowed a Resource
     // refcount. The FS-root bootstrap rules out that degenerate shape entirely.
-    let out = e.step(
-        Input::FsEvent {
-            resource: anchor,
-            event: FsEvent::Removed,
-        },
-        now,
-    );
+    let out = e.step(Input::FsEvent { resource: anchor, event: FsEvent::Removed }, now);
 
     // Profile remains Pending (no covering-profile fan-out touched it).
-    let still_pending = matches!(
-        e.profiles().get(pid).unwrap().state(),
-        ProfileState::Pending(_),
-    );
-    assert!(
-        still_pending,
-        "Pending Profile not coerced through anchor-terminal-event path",
-    );
+    let still_pending = matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Pending(_));
+    assert!(still_pending, "Pending Profile not coerced through anchor-terminal-event path");
     // The head guard short-circuits before any classifier work, so it emits no watch op (no spurious
     // Unwatch/Watch on this path).
     assert!(
@@ -819,15 +679,11 @@ fn pending_profile_event_at_anchor_lands_in_no_consumer_branch() {
 fn classifier_routes_descent_and_recovery_in_single_pass() {
     // /root and /root/bar exist; /root/foo does not. /elsewhere exists.
     let mut e = Engine::new();
-    let root_dir = e
-        .tree_mut()
-        .ensure_path(&["/", "root"], ResourceRole::User)
-        .expect("non-empty fixture");
+    let root_dir =
+        e.tree_mut().ensure_path(&["/", "root"], ResourceRole::User).expect("non-empty fixture");
     e.tree_mut().set_kind(root_dir, ResourceKind::Dir);
-    let bar = e
-        .tree_mut()
-        .ensure_child(root_dir, "bar", ResourceRole::User)
-        .expect("test live parent");
+    let bar =
+        e.tree_mut().ensure_child(root_dir, "bar", ResourceRole::User).expect("test live parent");
     e.tree_mut().set_kind(bar, ResourceKind::Dir);
     let elsewhere = e
         .tree_mut()
@@ -864,10 +720,7 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
         now,
     );
     assert!(
-        matches!(
-            e.profiles().get(pid_a).unwrap().state(),
-            ProfileState::Pending(_),
-        ),
+        matches!(e.profiles().get(pid_a).unwrap().state(), ProfileState::Pending(_)),
         "A still Pending after no-progress response",
     );
 
@@ -905,18 +758,11 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
     // `Failed` is how the recoveries class is populated.) Drive a Standard burst at the anchor, then
     // fail its verify probe.
     let after_b_seed = b_seed_done + SETTLE;
-    e.step(
-        Input::FsEvent {
-            resource: bar,
-            event: FsEvent::ContentChanged,
-        },
-        after_b_seed,
-    );
+    e.step(Input::FsEvent { resource: bar, event: FsEvent::ContentChanged }, after_b_seed);
     let b_fail_at = after_b_seed + SETTLE * 2;
     drain_due(&mut e, b_fail_at);
-    let b_corr = e
-        .pending_probe_for(pid_b)
-        .expect("B's verify probe in flight after settle expiry");
+    let b_corr =
+        e.pending_probe_for(pid_b).expect("B's verify probe in flight after settle expiry");
     e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: pid_b,
@@ -953,10 +799,7 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
     );
     // Drive C's Seed proof → Idle (`t0` is C's attach instant).
     let c_seed_done = seed_to_idle(&mut e, pid_c, &dir_snap(&[]), c_attach);
-    assert!(matches!(
-        e.profiles().get(pid_c).unwrap().state(),
-        ProfileState::Idle,
-    ));
+    assert!(matches!(e.profiles().get(pid_c).unwrap().state(), ProfileState::Idle));
 
     // The trigger: a single StructureChanged event at /root.
     // - A's `current_prefix == /root` ⇒ descent dispatch.
@@ -964,13 +807,8 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
     // - C is anchored at /elsewhere ⇒ untouched. Strictly after both Seed proofs (B and C each
     //   consumed two settle windows since `now`).
     let trigger = c_seed_done + SETTLE;
-    let out = e.step(
-        Input::FsEvent {
-            resource: root_dir,
-            event: FsEvent::StructureChanged,
-        },
-        trigger,
-    );
+    let out =
+        e.step(Input::FsEvent { resource: root_dir, event: FsEvent::StructureChanged }, trigger);
 
     // A: a fresh descent probe minted (slot was empty after drain).
     let a_probes = out
@@ -980,10 +818,7 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
         .count();
     assert_eq!(a_probes, 1, "A's descent advance emits one probe");
     assert!(
-        matches!(
-            e.profiles().get(pid_a).unwrap().state(),
-            ProfileState::Pending(_),
-        ),
+        matches!(e.profiles().get(pid_a).unwrap().state(), ProfileState::Pending(_)),
         "A remains Pending",
     );
 
@@ -995,10 +830,7 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
         .count();
     assert_eq!(b_probes, 1, "B's recovery emits one descent probe");
     assert!(
-        matches!(
-            e.profiles().get(pid_b).unwrap().state(),
-            ProfileState::Pending(_),
-        ),
+        matches!(e.profiles().get(pid_b).unwrap().state(), ProfileState::Pending(_)),
         "B transitioned Parked → Pending",
     );
 
@@ -1009,9 +841,6 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
         .filter(|op| matches!(op, ProbeOp::Probe { request } if request.owner() == pid_c))
         .count();
     assert_eq!(c_probes, 0, "C is unrelated to /root; no probe");
-    assert!(matches!(
-        e.profiles().get(pid_c).unwrap().state(),
-        ProfileState::Idle,
-    ));
+    assert!(matches!(e.profiles().get(pid_c).unwrap().state(), ProfileState::Idle));
     let _ = e.cancel_all_in_flight_probes();
 }

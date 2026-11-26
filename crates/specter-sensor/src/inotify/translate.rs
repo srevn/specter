@@ -220,10 +220,7 @@ mod tests {
     #[test]
     fn content_on_file_adds_modify_close_write() {
         let m = class_set_to_mask(ClassSet::CONTENT, ResourceKind::File);
-        assert_eq!(
-            m,
-            IDENTITY_FLOOR | ADD_WATCH_DEFENCE | IN_MODIFY | IN_CLOSE_WRITE
-        );
+        assert_eq!(m, IDENTITY_FLOOR | ADD_WATCH_DEFENCE | IN_MODIFY | IN_CLOSE_WRITE);
     }
 
     #[test]
@@ -286,19 +283,13 @@ mod tests {
     fn default_subtree_root_on_file_yields_content_only() {
         // STRUCTURE | CONTENT × File = CONTENT (STRUCTURE no-op on File).
         let m = class_set_to_mask(ClassSet::DEFAULT_SUBTREE_ROOT, ResourceKind::File);
-        assert_eq!(
-            m,
-            IDENTITY_FLOOR | ADD_WATCH_DEFENCE | IN_MODIFY | IN_CLOSE_WRITE
-        );
+        assert_eq!(m, IDENTITY_FLOOR | ADD_WATCH_DEFENCE | IN_MODIFY | IN_CLOSE_WRITE);
     }
 
     #[test]
     fn default_per_file_yields_modify_close_write_attrib() {
         let m = class_set_to_mask(ClassSet::DEFAULT_PER_FILE, ResourceKind::File);
-        assert_eq!(
-            m,
-            IDENTITY_FLOOR | ADD_WATCH_DEFENCE | IN_MODIFY | IN_CLOSE_WRITE | IN_ATTRIB,
-        );
+        assert_eq!(m, IDENTITY_FLOOR | ADD_WATCH_DEFENCE | IN_MODIFY | IN_CLOSE_WRITE | IN_ATTRIB);
     }
 
     #[test]
@@ -324,10 +315,7 @@ mod tests {
         let all = ClassSet::STRUCTURE | ClassSet::CONTENT | ClassSet::METADATA;
         let m = class_set_to_mask(all, ResourceKind::File);
         // File gets CONTENT (MODIFY | CLOSE_WRITE) + METADATA (ATTRIB); STRUCTURE is no-op on File.
-        assert_eq!(
-            m,
-            IDENTITY_FLOOR | ADD_WATCH_DEFENCE | IN_MODIFY | IN_CLOSE_WRITE | IN_ATTRIB,
-        );
+        assert_eq!(m, IDENTITY_FLOOR | ADD_WATCH_DEFENCE | IN_MODIFY | IN_CLOSE_WRITE | IN_ATTRIB);
     }
 
     /// Re-translation determinism: pure function ⇒ same input always yields the same mask. Protects

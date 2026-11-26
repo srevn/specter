@@ -16,8 +16,6 @@ use crate::ipc::client::connect;
 use crate::ipc::protocol::WireRequest;
 
 pub(crate) fn run(args: &NameTargetArgs) -> ExitCode {
-    let req = WireRequest::Disable {
-        name: CompactString::from(args.name.as_str()),
-    };
+    let req = WireRequest::Disable { name: CompactString::from(args.name.as_str()) };
     connect::one_shot_unit(&args.client, "disable", &req)
 }

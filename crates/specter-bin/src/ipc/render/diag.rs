@@ -209,12 +209,8 @@ const fn severity(d: &WireDiagnostic) -> Severity {
 /// run of `field` calls reproduces the pre-color `  k=v  k2=v2` shape byte-for-byte under
 /// `Styler::Plain`.
 fn field(out: &mut String, sty: Styler, key: &str, value: impl Display) {
-    let _ = write!(
-        out,
-        "  {}{}{value}",
-        sty.paint(style::LABEL, key),
-        sty.paint(style::DELIM, "="),
-    );
+    let _ =
+        write!(out, "  {}{}{value}", sty.paint(style::LABEL, key), sty.paint(style::DELIM, "="));
 }
 
 /// [`field`] where `value` is present, nothing where it is not: a line omits a field that does not
@@ -236,21 +232,14 @@ fn optional_field(out: &mut String, sty: Styler, key: &str, value: Option<impl D
 /// [`super::super::wire`] and [`super::super::protocol`].
 fn write_fields(out: &mut String, d: &WireDiagnostic, sty: Styler) {
     match d {
-        WireDiagnostic::StaleProbeResponse {
-            owner, correlation, ..
-        } => {
+        WireDiagnostic::StaleProbeResponse { owner, correlation, .. } => {
             field(out, sty, "owner", owner.0);
             field(out, sty, "correlation", correlation);
         }
         WireDiagnostic::StaleTimer { id, .. } => {
             field(out, sty, "id", id);
         }
-        WireDiagnostic::EffectCompleteOutsideAwaiting {
-            sub,
-            profile,
-            minted_by,
-            ..
-        } => {
+        WireDiagnostic::EffectCompleteOutsideAwaiting { sub, profile, minted_by, .. } => {
             field(out, sty, "sub", sub.0);
             field(out, sty, "profile", profile.0);
             optional_field(out, sty, "minted_by", minted_by.map(|t| t.0));
@@ -265,34 +254,17 @@ fn write_fields(out: &mut String, d: &WireDiagnostic, sty: Styler) {
         | WireDiagnostic::ConfigDiffRebindFallbackAttach { name, .. } => {
             field(out, sty, "name", name);
         }
-        WireDiagnostic::ProbeVanished {
-            profile, intent, ..
-        } => {
+        WireDiagnostic::ProbeVanished { profile, intent, .. } => {
             field(out, sty, "profile", profile.0);
             field(out, sty, "intent", intent);
         }
-        WireDiagnostic::ProbeFailed {
-            profile,
-            intent,
-            errno,
-            ..
-        } => {
+        WireDiagnostic::ProbeFailed { profile, intent, errno, .. } => {
             field(out, sty, "profile", profile.0);
             field(out, sty, "intent", intent);
             field(out, sty, "errno", errno);
         }
-        WireDiagnostic::EventClassDropped {
-            resource,
-            event,
-            profile,
-            ..
-        }
-        | WireDiagnostic::EventOutsideProofObject {
-            resource,
-            event,
-            profile,
-            ..
-        } => {
+        WireDiagnostic::EventClassDropped { resource, event, profile, .. }
+        | WireDiagnostic::EventOutsideProofObject { resource, event, profile, .. } => {
             field(out, sty, "resource", resource.0);
             field(out, sty, "event", event);
             field(out, sty, "profile", profile.0);
@@ -302,53 +274,31 @@ fn write_fields(out: &mut String, d: &WireDiagnostic, sty: Styler) {
         | WireDiagnostic::AttachResourceStale { resource, .. } => {
             field(out, sty, "resource", resource.0);
         }
-        WireDiagnostic::WatchOpRejected {
-            resource, failure, ..
-        } => {
+        WireDiagnostic::WatchOpRejected { resource, failure, .. } => {
             field(out, sty, "resource", resource.0);
             field(out, sty, "failure", failure);
         }
-        WireDiagnostic::PendingPathProbeVanished {
-            profile, prefix, ..
-        } => {
+        WireDiagnostic::PendingPathProbeVanished { profile, prefix, .. } => {
             field(out, sty, "profile", profile.0);
             field(out, sty, "prefix", prefix.0);
         }
-        WireDiagnostic::PendingPathProbeFailed {
-            profile,
-            prefix,
-            errno,
-            ..
-        } => {
+        WireDiagnostic::PendingPathProbeFailed { profile, prefix, errno, .. } => {
             field(out, sty, "profile", profile.0);
             field(out, sty, "prefix", prefix.0);
             field(out, sty, "errno", errno);
         }
-        WireDiagnostic::PendingPathAwaitingSegment {
-            profile,
-            prefix,
-            segment,
-            ..
-        } => {
+        WireDiagnostic::PendingPathAwaitingSegment { profile, prefix, segment, .. } => {
             field(out, sty, "profile", profile.0);
             field(out, sty, "prefix", prefix.0);
             field(out, sty, "segment", segment);
         }
-        WireDiagnostic::PendingPathRetriesExhausted {
-            profile,
-            prefix,
-            retries,
-            errno,
-            ..
-        } => {
+        WireDiagnostic::PendingPathRetriesExhausted { profile, prefix, retries, errno, .. } => {
             field(out, sty, "profile", profile.0);
             field(out, sty, "prefix", prefix.0);
             field(out, sty, "retries", retries);
             field(out, sty, "errno", errno);
         }
-        WireDiagnostic::PendingPathMaterialized {
-            profile, anchor, ..
-        } => {
+        WireDiagnostic::PendingPathMaterialized { profile, anchor, .. } => {
             field(out, sty, "profile", profile.0);
             field(out, sty, "anchor", anchor.0);
         }
@@ -366,19 +316,11 @@ fn write_fields(out: &mut String, d: &WireDiagnostic, sty: Styler) {
             field(out, sty, "profile", profile.0);
             field(out, sty, "via", via);
         }
-        WireDiagnostic::ProfileParked {
-            profile, recovery, ..
-        } => {
+        WireDiagnostic::ProfileParked { profile, recovery, .. } => {
             field(out, sty, "profile", profile.0);
             optional_field(out, sty, "recovery", recovery.map(|parent| parent.0));
         }
-        WireDiagnostic::ProfileClaimPurged {
-            profile,
-            claim,
-            resource,
-            failure,
-            ..
-        } => {
+        WireDiagnostic::ProfileClaimPurged { profile, claim, resource, failure, .. } => {
             field(out, sty, "profile", profile.0);
             field(out, sty, "claim", claim);
             field(out, sty, "resource", resource.0);
@@ -388,87 +330,42 @@ fn write_fields(out: &mut String, d: &WireDiagnostic, sty: Styler) {
             field(out, sty, "path", path);
             field(out, sty, "hint", hint);
         }
-        WireDiagnostic::AnchorKindMismatch {
-            profile,
-            prior_kind,
-            response_kind,
-            ..
-        } => {
+        WireDiagnostic::AnchorKindMismatch { profile, prior_kind, response_kind, .. } => {
             field(out, sty, "profile", profile.0);
             field(out, sty, "prior_kind", prior_kind);
             field(out, sty, "response_kind", response_kind);
         }
-        WireDiagnostic::SpliceCrossedUncovered {
-            profile,
-            target,
-            cause,
-            ..
-        } => {
+        WireDiagnostic::SpliceCrossedUncovered { profile, target, cause, .. } => {
             field(out, sty, "profile", profile.0);
             field(out, sty, "target", target.0);
             field(out, sty, "cause", cause);
         }
-        WireDiagnostic::EventAbsorbedByFireTail {
-            profile,
-            resource,
-            event,
-            ..
-        } => {
+        WireDiagnostic::EventAbsorbedByFireTail { profile, resource, event, .. } => {
             field(out, sty, "profile", profile.0);
             field(out, sty, "resource", resource.0);
             field(out, sty, "event", event);
         }
-        WireDiagnostic::AwaitGateDeadlineForceRebasing {
-            profile,
-            outstanding,
-            ..
-        }
-        | WireDiagnostic::AwaitGateDeadlineReap {
-            profile,
-            outstanding,
-            ..
-        } => {
+        WireDiagnostic::AwaitGateDeadlineForceRebasing { profile, outstanding, .. }
+        | WireDiagnostic::AwaitGateDeadlineReap { profile, outstanding, .. } => {
             field(out, sty, "profile", profile.0);
             field(out, sty, "outstanding", outstanding);
         }
-        WireDiagnostic::QuiescenceCeilingUnreadable {
-            profile,
-            first_unread,
-            intent,
-            ..
-        }
-        | WireDiagnostic::RebaseCeilingUnreadable {
-            profile,
-            first_unread,
-            intent,
-            ..
-        } => {
+        WireDiagnostic::QuiescenceCeilingUnreadable { profile, first_unread, intent, .. }
+        | WireDiagnostic::RebaseCeilingUnreadable { profile, first_unread, intent, .. } => {
             field(out, sty, "profile", profile.0);
             field(out, sty, "first_unread", first_unread);
             field(out, sty, "intent", intent);
         }
-        WireDiagnostic::QuiescenceCeilingForcedDespiteChange {
-            profile, intent, ..
-        } => {
+        WireDiagnostic::QuiescenceCeilingForcedDespiteChange { profile, intent, .. } => {
             field(out, sty, "profile", profile.0);
             field(out, sty, "intent", intent);
         }
-        WireDiagnostic::RebaseCeilingForced {
-            profile,
-            intent,
-            observed_change,
-            ..
-        } => {
+        WireDiagnostic::RebaseCeilingForced { profile, intent, observed_change, .. } => {
             field(out, sty, "profile", profile.0);
             field(out, sty, "intent", intent);
             field(out, sty, "observed_change", observed_change);
         }
-        WireDiagnostic::ChangeOutsideEventMask {
-            profile,
-            intent,
-            retries,
-            ..
-        } => {
+        WireDiagnostic::ChangeOutsideEventMask { profile, intent, retries, .. } => {
             field(out, sty, "profile", profile.0);
             field(out, sty, "intent", intent);
             field(out, sty, "retries", retries);
@@ -476,35 +373,18 @@ fn write_fields(out: &mut String, d: &WireDiagnostic, sty: Styler) {
         WireDiagnostic::SensorOverflow { scope, .. } => {
             field(out, sty, "scope", scope);
         }
-        WireDiagnostic::SubAttached {
-            sub,
-            name,
-            minted_by,
-            ..
-        } => {
+        WireDiagnostic::SubAttached { sub, name, minted_by, .. } => {
             field(out, sty, "sub", sub.0);
             field(out, sty, "name", name);
             optional_field(out, sty, "minted_by", minted_by.map(|t| t.0));
         }
-        WireDiagnostic::SubFired {
-            sub,
-            profile,
-            count,
-            minted_by,
-            ..
-        } => {
+        WireDiagnostic::SubFired { sub, profile, count, minted_by, .. } => {
             field(out, sty, "sub", sub.0);
             field(out, sty, "profile", profile.0);
             field(out, sty, "count", count);
             optional_field(out, sty, "minted_by", minted_by.map(|t| t.0));
         }
-        WireDiagnostic::SubDetached {
-            sub,
-            profile,
-            reason,
-            minted_by,
-            ..
-        } => {
+        WireDiagnostic::SubDetached { sub, profile, reason, minted_by, .. } => {
             field(out, sty, "sub", sub.0);
             field(out, sty, "profile", profile.0);
             field(out, sty, "reason", reason);
@@ -517,40 +397,22 @@ fn write_fields(out: &mut String, d: &WireDiagnostic, sty: Styler) {
         WireDiagnostic::RebindUnknownSub { sub, .. } => {
             field(out, sty, "sub", sub.0);
         }
-        WireDiagnostic::DiscoveryMinted {
-            template,
-            path,
-            kind,
-            entry,
-            ..
-        } => {
+        WireDiagnostic::DiscoveryMinted { template, path, kind, entry, .. } => {
             field(out, sty, "template", template.0);
             field(out, sty, "path", path);
             field(out, sty, "kind", kind);
             field(out, sty, "entry", entry);
         }
-        WireDiagnostic::DiscoveryUnsupportedAnchorKind {
-            template,
-            path,
-            kind,
-            ..
-        } => {
+        WireDiagnostic::DiscoveryUnsupportedAnchorKind { template, path, kind, .. } => {
             field(out, sty, "template", template.0);
             field(out, sty, "path", path);
             field(out, sty, "kind", kind);
         }
-        WireDiagnostic::DiscoveryFanoutThreshold {
-            template, count, ..
-        } => {
+        WireDiagnostic::DiscoveryFanoutThreshold { template, count, .. } => {
             field(out, sty, "template", template.0);
             field(out, sty, "count", count);
         }
-        WireDiagnostic::DiscoverySubReaped {
-            template,
-            sub,
-            path,
-            ..
-        } => {
+        WireDiagnostic::DiscoverySubReaped { template, sub, path, .. } => {
             field(out, sty, "template", template.0);
             field(out, sty, "sub", sub.0);
             field(out, sty, "path", path);
@@ -559,12 +421,7 @@ fn write_fields(out: &mut String, d: &WireDiagnostic, sty: Styler) {
             field(out, sty, "template", template.0);
             field(out, sty, "path", path);
         }
-        WireDiagnostic::InvalidBurstTransition {
-            profile,
-            helper,
-            observed,
-            ..
-        } => {
+        WireDiagnostic::InvalidBurstTransition { profile, helper, observed, .. } => {
             field(out, sty, "profile", profile.0);
             field(out, sty, "helper", helper);
             field(out, sty, "observed", observed);
@@ -605,10 +462,7 @@ mod tests {
             },
             Styler::Plain,
         );
-        assert!(
-            s.starts_with("1970-01-01T00:00:00Z  sub_fired"),
-            "leading timestamp + tag: {s:?}",
-        );
+        assert!(s.starts_with("1970-01-01T00:00:00Z  sub_fired"), "leading timestamp + tag: {s:?}");
         assert!(s.contains("  sub=11"), "sub field present: {s:?}");
         assert!(s.contains("  profile=22"), "profile field present: {s:?}");
         assert!(s.contains("  count=3"), "count field present: {s:?}");
@@ -624,16 +478,10 @@ mod tests {
         let mut s = String::new();
         render(
             &mut s,
-            &WireDiagnostic::Missed {
-                at: WireTime::from(UNIX_EPOCH),
-                count: 5,
-            },
+            &WireDiagnostic::Missed { at: WireTime::from(UNIX_EPOCH), count: 5 },
             Styler::Plain,
         );
-        assert!(
-            s.starts_with("1970-01-01T00:00:00Z  _missed"),
-            "leading `_missed` tag: {s:?}",
-        );
+        assert!(s.starts_with("1970-01-01T00:00:00Z  _missed"), "leading `_missed` tag: {s:?}");
         assert!(s.contains("  count=5"), "count field present: {s:?}");
         assert!(s.ends_with('\n'), "newline-terminated: {s:?}");
     }
@@ -710,10 +558,7 @@ mod tests {
         );
         assert!(s.contains("  profile=7"));
         assert!(s.contains("  via=deferred_from_burst"));
-        assert!(
-            !s.contains("sub="),
-            "Profile-keyed variant must not carry a sub field: {s:?}",
-        );
+        assert!(!s.contains("sub="), "Profile-keyed variant must not carry a sub field: {s:?}");
     }
 
     /// `EventClassDropped` is the canonical multi-field per-Resource variant; its rendered line
@@ -757,10 +602,7 @@ mod tests {
             Styler::Plain,
         );
         assert!(s.contains("  scope=global"), "got: {s:?}");
-        assert!(
-            !s.contains("scope=global/"),
-            "global must NOT carry a trailing id: {s:?}",
-        );
+        assert!(!s.contains("scope=global/"), "global must NOT carry a trailing id: {s:?}");
     }
 
     /// Cross-variant coverage: every variant on the [`super::super::wire::KNOWN_WIRE_VARIANTS`] list
@@ -786,10 +628,7 @@ mod tests {
             });
             let mut line = String::new();
             render(&mut line, &wire, Styler::Plain);
-            assert!(
-                line.contains(tag),
-                "render line missing tag {tag}: {line:?}"
-            );
+            assert!(line.contains(tag), "render line missing tag {tag}: {line:?}");
             assert!(line.ends_with('\n'), "no trailing LF for tag {tag}");
             assert!(
                 line.starts_with("1970-01-01T00:00:00Z  "),

@@ -23,9 +23,7 @@ struct Sink(crossbeam::channel::Sender<Input>);
 
 impl ProberResponseSender for Sink {
     fn send(&self, response: ProbeResponse) -> Result<(), SendError> {
-        self.0
-            .send(Input::ProbeResponse(response))
-            .map_err(|_| SendError::Disconnected)
+        self.0.send(Input::ProbeResponse(response)).map_err(|_| SendError::Disconnected)
     }
 }
 
@@ -34,11 +32,8 @@ fn a_walk_with_no_descriptor_free_fails_transient() {
     let tmp = TempDir::new().unwrap();
     std::fs::write(tmp.path().join("f"), b"x").unwrap();
     let (tx, rx) = unbounded::<Input>();
-    let mut prober = WorkerProber::new(
-        Arc::new(Sink(tx)),
-        NonZeroUsize::new(1).expect("one worker"),
-    )
-    .unwrap();
+    let mut prober =
+        WorkerProber::new(Arc::new(Sink(tx)), NonZeroUsize::new(1).expect("one worker")).unwrap();
     let owner: ProfileId = SlotMap::with_key().insert(());
     let root: Arc<Path> = Arc::from(tmp.path());
 
@@ -72,9 +67,7 @@ fn a_walk_with_no_descriptor_free_fails_transient() {
     assert!(
         matches!(
             response.outcome,
-            ProbeOutcome::Failed(ProbeFailure::Transient {
-                errno: libc::EMFILE
-            })
+            ProbeOutcome::Failed(ProbeFailure::Transient { errno: libc::EMFILE })
         ),
         "got {:?}",
         response.outcome,

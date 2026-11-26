@@ -249,10 +249,7 @@ mod tests {
             let _e = ProbeSlot::empty();
             // `_e` drops here, never armed → silent.
         }));
-        assert!(
-            quiet.is_ok(),
-            "an idle/empty slot reaching drop must not panic",
-        );
+        assert!(quiet.is_ok(), "an idle/empty slot reaching drop must not panic");
     }
 
     /// The `!std::thread::panicking()` guard: an armed slot dropped *while a panic is already
@@ -267,9 +264,7 @@ mod tests {
         }
 
         let payload = catch_unwind(AssertUnwindSafe(|| {
-            let _h = Holder {
-                _slot: ProbeSlot::armed(corr(99)),
-            };
+            let _h = Holder { _slot: ProbeSlot::armed(corr(99)) };
             panic!("primary");
             // Unwinding past here drops `_h` (and its armed slot) *while panicking* → the tripwire
             // must observe `panicking() == true` and stay silent.

@@ -225,11 +225,8 @@ impl<W: FsWatcher> Reactor<W> {
     /// `Source` registrations. All paths are programmer-error or kernel-pressure failures (`EMFILE`
     /// on the Waker fd) — the caller treats any error as startup-fatal.
     pub(crate) fn new(
-        watcher: W,
-        mut config_watcher: Option<DefaultConfigWatcher>,
-        signals: SignalPipe,
-        prober_response_rx: Receiver<Input>,
-        effect_complete_rx: Receiver<Input>,
+        watcher: W, mut config_watcher: Option<DefaultConfigWatcher>, signals: SignalPipe,
+        prober_response_rx: Receiver<Input>, effect_complete_rx: Receiver<Input>,
     ) -> io::Result<Self> {
         let poll = Poll::new()?;
         let waker = WakeHandle::new(poll.registry(), TOKEN_WAKER)?;
@@ -239,11 +236,7 @@ impl<W: FsWatcher> Reactor<W> {
         // lifetime is the call-expression scope, which is fine because `as_raw_fd()` returns a `Copy`
         // `RawFd`.
         let watcher_raw = watcher.as_fd().as_raw_fd();
-        poll.registry().register(
-            &mut SourceFd(&watcher_raw),
-            TOKEN_WATCHER,
-            Interest::READABLE,
-        )?;
+        poll.registry().register(&mut SourceFd(&watcher_raw), TOKEN_WATCHER, Interest::READABLE)?;
 
         if let Some(cw) = config_watcher.as_mut() {
             let cw_raw = cw.as_fd().as_raw_fd();
@@ -255,8 +248,7 @@ impl<W: FsWatcher> Reactor<W> {
         }
 
         let signal_raw = signals.as_fd().as_raw_fd();
-        poll.registry()
-            .register(&mut SourceFd(&signal_raw), TOKEN_SIGNAL, Interest::READABLE)?;
+        poll.registry().register(&mut SourceFd(&signal_raw), TOKEN_SIGNAL, Interest::READABLE)?;
 
         Ok(Self {
             signals,
@@ -340,11 +332,8 @@ impl<W: FsWatcher> Reactor<W> {
         // is `Copy` and the readiness flags are bools, so this is bytewise cheap — the events buffer
         // holds ≤64 entries (`Events::with_capacity(64)` at construction), so the allocation is
         // bounded and small.
-        let ready: Vec<(Token, bool, bool)> = self
-            .events
-            .iter()
-            .map(|ev| (ev.token(), ev.is_readable(), ev.is_writable()))
-            .collect();
+        let ready: Vec<(Token, bool, bool)> =
+            self.events.iter().map(|ev| (ev.token(), ev.is_readable(), ev.is_writable())).collect();
         for (token, readable, writable) in ready {
             match token {
                 TOKEN_WATCHER => self.drain_watcher(&mut out)?,
@@ -394,12 +383,7 @@ impl<W: FsWatcher> Reactor<W> {
         let mut rejected = Vec::new();
         for op in ops {
             match op {
-                WatchOp::Watch {
-                    resource,
-                    path,
-                    kind,
-                    events,
-                } => {
+                WatchOp::Watch { resource, path, kind, events } => {
                     if let Err(failure) = self.watcher.watch(*resource, path, *kind, *events) {
                         rejected.push((*resource, failure));
                     }
@@ -575,9 +559,8 @@ mod tests {
 
         let mut reactor =
             Reactor::new(watcher, None, signals, prober_rx, effect_rx).expect("reactor init");
-        let drained = reactor
-            .poll_and_drain(Some(Duration::ZERO))
-            .expect("non-blocking poll succeeds");
+        let drained =
+            reactor.poll_and_drain(Some(Duration::ZERO)).expect("non-blocking poll succeeds");
         assert_eq!(drained.fs_events, [] as [(ResourceId, FsEvent); 0]);
         assert_eq!(drained.sensor_overflows, [] as [OverflowScope; 0]);
         assert!(drained.probe_responses.is_empty());
@@ -688,9 +671,8 @@ mod tests {
         waker.wake().expect("wake");
 
         let start = Instant::now();
-        let drained = reactor
-            .poll_and_drain(Some(Duration::from_secs(5)))
-            .expect("poll succeeds after wake");
+        let drained =
+            reactor.poll_and_drain(Some(Duration::from_secs(5))).expect("poll succeeds after wake");
         let elapsed = start.elapsed();
         assert!(
             elapsed < Duration::from_millis(500),

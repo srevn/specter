@@ -38,10 +38,8 @@ fn atomic_save_emits_terminal_on_old_inode_and_structure_on_dir() {
     // IN_MOVED_TO` on the directory and a child rename produces `StructureChanged`. The file watch
     // can stay with EMPTY events: the identity floor (`IN_DELETE_SELF | IN_MOVE_SELF | IN_UNMOUNT`)
     // covers the terminal event we assert on for the file's old inode.
-    w.watch(r_dir, tmp.path(), ResourceKind::Dir, ClassSet::STRUCTURE)
-        .expect("watch dir");
-    w.watch(r_file, &target, ResourceKind::File, ClassSet::EMPTY)
-        .expect("watch file");
+    w.watch(r_dir, tmp.path(), ResourceKind::Dir, ClassSet::STRUCTURE).expect("watch dir");
+    w.watch(r_file, &target, ResourceKind::File, ClassSet::EMPTY).expect("watch file");
 
     // Register the watcher's inotify fd with mio; `drain_ready` is non-blocking by trait, so the
     // caller blocks via the reactor.
@@ -76,9 +74,7 @@ fn atomic_save_emits_terminal_on_old_inode_and_structure_on_dir() {
         let file_terminal = out
             .iter()
             .any(|(r, e)| *r == r_file && matches!(e, FsEvent::Removed | FsEvent::Renamed));
-        let dir_changed = out
-            .iter()
-            .any(|(r, e)| *r == r_dir && *e == FsEvent::StructureChanged);
+        let dir_changed = out.iter().any(|(r, e)| *r == r_dir && *e == FsEvent::StructureChanged);
         if file_terminal && dir_changed {
             drop(w);
             return;

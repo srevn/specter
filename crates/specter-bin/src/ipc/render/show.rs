@@ -25,11 +25,7 @@ pub(crate) fn render(out: &mut String, resp: &ShowResponse, sty: Styler) {
     match resp {
         ShowResponse::Active(d) => render_active(out, d, sty),
         ShowResponse::Disabled { name, source } => {
-            let _ = writeln!(
-                out,
-                "{name}: {} ({source})",
-                sty.paint(style::OFF, "disabled")
-            );
+            let _ = writeln!(out, "{name}: {} ({source})", sty.paint(style::OFF, "disabled"));
         }
         ShowResponse::Unknown { name } => {
             let _ = writeln!(
@@ -92,11 +88,7 @@ const LABEL_WIDTH: usize = 16;
 fn render_active(out: &mut String, d: &SubDetails, sty: Styler) {
     out.reserve(512);
     let _ = writeln!(out, "{}", sty.paint(style::LABEL, d.name.as_str()));
-    let _ = writeln!(
-        out,
-        "{}",
-        sty.paint(style::DELIM, Rule(d.name.len().max(40)))
-    );
+    let _ = writeln!(out, "{}", sty.paint(style::DELIM, Rule(d.name.len().max(40))));
     // `state: None` mirrors `anchor: None` / `last fired`'s absent arm: the projection surfaces a
     // missing Profile lookup rather than panicking the daemon. `-` (painted [`style::MISSING`]) is
     // the operator-visible "missing" marker shared with `list`'s `col_state`.
@@ -143,12 +135,7 @@ fn render_active(out: &mut String, d: &SubDetails, sty: Styler) {
                 label_cell(sty, "scope", LABEL_WIDTH),
                 effect_scope_str(*scope),
             );
-            let _ = writeln!(
-                out,
-                "{}{}ms",
-                label_cell(sty, "settle", LABEL_WIDTH),
-                d.settle_ms,
-            );
+            let _ = writeln!(out, "{}{}ms", label_cell(sty, "settle", LABEL_WIDTH), d.settle_ms);
             let _ = writeln!(
                 out,
                 "{}{} (suppressed: {}, absorbed: {})",
@@ -175,18 +162,8 @@ fn render_active(out: &mut String, d: &SubDetails, sty: Styler) {
             minted_live,
             minted_absorbing,
         } => {
-            let _ = writeln!(
-                out,
-                "{}{}ms",
-                label_cell(sty, "settle", LABEL_WIDTH),
-                d.settle_ms,
-            );
-            let _ = writeln!(
-                out,
-                "{}{}",
-                label_cell(sty, "minted live", LABEL_WIDTH),
-                minted_live,
-            );
+            let _ = writeln!(out, "{}{}ms", label_cell(sty, "settle", LABEL_WIDTH), d.settle_ms);
+            let _ = writeln!(out, "{}{}", label_cell(sty, "minted live", LABEL_WIDTH), minted_live);
             let _ = writeln!(
                 out,
                 "{}{}ms",
@@ -210,20 +187,10 @@ fn render_active(out: &mut String, d: &SubDetails, sty: Styler) {
     // Label matches the wire key, so an operator correlating `-o human` with `-o json` reads one
     // vocabulary.
     if let Some(src) = d.minted_by {
-        let _ = writeln!(
-            out,
-            "{}{}",
-            label_cell(sty, "minted_by", LABEL_WIDTH),
-            src.0
-        );
+        let _ = writeln!(out, "{}{}", label_cell(sty, "minted_by", LABEL_WIDTH), src.0);
     }
     let _ = writeln!(out, "{}{}", label_cell(sty, "sub_id", LABEL_WIDTH), d.sub.0);
-    let _ = writeln!(
-        out,
-        "{}{}",
-        label_cell(sty, "profile_id", LABEL_WIDTH),
-        d.profile.0,
-    );
+    let _ = writeln!(out, "{}{}", label_cell(sty, "profile_id", LABEL_WIDTH), d.profile.0);
     out.push('\n');
     // The program header is a section label, painted `LABEL` like the others; the lines below it
     // stay plain — the daemon pre-renders each as an opaque string the renderer does not re-tokenize.
@@ -232,10 +199,7 @@ fn render_active(out: &mut String, d: &SubDetails, sty: Styler) {
         "{}",
         sty.paint(
             style::LABEL,
-            format_args!(
-                "{program_header} ({}):",
-                counted(program.len(), "op", "ops")
-            )
+            format_args!("{program_header} ({}):", counted(program.len(), "op", "ops"))
         ),
     );
     for line in program {
@@ -259,12 +223,8 @@ fn absorbing_line(out: &mut String, sty: Styler, lead: impl Display, window: &Wi
 /// [`style::MISSING`]. Shared by the three optional `Active` fields (`state` / `anchor` / `last
 /// fired`).
 fn missing_line(out: &mut String, sty: Styler, label: &str) {
-    let _ = writeln!(
-        out,
-        "{}{}",
-        label_cell(sty, label, LABEL_WIDTH),
-        sty.paint(style::MISSING, "-"),
-    );
+    let _ =
+        writeln!(out, "{}{}", label_cell(sty, label, LABEL_WIDTH), sty.paint(style::MISSING, "-"));
 }
 
 /// View-local label for a [`WireEffectScope`] — hyphenated form already familiar from the config
@@ -308,11 +268,8 @@ mod tests {
     /// The reaction is a never-fired `Spawn`; mint-arm tests build their payload through
     /// [`mint_details`].
     fn details_full(
-        name: &str,
-        anchor: Option<WirePath>,
-        program: Vec<String>,
-        absorb: Option<WireAbsorbWindow>,
-        absorb_count: u64,
+        name: &str, anchor: Option<WirePath>, program: Vec<String>,
+        absorb: Option<WireAbsorbWindow>, absorb_count: u64,
     ) -> SubDetails {
         SubDetails {
             name: name.to_string(),
@@ -369,10 +326,7 @@ mod tests {
         );
         let mut out = String::new();
         render(&mut out, &ShowResponse::Active(d), Styler::Plain);
-        assert!(
-            out.contains("program (2 ops):"),
-            "program header missing: {out}"
-        );
+        assert!(out.contains("program (2 ops):"), "program header missing: {out}");
         assert!(
             out.contains("\n  [0] exec /bin/build"),
             "first program line not two-space indented: {out}",
@@ -382,8 +336,7 @@ mod tests {
             "second program line not two-space indented: {out}",
         );
         assert!(
-            out.lines()
-                .any(|l| l.starts_with("reaction") && l.ends_with("spawn")),
+            out.lines().any(|l| l.starts_with("reaction") && l.ends_with("spawn")),
             "spawn arm carries the reaction line: {out}",
         );
     }
@@ -400,23 +353,19 @@ mod tests {
         let mut out = String::new();
         render(&mut out, &ShowResponse::Active(d), Styler::Plain);
         assert!(
-            out.lines()
-                .any(|l| l.starts_with("reaction") && l.ends_with("mint")),
+            out.lines().any(|l| l.starts_with("reaction") && l.ends_with("mint")),
             "mint arm carries the reaction line: {out}",
         );
         assert!(
-            out.lines()
-                .any(|l| l.starts_with("minted live") && l.ends_with('3')),
+            out.lines().any(|l| l.starts_with("minted live") && l.ends_with('3')),
             "minted live count renders: {out}",
         );
         assert!(
-            out.lines()
-                .any(|l| l.starts_with("minted settle") && l.ends_with("500ms")),
+            out.lines().any(|l| l.starts_with("minted settle") && l.ends_with("500ms")),
             "template settle knob renders under the minted label: {out}",
         );
         assert!(
-            out.lines()
-                .any(|l| l.starts_with("minted scope") && l.ends_with("subtree-root")),
+            out.lines().any(|l| l.starts_with("minted scope") && l.ends_with("subtree-root")),
             "minted scope renders hyphenated like the spawn arm's: {out}",
         );
         assert!(
@@ -424,8 +373,7 @@ mod tests {
             "program header attributes the minted program: {out}",
         );
         assert!(
-            !out.lines()
-                .any(|l| l.starts_with("fires") || l.starts_with("last fired")),
+            !out.lines().any(|l| l.starts_with("fires") || l.starts_with("last fired")),
             "a template renders no fire lines at all: {out}",
         );
     }
@@ -437,12 +385,7 @@ mod tests {
     fn show_human_mint_renders_its_matches_absorbing() {
         let absorbing = |live: usize, armed: usize| {
             let mut d = mint_details("disc", vec![]);
-            let WireReaction::Mint {
-                minted_live,
-                minted_absorbing,
-                ..
-            } = &mut d.reaction
-            else {
+            let WireReaction::Mint { minted_live, minted_absorbing, .. } = &mut d.reaction else {
                 unreachable!("mint_details builds a mint row")
             };
             *minted_live = live;
@@ -455,9 +398,7 @@ mod tests {
             });
             let mut out = String::new();
             render(&mut out, &ShowResponse::Active(d), Styler::Plain);
-            out.lines()
-                .find(|l| l.starts_with("absorbing"))
-                .map(str::to_owned)
+            out.lines().find(|l| l.starts_with("absorbing")).map(str::to_owned)
         };
         assert_eq!(
             absorbing(3, 2).as_deref(),
@@ -476,14 +417,9 @@ mod tests {
         let d = details("foo", None, vec![]);
         let mut out = String::new();
         render(&mut out, &ShowResponse::Active(d), Styler::Plain);
-        let anchor_line = out
-            .lines()
-            .find(|l| l.starts_with("anchor"))
-            .expect("anchor line present");
-        assert!(
-            anchor_line.contains('-'),
-            "anchor=None must render as '-': {anchor_line:?}",
-        );
+        let anchor_line =
+            out.lines().find(|l| l.starts_with("anchor")).expect("anchor line present");
+        assert!(anchor_line.contains('-'), "anchor=None must render as '-': {anchor_line:?}");
     }
 
     /// `state: None` renders as `-` — the operator-visible signal for the engine-invariant breach
@@ -495,14 +431,8 @@ mod tests {
         d.state = None;
         let mut out = String::new();
         render(&mut out, &ShowResponse::Active(d), Styler::Plain);
-        let state_line = out
-            .lines()
-            .find(|l| l.starts_with("state"))
-            .expect("state line present");
-        assert!(
-            state_line.contains('-'),
-            "state=None must render as '-': {state_line:?}",
-        );
+        let state_line = out.lines().find(|l| l.starts_with("state")).expect("state line present");
+        assert!(state_line.contains('-'), "state=None must render as '-': {state_line:?}");
     }
 
     /// An armed `absorb` window renders an `absorbing   until <T> (mode)` line with the hyphenated
@@ -535,14 +465,8 @@ mod tests {
             absorbing.contains("(consume-on-first)"),
             "absorbing line carries the hyphenated mode label: {absorbing:?}",
         );
-        let fires = out
-            .lines()
-            .find(|l| l.starts_with("fires"))
-            .expect("fires line present");
-        assert!(
-            fires.contains("absorbed: 4"),
-            "fires line carries the fold counter: {fires:?}",
-        );
+        let fires = out.lines().find(|l| l.starts_with("fires")).expect("fires line present");
+        assert!(fires.contains("absorbed: 4"), "fires line carries the fold counter: {fires:?}");
     }
 
     /// `PersistUntil` renders the bare `persist` mode label (the expiry instant already sits on the
@@ -562,8 +486,7 @@ mod tests {
         let mut out = String::new();
         render(&mut out, &ShowResponse::Active(with), Styler::Plain);
         assert!(
-            out.lines()
-                .any(|l| l.starts_with("absorbing") && l.contains("(persist)")),
+            out.lines().any(|l| l.starts_with("absorbing") && l.contains("(persist)")),
             "PersistUntil renders the bare `persist` label: {out}",
         );
 
@@ -579,18 +502,12 @@ mod tests {
     /// `Disabled` arm renders a one-liner naming the source.
     #[test]
     fn show_human_disabled_renders_source() {
-        let r = ShowResponse::Disabled {
-            name: "paused".into(),
-            source: DisabledSource::Runtime,
-        };
+        let r = ShowResponse::Disabled { name: "paused".into(), source: DisabledSource::Runtime };
         let mut out = String::new();
         render(&mut out, &r, Styler::Plain);
         assert_eq!(out, "paused: disabled (runtime)\n");
 
-        let r2 = ShowResponse::Disabled {
-            name: "off".into(),
-            source: DisabledSource::Toml,
-        };
+        let r2 = ShowResponse::Disabled { name: "off".into(), source: DisabledSource::Toml };
         let mut buf = String::new();
         render(&mut buf, &r2, Styler::Plain);
         assert_eq!(buf, "off: disabled (toml)\n");
@@ -600,16 +517,11 @@ mod tests {
     /// TOML) for the operator.
     #[test]
     fn show_human_unknown_renders_helpful_message() {
-        let r = ShowResponse::Unknown {
-            name: "ghost".into(),
-        };
+        let r = ShowResponse::Unknown { name: "ghost".into() };
         let mut out = String::new();
         render(&mut out, &r, Styler::Plain);
         assert!(out.contains("ghost"));
-        assert!(
-            out.contains("unknown"),
-            "Unknown arm carries the 'unknown' keyword: {out}",
-        );
+        assert!(out.contains("unknown"), "Unknown arm carries the 'unknown' keyword: {out}");
         assert!(
             out.contains("not in config"),
             "Unknown arm tells the operator where to look: {out}",
@@ -632,13 +544,9 @@ mod tests {
             "disc",
             vec!["[0] exec /bin/rotate  ok→escape fail→terminate".to_string()],
         ));
-        let disabled_arm = ShowResponse::Disabled {
-            name: "paused".into(),
-            source: DisabledSource::Runtime,
-        };
-        let unknown_arm = ShowResponse::Unknown {
-            name: "ghost".into(),
-        };
+        let disabled_arm =
+            ShowResponse::Disabled { name: "paused".into(), source: DisabledSource::Runtime };
+        let unknown_arm = ShowResponse::Unknown { name: "ghost".into() };
         for resp in [&active_arm, &mint_arm, &disabled_arm, &unknown_arm] {
             let mut active = String::new();
             render(&mut active, resp, Styler::Active);

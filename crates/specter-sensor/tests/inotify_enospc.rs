@@ -73,12 +73,7 @@ fn watch_eventually_returns_pressure_under_low_max_user_watches() {
             Ok(()) => installed += 1,
             Err(failure) => {
                 assert!(
-                    matches!(
-                        failure,
-                        WatchFailure::Pressure {
-                            errno: libc::ENOSPC
-                        }
-                    ),
+                    matches!(failure, WatchFailure::Pressure { errno: libc::ENOSPC }),
                     "expected Pressure(ENOSPC) when exhausting max_user_watches; \
                      got {failure:?} after {installed} successful watches"
                 );

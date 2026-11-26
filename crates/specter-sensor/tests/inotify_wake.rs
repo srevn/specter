@@ -30,10 +30,7 @@ fn drain_ready_returns_promptly_on_empty_queue() {
     let elapsed = start.elapsed();
     assert_eq!(n, 0, "empty queue must produce no events");
     assert!(buf.is_empty());
-    assert!(
-        elapsed < Duration::from_millis(50),
-        "drain_ready must not block; took {elapsed:?}",
-    );
+    assert!(elapsed < Duration::from_millis(50), "drain_ready must not block; took {elapsed:?}");
     drop(w);
 }
 
@@ -46,14 +43,11 @@ fn poll_then_drain_returns_kernel_events() {
     let mut w = InotifyWatcher::new().unwrap();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r = sm.insert(());
-    w.watch(r, tmp.path(), ResourceKind::Dir, ClassSet::STRUCTURE)
-        .expect("watch dir ok");
+    w.watch(r, tmp.path(), ResourceKind::Dir, ClassSet::STRUCTURE).expect("watch dir ok");
 
     let mut poll = Poll::new().unwrap();
     let raw = w.as_fd().as_raw_fd();
-    poll.registry()
-        .register(&mut SourceFd(&raw), Token(0), Interest::READABLE)
-        .expect("register");
+    poll.registry().register(&mut SourceFd(&raw), Token(0), Interest::READABLE).expect("register");
 
     // Trigger a kernel event.
     std::fs::write(tmp.path().join("a"), "x").unwrap();
@@ -78,9 +72,6 @@ fn poll_then_drain_returns_kernel_events() {
             }
         }
     }
-    assert!(
-        saw_event,
-        "registered reactor must observe StructureChanged"
-    );
+    assert!(saw_event, "registered reactor must observe StructureChanged");
     drop(w);
 }

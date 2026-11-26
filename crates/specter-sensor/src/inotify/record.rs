@@ -107,20 +107,13 @@ impl<'a> Iterator for RecordIter<'a> {
         // Strip trailing NUL padding to get the basename. The kernel pads to align the next record;
         // `position` returns `None` only when `len = 0` (no name), in which case `name` is an empty
         // slice.
-        let name_end = name_with_padding
-            .iter()
-            .position(|&b| b == 0)
-            .unwrap_or(name_with_padding.len());
+        let name_end =
+            name_with_padding.iter().position(|&b| b == 0).unwrap_or(name_with_padding.len());
         let name = &name_with_padding[..name_end];
 
         self.remaining = &self.remaining[payload_end..];
 
-        Some(Record {
-            wd,
-            mask,
-            cookie,
-            name,
-        })
+        Some(Record { wd, mask, cookie, name })
     }
 }
 

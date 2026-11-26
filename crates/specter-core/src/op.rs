@@ -35,9 +35,7 @@ impl NonEmptyPathSet {
     /// The first path in lex order. Total: the set is never empty.
     #[must_use]
     pub fn first(&self) -> &Arc<Path> {
-        self.0
-            .first()
-            .expect("a NonEmptyPathSet holds at least one path by construction")
+        self.0.first().expect("a NonEmptyPathSet holds at least one path by construction")
     }
 
     /// Number of paths. Always `>= 1` by construction; pair with [`Self::is_empty`] to satisfy
@@ -299,10 +297,7 @@ pub enum ProbeOutcome {
     /// dispatch; the wire carries no certificate here.
     AnchorOk(LeafEntry),
     /// `Subtree` request answered: the walk's listing of `target_path`, and its certificate.
-    SubtreeProven {
-        snapshot: Arc<DirSnapshot>,
-        authority: ProofAuthority,
-    },
+    SubtreeProven { snapshot: Arc<DirSnapshot>, authority: ProofAuthority },
     /// `Descent` request answered: a structural query gets a structural answer, not a snapshot. Sole
     /// producer is the walker's `probe_descent`. `Some(kind)` — `lstat(prefix/segment)` succeeded;
     /// the awaited segment exists with this kind. `None` — the prefix is a healthy directory but
@@ -473,16 +468,10 @@ mod non_empty_path_set_tests {
     fn new_rejects_empty_and_wraps_non_empty() {
         assert!(NonEmptyPathSet::new(BTreeSet::new()).is_none());
 
-        let populated: BTreeSet<Arc<Path>> = ["/w/b", "/w/a"]
-            .into_iter()
-            .map(|p| Arc::from(Path::new(p)))
-            .collect();
+        let populated: BTreeSet<Arc<Path>> =
+            ["/w/b", "/w/a"].into_iter().map(|p| Arc::from(Path::new(p))).collect();
         let wrapped = NonEmptyPathSet::new(populated).expect("non-empty wraps");
         assert_eq!(wrapped.len(), 2);
-        assert_eq!(
-            wrapped.first().as_ref(),
-            Path::new("/w/a"),
-            "first is the least path"
-        );
+        assert_eq!(wrapped.first().as_ref(), Path::new("/w/a"), "first is the least path");
     }
 }

@@ -152,10 +152,7 @@ impl KqueueConfigWatcher {
         let parent_path = canonical
             .parent()
             .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "config path has no parent directory",
-                )
+                io::Error::new(io::ErrorKind::InvalidInput, "config path has no parent directory")
             })?
             .to_path_buf();
         let config_basename = canonical
@@ -194,13 +191,7 @@ impl KqueueConfigWatcher {
             "kqueue config-watcher initialised"
         );
 
-        Ok(Self {
-            file_fd,
-            parent_fd,
-            parent_path,
-            config_basename,
-            kq,
-        })
+        Ok(Self { file_fd, parent_fd, parent_path, config_basename, kq })
     }
 
     /// Attempt to re-open + re-register the file fd at the cached path. Idempotent: if `file_fd` is
@@ -343,11 +334,7 @@ mod tests {
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             let timeout_ms = i32::try_from(remaining.as_millis()).unwrap_or(i32::MAX);
-            let mut pfd = libc::pollfd {
-                fd: fd.as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            };
+            let mut pfd = libc::pollfd { fd: fd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
             // SAFETY: `pfd` is a stack binding holding one valid `pollfd`; the pointer is live for
             // the duration of the syscall. `1` matches the slice length.
             let n = unsafe { libc::poll(std::ptr::from_mut(&mut pfd), 1, timeout_ms) };
@@ -456,19 +443,13 @@ mod tests {
         // Drain any trailing fragments so subsequent state reflects the watcher's settled post-save
         // view.
         drain_quiet(&mut w);
-        assert!(
-            w.file_fd.is_some(),
-            "post-loop reopen must restore the file fd on the new inode"
-        );
+        assert!(w.file_fd.is_some(), "post-loop reopen must restore the file fd on the new inode");
 
         // In-place edit on the recreated file pulses iff the file fd points at the new inode (rather
         // than the unlinked old one or being null).
         fs::write(&cfg, b"c").expect("in-place edit on recreated file");
         let r = fire_drain(&mut w, watchdog()).expect("drain ok");
-        assert!(
-            r,
-            "in-place edit on recreated file must wake the watcher (Ok(true))"
-        );
+        assert!(r, "in-place edit on recreated file must wake the watcher (Ok(true))");
     }
 
     #[test]
@@ -496,10 +477,7 @@ mod tests {
             fire_drain(&mut w, watchdog()).expect("drain ok"),
             "recreate must wake the watcher (Ok(true))"
         );
-        assert!(
-            w.file_fd.is_some(),
-            "file_fd reattached by try_reopen on parent event"
-        );
+        assert!(w.file_fd.is_some(), "file_fd reattached by try_reopen on parent event");
 
         // Phase 3: post-reopen edit pulses through the new file fd — proves the re-register actually
         // rebound the vnode filter.

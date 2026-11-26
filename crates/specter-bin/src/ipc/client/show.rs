@@ -20,9 +20,7 @@ use crate::ipc::render::show;
 /// `name` is converted into [`CompactString`] at the call site so the wire request reuses the same
 /// string shape the server's [`crate::ipc::protocol::WireRequest::Show`] holds.
 pub(crate) fn run(args: &ShowArgs) -> ExitCode {
-    let req = WireRequest::Show {
-        name: CompactString::from(args.name.as_str()),
-    };
+    let req = WireRequest::Show { name: CompactString::from(args.name.as_str()) };
     let resp = match connect::round_trip(&args.client, "show", &req) {
         Ok(r) => r,
         Err(code) => return code,

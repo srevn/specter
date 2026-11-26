@@ -102,54 +102,36 @@ mod tests {
 
     #[test]
     fn unmount_yields_revoked() {
-        assert_eq!(
-            mask_to_fs_event(IN_UNMOUNT, ResourceKind::File),
-            Some(FsEvent::Revoked),
-        );
+        assert_eq!(mask_to_fs_event(IN_UNMOUNT, ResourceKind::File), Some(FsEvent::Revoked));
     }
 
     #[test]
     fn delete_self_yields_removed() {
-        assert_eq!(
-            mask_to_fs_event(IN_DELETE_SELF, ResourceKind::Dir),
-            Some(FsEvent::Removed),
-        );
+        assert_eq!(mask_to_fs_event(IN_DELETE_SELF, ResourceKind::Dir), Some(FsEvent::Removed));
     }
 
     #[test]
     fn move_self_yields_renamed() {
-        assert_eq!(
-            mask_to_fs_event(IN_MOVE_SELF, ResourceKind::File),
-            Some(FsEvent::Renamed),
-        );
+        assert_eq!(mask_to_fs_event(IN_MOVE_SELF, ResourceKind::File), Some(FsEvent::Renamed));
     }
 
     #[test]
     fn unmount_dominates_co_set_bits() {
         // IN_UNMOUNT > IN_DELETE_SELF > IN_MOVE_SELF > non-terminal.
         let mask = IN_UNMOUNT | IN_DELETE_SELF | IN_MOVE_SELF | IN_MODIFY;
-        assert_eq!(
-            mask_to_fs_event(mask, ResourceKind::File),
-            Some(FsEvent::Revoked),
-        );
+        assert_eq!(mask_to_fs_event(mask, ResourceKind::File), Some(FsEvent::Revoked));
     }
 
     #[test]
     fn delete_self_dominates_move_self() {
         let mask = IN_DELETE_SELF | IN_MOVE_SELF;
-        assert_eq!(
-            mask_to_fs_event(mask, ResourceKind::File),
-            Some(FsEvent::Removed),
-        );
+        assert_eq!(mask_to_fs_event(mask, ResourceKind::File), Some(FsEvent::Removed));
     }
 
     #[test]
     fn delete_self_dominates_modify() {
         let mask = IN_DELETE_SELF | IN_MODIFY;
-        assert_eq!(
-            mask_to_fs_event(mask, ResourceKind::File),
-            Some(FsEvent::Removed),
-        );
+        assert_eq!(mask_to_fs_event(mask, ResourceKind::File), Some(FsEvent::Removed));
     }
 
     // ── Structure events ──────────────────────────────────────────────
@@ -168,10 +150,7 @@ mod tests {
     #[test]
     fn structure_dominates_content_and_metadata() {
         let mask = IN_CREATE | IN_MODIFY | IN_ATTRIB;
-        assert_eq!(
-            mask_to_fs_event(mask, ResourceKind::Dir),
-            Some(FsEvent::StructureChanged),
-        );
+        assert_eq!(mask_to_fs_event(mask, ResourceKind::Dir), Some(FsEvent::StructureChanged));
     }
 
     // ── Content events ────────────────────────────────────────────────
@@ -191,10 +170,7 @@ mod tests {
     fn modify_close_write_on_unknown_yields_content_changed() {
         // Unknown.effective() == File ⇒ ContentChanged.
         for m in [IN_MODIFY, IN_CLOSE_WRITE] {
-            assert_eq!(
-                mask_to_fs_event(m, ResourceKind::Unknown),
-                Some(FsEvent::ContentChanged),
-            );
+            assert_eq!(mask_to_fs_event(m, ResourceKind::Unknown), Some(FsEvent::ContentChanged));
         }
     }
 
@@ -204,10 +180,7 @@ mod tests {
         // delivered one should still land on a sensible signal. Mirrors kqueue's NOTE_WRITE-on-Dir
         // rule.
         for m in [IN_MODIFY, IN_CLOSE_WRITE] {
-            assert_eq!(
-                mask_to_fs_event(m, ResourceKind::Dir),
-                Some(FsEvent::StructureChanged),
-            );
+            assert_eq!(mask_to_fs_event(m, ResourceKind::Dir), Some(FsEvent::StructureChanged));
         }
     }
 
@@ -227,10 +200,7 @@ mod tests {
     #[test]
     fn modify_dominates_attrib_on_file() {
         let mask = IN_MODIFY | IN_ATTRIB;
-        assert_eq!(
-            mask_to_fs_event(mask, ResourceKind::File),
-            Some(FsEvent::ContentChanged),
-        );
+        assert_eq!(mask_to_fs_event(mask, ResourceKind::File), Some(FsEvent::ContentChanged));
     }
 
     // ── IN_IGNORED + empty ────────────────────────────────────────────

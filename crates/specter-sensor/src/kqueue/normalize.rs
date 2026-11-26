@@ -32,9 +32,7 @@ use specter_core::{FsEvent, ResourceKind};
 /// Map a single kevent's flags into at most one `FsEvent`. Returns `None` if the event carries no
 /// actionable signal (e.g., `EV_EOF` alone, or registration acks where no NOTE bit is set).
 pub(super) const fn kevent_to_fs_event(
-    _flags: u16,
-    fflags: u32,
-    kind: ResourceKind,
+    _flags: u16, fflags: u32, kind: ResourceKind,
 ) -> Option<FsEvent> {
     // Terminal flags first — if any fires, that's the only thing the engine cares about.
     if fflags & NOTE_REVOKE != 0 {
@@ -101,28 +99,19 @@ mod tests {
     #[test]
     fn revoke_takes_priority() {
         let fflags = NOTE_REVOKE | NOTE_DELETE | NOTE_WRITE;
-        assert_eq!(
-            kevent_to_fs_event(0, fflags, ResourceKind::File),
-            Some(FsEvent::Revoked)
-        );
+        assert_eq!(kevent_to_fs_event(0, fflags, ResourceKind::File), Some(FsEvent::Revoked));
     }
 
     #[test]
     fn remove_takes_priority_over_rename() {
         let fflags = NOTE_DELETE | NOTE_RENAME;
-        assert_eq!(
-            kevent_to_fs_event(0, fflags, ResourceKind::File),
-            Some(FsEvent::Removed)
-        );
+        assert_eq!(kevent_to_fs_event(0, fflags, ResourceKind::File), Some(FsEvent::Removed));
     }
 
     #[test]
     fn rename_takes_priority_over_write() {
         let fflags = NOTE_RENAME | NOTE_WRITE;
-        assert_eq!(
-            kevent_to_fs_event(0, fflags, ResourceKind::File),
-            Some(FsEvent::Renamed)
-        );
+        assert_eq!(kevent_to_fs_event(0, fflags, ResourceKind::File), Some(FsEvent::Renamed));
     }
 
     #[test]
@@ -130,10 +119,7 @@ mod tests {
         // Terminal flags (REVOKE / DELETE / RENAME) outrank LINK — once the vnode has been reaped,
         // the link-count signal is moot.
         let fflags = NOTE_DELETE | NOTE_LINK;
-        assert_eq!(
-            kevent_to_fs_event(0, fflags, ResourceKind::File),
-            Some(FsEvent::Removed)
-        );
+        assert_eq!(kevent_to_fs_event(0, fflags, ResourceKind::File), Some(FsEvent::Removed));
     }
 
     // ── WRITE / EXTEND ────────────────────────────────────────────────

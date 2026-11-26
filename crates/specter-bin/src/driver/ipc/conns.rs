@@ -187,12 +187,7 @@ impl MissedWindow {
     /// subsequent drops in the same window `saturating_add`-bump `count` and preserve `since`.
     pub(in crate::driver) const fn record_drop(&mut self, at: SystemTime) {
         match self {
-            Self::Closed => {
-                *self = Self::Open {
-                    count: 1,
-                    since: at,
-                }
-            }
+            Self::Closed => *self = Self::Open { count: 1, since: at },
             Self::Open { count, .. } => *count = count.saturating_add(1),
         }
     }
@@ -276,10 +271,7 @@ impl ConnState {
             matches!(self.role, ConnRole::Reqs),
             "transition_to_sub on non-Reqs role — the Subscribe handler gate is bypassed",
         );
-        self.role = ConnRole::Sub {
-            filter,
-            missed: MissedWindow::Closed,
-        };
+        self.role = ConnRole::Sub { filter, missed: MissedWindow::Closed };
     }
 
     /// Set `close_after_flush`. Idempotent — repeated calls are a no-op (a peer triggering close
@@ -317,10 +309,7 @@ impl ConnState {
     /// `at` threads from the caller so every conn observes a byte-identical timestamp for one engine
     /// emission; the marker path uses the open window's captured `since` instead.
     pub(in crate::driver) fn try_dispatch_diag(
-        &mut self,
-        diag_line: &[u8],
-        about: Option<DiagSub>,
-        at: SystemTime,
+        &mut self, diag_line: &[u8], about: Option<DiagSub>, at: SystemTime,
     ) -> DispatchOutcome {
         if self.close_after_flush {
             return DispatchOutcome::Skipped;
@@ -337,18 +326,15 @@ impl ConnState {
         // Pre-build the marker line if a missed window is open. The sum type guarantees `since` is
         // present whenever `count > 0` — no defensive fallback is needed.
         let marker_bytes: Option<Vec<u8>> = match missed {
-            MissedWindow::Open { count, since } => Some(encode_line(&WireDiagnostic::Missed {
-                at: (*since).into(),
-                count: *count,
-            })),
+            MissedWindow::Open { count, since } => {
+                Some(encode_line(&WireDiagnostic::Missed { at: (*since).into(), count: *count }))
+            }
             MissedWindow::Closed => None,
         };
 
         let marker_len = marker_bytes.as_ref().map_or(0, Vec::len);
         let queue_len = self.write_queue.len();
-        let combined = queue_len
-            .saturating_add(marker_len)
-            .saturating_add(diag_line.len());
+        let combined = queue_len.saturating_add(marker_len).saturating_add(diag_line.len());
         if combined > ACCEPT_CAP {
             missed.record_drop(at);
             return DispatchOutcome::Dropped;
@@ -430,11 +416,9 @@ impl std::fmt::Debug for ConnRole {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Reqs => f.write_str("Reqs"),
-            Self::Sub { filter, missed } => f
-                .debug_struct("Sub")
-                .field("filter", filter)
-                .field("missed", missed)
-                .finish(),
+            Self::Sub { filter, missed } => {
+                f.debug_struct("Sub").field("filter", filter).field("missed", missed).finish()
+            }
         }
     }
 }
@@ -533,10 +517,7 @@ mod tests {
         let want = make_sid(0x42);
         conn.transition_to_sub(Some(want));
         let line = b"{\"diag\":\"placeholder\"}\n";
-        let other = DiagSub {
-            sub: make_sid(0x99),
-            minted_by: None,
-        };
+        let other = DiagSub { sub: make_sid(0x99), minted_by: None };
         let outcome = conn.try_dispatch_diag(line, Some(other), SystemTime::UNIX_EPOCH);
         assert_eq!(outcome, DispatchOutcome::Skipped);
         assert!(conn.write_queue.is_empty());
@@ -550,18 +531,12 @@ mod tests {
         let template = make_sid(0x42);
         conn.transition_to_sub(Some(template));
         let line: &[u8] = b"{\"diag\":\"placeholder\"}\n";
-        let minted = DiagSub {
-            sub: make_sid(0x43),
-            minted_by: Some(template),
-        };
+        let minted = DiagSub { sub: make_sid(0x43), minted_by: Some(template) };
         assert_eq!(
             conn.try_dispatch_diag(line, Some(minted), SystemTime::UNIX_EPOCH),
             DispatchOutcome::Accepted,
         );
-        let foreign = DiagSub {
-            sub: make_sid(0x44),
-            minted_by: Some(make_sid(0x99)),
-        };
+        let foreign = DiagSub { sub: make_sid(0x44), minted_by: Some(make_sid(0x99)) };
         assert_eq!(
             conn.try_dispatch_diag(line, Some(foreign), SystemTime::UNIX_EPOCH),
             DispatchOutcome::Skipped,
@@ -590,8 +565,7 @@ mod tests {
         let (mut conn, _peer) = fresh_conn();
         conn.transition_to_sub(None);
         // Pre-fill near the soft cap so a small diag overflows.
-        conn.write_queue
-            .extend(std::iter::repeat_n(b'x', ACCEPT_CAP - 10));
+        conn.write_queue.extend(std::iter::repeat_n(b'x', ACCEPT_CAP - 10));
         let queue_len_before = conn.write_queue.len();
         let line: &[u8] = b"{\"diag\":\"too_big_to_fit_in_remaining_capacity\"}\n";
         assert!(line.len() > 10, "test precondition");
@@ -601,13 +575,7 @@ mod tests {
         assert_eq!(conn.write_queue.len(), queue_len_before, "queue untouched");
         match &conn.role {
             ConnRole::Sub { missed, .. } => {
-                assert_eq!(
-                    *missed,
-                    MissedWindow::Open {
-                        count: 1,
-                        since: SystemTime::UNIX_EPOCH,
-                    },
-                );
+                assert_eq!(*missed, MissedWindow::Open { count: 1, since: SystemTime::UNIX_EPOCH });
             }
             ConnRole::Reqs => panic!("expected Sub role"),
         }
@@ -620,33 +588,20 @@ mod tests {
     fn try_dispatch_diag_preserves_first_dropped_at_across_subsequent_drops() {
         let (mut conn, _peer) = fresh_conn();
         conn.transition_to_sub(None);
-        conn.write_queue
-            .extend(std::iter::repeat_n(b'x', ACCEPT_CAP - 5));
+        conn.write_queue.extend(std::iter::repeat_n(b'x', ACCEPT_CAP - 5));
         let line: &[u8] = b"{\"diag\":\"too_big_to_fit\"}\n";
 
         let at1 = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
         let at2 = SystemTime::UNIX_EPOCH + Duration::from_secs(200);
         let at3 = SystemTime::UNIX_EPOCH + Duration::from_secs(301);
-        assert_eq!(
-            conn.try_dispatch_diag(line, None, at1),
-            DispatchOutcome::Dropped
-        );
-        assert_eq!(
-            conn.try_dispatch_diag(line, None, at2),
-            DispatchOutcome::Dropped
-        );
-        assert_eq!(
-            conn.try_dispatch_diag(line, None, at3),
-            DispatchOutcome::Dropped
-        );
+        assert_eq!(conn.try_dispatch_diag(line, None, at1), DispatchOutcome::Dropped);
+        assert_eq!(conn.try_dispatch_diag(line, None, at2), DispatchOutcome::Dropped);
+        assert_eq!(conn.try_dispatch_diag(line, None, at3), DispatchOutcome::Dropped);
         match &conn.role {
             ConnRole::Sub { missed, .. } => {
                 assert_eq!(
                     *missed,
-                    MissedWindow::Open {
-                        count: 3,
-                        since: at1,
-                    },
+                    MissedWindow::Open { count: 3, since: at1 },
                     "open window pins count to 3 and since to the 0→1 transition's at",
                 );
             }
@@ -662,14 +617,10 @@ mod tests {
         let (mut conn, _peer) = fresh_conn();
         conn.transition_to_sub(None);
         // Drive one drop to open a missed window.
-        conn.write_queue
-            .extend(std::iter::repeat_n(b'x', ACCEPT_CAP - 5));
+        conn.write_queue.extend(std::iter::repeat_n(b'x', ACCEPT_CAP - 5));
         let big: &[u8] = b"{\"diag\":\"too_big_to_fit\"}\n";
         let at_drop = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
-        assert_eq!(
-            conn.try_dispatch_diag(big, None, at_drop),
-            DispatchOutcome::Dropped
-        );
+        assert_eq!(conn.try_dispatch_diag(big, None, at_drop), DispatchOutcome::Dropped);
 
         // Drain to simulate the wire making room.
         conn.write_queue.clear();
@@ -677,15 +628,9 @@ mod tests {
         // Dispatch a small diag — it fits, AND the marker must precede it.
         let small: &[u8] = b"{\"diag\":\"placeholder\"}\n";
         let at_flush = SystemTime::UNIX_EPOCH + Duration::from_secs(200);
-        assert_eq!(
-            conn.try_dispatch_diag(small, None, at_flush),
-            DispatchOutcome::Accepted
-        );
+        assert_eq!(conn.try_dispatch_diag(small, None, at_flush), DispatchOutcome::Accepted);
         let queued: Vec<u8> = conn.write_queue.iter().copied().collect();
-        let lines: Vec<&[u8]> = queued
-            .split(|&b| b == b'\n')
-            .filter(|l| !l.is_empty())
-            .collect();
+        let lines: Vec<&[u8]> = queued.split(|&b| b == b'\n').filter(|l| !l.is_empty()).collect();
         assert_eq!(lines.len(), 2, "marker then diag");
         let first_v: serde_json::Value =
             serde_json::from_slice(lines[0]).expect("marker is valid JSON");
@@ -702,29 +647,20 @@ mod tests {
     fn try_dispatch_diag_marker_uses_first_dropped_at_not_flush_at() {
         let (mut conn, _peer) = fresh_conn();
         conn.transition_to_sub(None);
-        conn.write_queue
-            .extend(std::iter::repeat_n(b'x', ACCEPT_CAP - 5));
+        conn.write_queue.extend(std::iter::repeat_n(b'x', ACCEPT_CAP - 5));
         let big: &[u8] = b"{\"diag\":\"too_big_to_fit\"}\n";
         let at_drop = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
-        assert_eq!(
-            conn.try_dispatch_diag(big, None, at_drop),
-            DispatchOutcome::Dropped,
-        );
+        assert_eq!(conn.try_dispatch_diag(big, None, at_drop), DispatchOutcome::Dropped);
 
         conn.write_queue.clear();
 
         let small: &[u8] = b"{\"diag\":\"placeholder\"}\n";
         let at_flush = SystemTime::UNIX_EPOCH + Duration::from_secs(500);
-        assert_eq!(
-            conn.try_dispatch_diag(small, None, at_flush),
-            DispatchOutcome::Accepted,
-        );
+        assert_eq!(conn.try_dispatch_diag(small, None, at_flush), DispatchOutcome::Accepted);
 
         let queued: Vec<u8> = conn.write_queue.iter().copied().collect();
-        let marker_line: &[u8] = queued
-            .split(|&b| b == b'\n')
-            .find(|l| !l.is_empty())
-            .expect("marker first");
+        let marker_line: &[u8] =
+            queued.split(|&b| b == b'\n').find(|l| !l.is_empty()).expect("marker first");
         let marker_v: serde_json::Value = serde_json::from_slice(marker_line).expect("marker JSON");
         // `at_drop` is epoch + 100 s; the flush instant (epoch + 500 s) would read `00:08:20`.
         assert_eq!(
@@ -742,24 +678,17 @@ mod tests {
         let (mut conn, _peer) = fresh_conn();
         conn.transition_to_sub(None);
         // Drive one drop to open the marker window.
-        conn.write_queue
-            .extend(std::iter::repeat_n(b'x', ACCEPT_CAP - 5));
+        conn.write_queue.extend(std::iter::repeat_n(b'x', ACCEPT_CAP - 5));
         let big: &[u8] = b"{\"diag\":\"too_big_to_fit\"}\n";
         let at_drop = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
-        assert_eq!(
-            conn.try_dispatch_diag(big, None, at_drop),
-            DispatchOutcome::Dropped,
-        );
+        assert_eq!(conn.try_dispatch_diag(big, None, at_drop), DispatchOutcome::Dropped);
 
         // Keep the queue near the cap. The marker bytes + a fresh diag both have to fit — even with
         // the marker alone fitting, the combined size overflows.
         let queue_len_before = conn.write_queue.len();
         let line: &[u8] = b"{\"diag\":\"still_too_big\"}\n";
         let at2 = SystemTime::UNIX_EPOCH + Duration::from_secs(200);
-        assert_eq!(
-            conn.try_dispatch_diag(line, None, at2),
-            DispatchOutcome::Dropped
-        );
+        assert_eq!(conn.try_dispatch_diag(line, None, at2), DispatchOutcome::Dropped);
         assert_eq!(
             conn.write_queue.len(),
             queue_len_before,
@@ -769,10 +698,7 @@ mod tests {
             ConnRole::Sub { missed, .. } => {
                 assert_eq!(
                     *missed,
-                    MissedWindow::Open {
-                        count: 2,
-                        since: at_drop,
-                    },
+                    MissedWindow::Open { count: 2, since: at_drop },
                     "open window count re-accumulates on combined-overflow; \
                      since sticks to the original 0→1 capture",
                 );
@@ -787,23 +713,16 @@ mod tests {
     fn try_dispatch_diag_resets_first_dropped_at_on_flush() {
         let (mut conn, _peer) = fresh_conn();
         conn.transition_to_sub(None);
-        conn.write_queue
-            .extend(std::iter::repeat_n(b'x', ACCEPT_CAP - 5));
+        conn.write_queue.extend(std::iter::repeat_n(b'x', ACCEPT_CAP - 5));
         let big: &[u8] = b"{\"diag\":\"too_big_to_fit\"}\n";
         let at_drop = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
-        assert_eq!(
-            conn.try_dispatch_diag(big, None, at_drop),
-            DispatchOutcome::Dropped,
-        );
+        assert_eq!(conn.try_dispatch_diag(big, None, at_drop), DispatchOutcome::Dropped);
 
         conn.write_queue.clear();
 
         let small: &[u8] = b"{\"diag\":\"placeholder\"}\n";
         let at_flush = SystemTime::UNIX_EPOCH + Duration::from_secs(200);
-        assert_eq!(
-            conn.try_dispatch_diag(small, None, at_flush),
-            DispatchOutcome::Accepted
-        );
+        assert_eq!(conn.try_dispatch_diag(small, None, at_flush), DispatchOutcome::Accepted);
         match &conn.role {
             ConnRole::Sub { missed, .. } => {
                 assert_eq!(
@@ -837,10 +756,7 @@ mod tests {
         let huge = vec![b'x'; ACCEPT_CAP + 1];
         let outcome = conn.push_response(&huge);
         assert_eq!(outcome, PushOutcome::Refused);
-        assert!(
-            conn.write_queue.is_empty(),
-            "refused bytes never reach the queue",
-        );
+        assert!(conn.write_queue.is_empty(), "refused bytes never reach the queue");
         assert!(conn.close_after_flush, "arm fires on overflow");
     }
 
@@ -869,8 +785,7 @@ mod tests {
         let (mut conn, _peer) = fresh_conn();
         // Pre-fill at exactly the soft cap — push_err_in_reserve must still succeed because the
         // reserve sits above ACCEPT_CAP.
-        conn.write_queue
-            .extend(std::iter::repeat_n(b'x', ACCEPT_CAP));
+        conn.write_queue.extend(std::iter::repeat_n(b'x', ACCEPT_CAP));
         let err_line: &[u8] = b"{\"kind\":\"err\",\"code\":\"response_too_big\",\"error\":\"x\"}\n";
         assert!(
             err_line.len() <= RESPONSE_TOO_BIG_RESERVE,

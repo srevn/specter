@@ -125,14 +125,10 @@ mod tests {
             kind: ResourceKind::Unknown,
             events: ClassSet::EMPTY,
         });
-        step_one.push_probe_op(ProbeOp::Cancel {
-            owner: crate::ProfileId::default(),
-        });
+        step_one.push_probe_op(ProbeOp::Cancel { owner: crate::ProfileId::default() });
 
         let mut step_two = StepOutput::default();
-        step_two
-            .watch_ops
-            .push(WatchOp::Unwatch { resource: ids[1] });
+        step_two.watch_ops.push(WatchOp::Unwatch { resource: ids[1] });
 
         sensor.observe(&step_one);
         sensor.observe(&step_two);
@@ -152,8 +148,7 @@ mod tests {
         let ids = fresh_resource_ids(1);
 
         let mut out = StepOutput::default();
-        out.diagnostics
-            .push(Diagnostic::EventOnUnwatchedResource { resource: ids[0] });
+        out.diagnostics.push(Diagnostic::EventOnUnwatchedResource { resource: ids[0] });
 
         let mut sensor = MockSensor::default();
         sensor.observe(&out);
@@ -185,9 +180,7 @@ mod tests {
 
         // `Unwatch` is not a `Watch` — must still discriminate.
         let mut other = StepOutput::default();
-        other.watch_ops.push(WatchOp::Unwatch {
-            resource: unwatched,
-        });
+        other.watch_ops.push(WatchOp::Unwatch { resource: unwatched });
         sensor.observe(&other);
         assert!(!sensor.watched(unwatched));
     }

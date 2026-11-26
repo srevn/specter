@@ -224,13 +224,7 @@ impl StepOutput {
     /// Zero-copy — every stream moves out.
     #[must_use]
     pub fn into_parts(self) -> StepOutputParts {
-        (
-            self.watch_ops,
-            self.probe_ops.0,
-            self.effects.0,
-            self.cancel_effects.0,
-            self.diagnostics,
-        )
+        (self.watch_ops, self.probe_ops.0, self.effects.0, self.cancel_effects.0, self.diagnostics)
     }
 
     /// Seal the order-determined streams: `watch_ops` by [`WatchOp::resource`], `effects` by
@@ -421,27 +415,13 @@ mod tests {
         let r_hi = rid(9);
         // Push out of order: (sub_b, hi), (sub_a, hi), (sub_a, lo).
         let mut out = StepOutput::default();
+        out.push_effect(effect(DedupKey::Subtree { sub: sub_b, profile: prof }, r_hi));
         out.push_effect(effect(
-            DedupKey::Subtree {
-                sub: sub_b,
-                profile: prof,
-            },
+            DedupKey::PerFile { sub: sub_a, profile: prof, resource: r_hi },
             r_hi,
         ));
         out.push_effect(effect(
-            DedupKey::PerFile {
-                sub: sub_a,
-                profile: prof,
-                resource: r_hi,
-            },
-            r_hi,
-        ));
-        out.push_effect(effect(
-            DedupKey::PerFile {
-                sub: sub_a,
-                profile: prof,
-                resource: r_lo,
-            },
+            DedupKey::PerFile { sub: sub_a, profile: prof, resource: r_lo },
             r_lo,
         ));
 

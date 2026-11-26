@@ -55,14 +55,7 @@ pub const DEFAULT_EVENTS: ClassSet = ClassSet::DEFAULT_SUBTREE_ROOT;
 pub fn drain_due(e: &mut Engine, at: Instant) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
     while let Some(en) = e.pop_expired(at) {
-        let out = e.step(
-            Input::TimerExpired {
-                profile: en.profile,
-                kind: en.kind,
-                id: en.id,
-            },
-            at,
-        );
+        let out = e.step(Input::TimerExpired { profile: en.profile, kind: en.kind, id: en.id }, at);
         diagnostics.extend(out.diagnostics);
     }
     diagnostics
@@ -139,9 +132,7 @@ pub fn is_draining(e: &Engine, pid: ProfileId) -> bool {
 /// Step `req` in, returning the Sub it attached, that Sub's Profile, and the attach `StepOutput`.
 #[must_use]
 pub fn attach_request(
-    e: &mut Engine,
-    req: SubAttachRequest,
-    now: Instant,
+    e: &mut Engine, req: SubAttachRequest, now: Instant,
 ) -> (SubId, ProfileId, StepOutput) {
     let out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&out).expect("the request attached");
@@ -157,13 +148,8 @@ pub fn attach_request(
 /// — the multi-Profile fork tests rely on that.
 #[must_use]
 pub fn attach_returning(
-    e: &mut Engine,
-    name: &str,
-    anchor: SubAttachAnchor,
-    scan: SubtreeScan,
-    mask: ClassSet,
-    max_settle: Duration,
-    now: Instant,
+    e: &mut Engine, name: &str, anchor: SubAttachAnchor, scan: SubtreeScan, mask: ClassSet,
+    max_settle: Duration, now: Instant,
 ) -> (SubId, ProfileId, StepOutput) {
     let req = SubAttachRequest::for_anchor(
         name.into(),
@@ -182,13 +168,8 @@ pub fn attach_returning(
 /// ProfileId)`.
 #[must_use]
 pub fn attach(
-    e: &mut Engine,
-    name: &str,
-    anchor: SubAttachAnchor,
-    scan: SubtreeScan,
-    mask: ClassSet,
-    max_settle: Duration,
-    now: Instant,
+    e: &mut Engine, name: &str, anchor: SubAttachAnchor, scan: SubtreeScan, mask: ClassSet,
+    max_settle: Duration, now: Instant,
 ) -> (SubId, ProfileId) {
     let (sid, pid, _) = attach_returning(e, name, anchor, scan, mask, max_settle, now);
     (sid, pid)
@@ -198,14 +179,8 @@ pub fn attach(
 /// seed_done_instant)` — rebase later timelines strictly past `seed_done`.
 #[must_use]
 pub fn attach_seeded(
-    e: &mut Engine,
-    name: &str,
-    anchor: SubAttachAnchor,
-    scan: SubtreeScan,
-    mask: ClassSet,
-    max_settle: Duration,
-    snap: &Arc<DirSnapshot>,
-    start: Instant,
+    e: &mut Engine, name: &str, anchor: SubAttachAnchor, scan: SubtreeScan, mask: ClassSet,
+    max_settle: Duration, snap: &Arc<DirSnapshot>, start: Instant,
 ) -> (SubId, ProfileId, Instant) {
     let (sid, pid, _) = attach_returning(e, name, anchor, scan, mask, max_settle, start);
     let done = seed_to_idle(e, pid, snap, start);
@@ -225,9 +200,7 @@ pub fn attach_seeded(
 /// user-reported bug) — every Layer-C inventory test starts here.
 #[must_use]
 pub fn attach_structure_only(
-    e: &mut Engine,
-    anchor: ResourceId,
-    now: Instant,
+    e: &mut Engine, anchor: ResourceId, now: Instant,
 ) -> (SubId, ProfileId) {
     let (sid, pid) = attach(
         e,
@@ -273,10 +246,7 @@ pub fn attach_structure_only(
 /// chose the sample sequence, so a non-fire is a test setup bug.
 #[must_use]
 pub fn drive_standard_n2_until_stable(
-    e: &mut Engine,
-    pid: ProfileId,
-    start_event: ResourceId,
-    responses: &[Arc<DirSnapshot>],
+    e: &mut Engine, pid: ProfileId, start_event: ResourceId, responses: &[Arc<DirSnapshot>],
     now: Instant,
 ) -> StepOutput {
     assert!(
@@ -284,21 +254,13 @@ pub fn drive_standard_n2_until_stable(
         "drive_standard_n2_until_stable needs at least one verify-sample snapshot",
     );
 
-    let _ = e.step(
-        Input::FsEvent {
-            resource: start_event,
-            event: FsEvent::StructureChanged,
-        },
-        now,
-    );
+    let _ = e.step(Input::FsEvent { resource: start_event, event: FsEvent::StructureChanged }, now);
 
     let mut at = now;
     for snap in responses {
         at += SETTLE * 2;
         drain_due(e, at);
-        let corr = e
-            .pending_probe_for(pid)
-            .expect("Verifying probe in flight after settle expiry");
+        let corr = e.pending_probe_for(pid).expect("Verifying probe in flight after settle expiry");
         let out = e.step(
             Input::ProbeResponse(ProbeResponse {
                 owner: pid,
@@ -325,9 +287,7 @@ pub fn drive_standard_n2_until_stable(
 /// stay symmetric with helpers that do advance time.
 #[must_use]
 pub fn assert_seed_verifying(
-    e: &mut Engine,
-    pid: ProfileId,
-    at: Instant,
+    e: &mut Engine, pid: ProfileId, at: Instant,
 ) -> (ProbeCorrelation, Instant) {
     match e.profiles().get(pid).unwrap().state() {
         ProfileState::Active(ActiveBurst::PreFire(pre), _) => assert!(
@@ -358,21 +318,14 @@ pub fn assert_seed_verifying(
 /// the step instant so the caller rebases later bursts past it. A fresh Seed emits no Effects.
 #[must_use]
 pub fn seed_to_idle_with(
-    e: &mut Engine,
-    pid: ProfileId,
-    make_outcome: impl Fn() -> ProbeOutcome,
-    start: Instant,
+    e: &mut Engine, pid: ProfileId, make_outcome: impl Fn() -> ProbeOutcome, start: Instant,
 ) -> Instant {
     let correlation = e
         .pending_probe_for(pid)
         .expect("cold-arm Seed Verifying probe in flight at burst construction");
     let at = start + SETTLE;
     let out = e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: pid,
-            correlation,
-            outcome: make_outcome(),
-        }),
+        Input::ProbeResponse(ProbeResponse { owner: pid, correlation, outcome: make_outcome() }),
         at,
     );
     assert!(
@@ -389,10 +342,7 @@ pub fn seed_to_idle_with(
 /// [`seed_to_idle_with`] answering every probe with `proven(snap)` — the Dir-anchor common case.
 #[must_use]
 pub fn seed_to_idle(
-    e: &mut Engine,
-    pid: ProfileId,
-    snap: &Arc<DirSnapshot>,
-    start: Instant,
+    e: &mut Engine, pid: ProfileId, snap: &Arc<DirSnapshot>, start: Instant,
 ) -> Instant {
     seed_to_idle_with(e, pid, || proven(Arc::clone(snap)), start)
 }
@@ -426,14 +376,9 @@ pub struct Verify {
 /// [`verify`] again for the second sample.
 #[must_use]
 pub fn verify_with(
-    e: &mut Engine,
-    pid: ProfileId,
-    make_outcome: impl Fn() -> ProbeOutcome,
-    start: Instant,
+    e: &mut Engine, pid: ProfileId, make_outcome: impl Fn() -> ProbeOutcome, start: Instant,
 ) -> Verify {
-    let corr = e
-        .pending_probe_for(pid)
-        .expect("Verifying probe in flight at verify_with entry");
+    let corr = e.pending_probe_for(pid).expect("Verifying probe in flight at verify_with entry");
     let at = start + SETTLE;
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
@@ -472,10 +417,7 @@ pub struct RebasePostFire {
 
 #[must_use]
 pub fn rebase_post_fire_to_idle(
-    e: &mut Engine,
-    pid: ProfileId,
-    snap: &Arc<DirSnapshot>,
-    at: Instant,
+    e: &mut Engine, pid: ProfileId, snap: &Arc<DirSnapshot>, at: Instant,
 ) -> RebasePostFire {
     let corr = e
         .pending_probe_for(pid)
@@ -488,10 +430,7 @@ pub fn rebase_post_fire_to_idle(
         }),
         at,
     );
-    RebasePostFire {
-        finish,
-        finish_at: at,
-    }
+    RebasePostFire { finish, finish_at: at }
 }
 
 /// Respond to `owner`'s single in-flight descent probe with `SegmentObserved { kind }`.
@@ -505,18 +444,11 @@ pub fn rebase_post_fire_to_idle(
 /// primitive beside [`assert_seed_verifying`], composing neither.
 #[must_use]
 pub fn descent_advance(
-    e: &mut Engine,
-    owner: ProfileId,
-    kind: Option<EntryKind>,
-    at: Instant,
+    e: &mut Engine, owner: ProfileId, kind: Option<EntryKind>, at: Instant,
 ) -> StepOutput {
     let correlation = e.pending_probe_for(owner).expect("descent probe in flight");
     e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner,
-            correlation,
-            outcome: segment_observed(kind),
-        }),
+        Input::ProbeResponse(ProbeResponse { owner, correlation, outcome: segment_observed(kind) }),
         at,
     )
 }
@@ -549,20 +481,10 @@ pub fn respond_anchor_file(e: &mut Engine, pid: ProfileId, inode: u64, at: Insta
 /// baseline's so B1 dedup never suppresses the fire.
 #[must_use]
 pub fn fire_standard_once(
-    e: &mut Engine,
-    sid: SubId,
-    anchor: ResourceId,
-    inode: u64,
-    now: Instant,
+    e: &mut Engine, sid: SubId, anchor: ResourceId, inode: u64, now: Instant,
 ) -> Instant {
     let pid = pid_of(e, sid);
-    let _ = e.step(
-        Input::FsEvent {
-            resource: anchor,
-            event: FsEvent::ContentChanged,
-        },
-        now,
-    );
+    let _ = e.step(Input::FsEvent { resource: anchor, event: FsEvent::ContentChanged }, now);
     let at = now + SETTLE * 2;
     drain_due(e, at);
     let out = respond_anchor_file(e, pid, inode, at);
@@ -592,17 +514,10 @@ pub fn fire_standard_once(
 /// probe is already in flight, no settle expiry between.
 #[must_use]
 pub fn complete_effect_to_rebasing(
-    e: &mut Engine,
-    sid: SubId,
-    key: DedupKey,
-    at: Instant,
+    e: &mut Engine, sid: SubId, key: DedupKey, at: Instant,
 ) -> StepOutput {
     e.step(
-        Input::EffectComplete(EffectCompletion {
-            sub: sid,
-            key,
-            outcome: EffectOutcome::Ok,
-        }),
+        Input::EffectComplete(EffectCompletion { sub: sid, key, outcome: EffectOutcome::Ok }),
         at,
     )
 }
@@ -628,10 +543,7 @@ pub fn pre_place_dir(e: &mut Engine, segments: &[&str]) -> ResourceId {
     let mut comps = Vec::with_capacity(segments.len() + 1);
     comps.push(FS_ROOT_SEGMENT);
     comps.extend_from_slice(segments);
-    let leaf = e
-        .tree_mut()
-        .ensure_path(&comps, ResourceRole::User)
-        .expect("non-empty fixture");
+    let leaf = e.tree_mut().ensure_path(&comps, ResourceRole::User).expect("non-empty fixture");
     let mut cur = None;
     for comp in &comps {
         let id = e.tree().lookup(cur, comp);
@@ -648,10 +560,7 @@ pub fn pre_place_dir(e: &mut Engine, segments: &[&str]) -> ResourceId {
 /// `Input::WatchOpRejected` with the fixture failure (`Pressure { errno: 24 }`).
 #[must_use]
 pub const fn watch_op_rejected_input(resource: ResourceId) -> Input {
-    Input::WatchOpRejected {
-        resource,
-        failure: WatchFailure::Pressure { errno: 24 },
-    }
+    Input::WatchOpRejected { resource, failure: WatchFailure::Pressure { errno: 24 } }
 }
 
 /// The fixtures' dynamic watch over `pattern`.
@@ -672,10 +581,7 @@ pub fn discovery_req(name: &str, pattern: &str) -> SubAttachRequest {
         events: NO_EVENTS,
         params: SubParams {
             settle: SETTLE,
-            spawn: SpawnSpec::new(
-                specter_core::testkit::empty_program(),
-                EffectScope::SubtreeRoot,
-            ),
+            spawn: SpawnSpec::new(specter_core::testkit::empty_program(), EffectScope::SubtreeRoot),
         },
     }
 }
@@ -687,10 +593,7 @@ pub fn discovery_req(name: &str, pattern: &str) -> SubAttachRequest {
 /// resolves at once, any other descends.
 #[must_use]
 pub fn attach_discovery_returning(
-    e: &mut Engine,
-    name: &str,
-    pattern: &str,
-    now: Instant,
+    e: &mut Engine, name: &str, pattern: &str, now: Instant,
 ) -> (SubId, ProfileId, StepOutput) {
     attach_request(e, discovery_req(name, pattern), now)
 }
@@ -698,10 +601,7 @@ pub fn attach_discovery_returning(
 /// [`attach_discovery_returning`] discarding the attach `StepOutput` — the common case.
 #[must_use]
 pub fn attach_discovery(
-    e: &mut Engine,
-    name: &str,
-    pattern: &str,
-    now: Instant,
+    e: &mut Engine, name: &str, pattern: &str, now: Instant,
 ) -> (SubId, ProfileId) {
     let (sid, pid, _) = attach_discovery_returning(e, name, pattern, now);
     (sid, pid)

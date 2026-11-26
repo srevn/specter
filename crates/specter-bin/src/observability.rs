@@ -106,11 +106,7 @@ impl ObservabilityHandle {
     #[cfg(test)]
     #[must_use]
     pub(crate) const fn noop() -> Self {
-        Self {
-            level_reload: None,
-            file_reopen: None,
-            file_path: None,
-        }
+        Self { level_reload: None, file_reopen: None, file_path: None }
     }
 }
 
@@ -209,9 +205,7 @@ pub(crate) fn init(cfg: &LogConfig) -> io::Result<(ObservabilityHandle, Observab
                     file_reopen: Some(reopen),
                     file_path: Some(path.clone()),
                 },
-                ObservabilityGuard {
-                    file_guard: Some(guard),
-                },
+                ObservabilityGuard { file_guard: Some(guard) },
             ))
         }
     }
@@ -251,15 +245,11 @@ struct ReopenableFile {
 impl ReopenableFile {
     fn open(path: &Path) -> io::Result<Self> {
         let file = OpenOptions::new().create(true).append(true).open(path)?;
-        Ok(Self {
-            inner: Arc::new(Mutex::new(file)),
-        })
+        Ok(Self { inner: Arc::new(Mutex::new(file)) })
     }
 
     fn handle(&self) -> ReopenHandle {
-        ReopenHandle {
-            inner: Arc::clone(&self.inner),
-        }
+        ReopenHandle { inner: Arc::clone(&self.inner) }
     }
 }
 
@@ -268,17 +258,13 @@ impl Write for ReopenableFile {
         // A poisoned mutex means a previous holder panicked mid-write; we can't claim anything about
         // the underlying File state, so we surface the error and let `tracing-appender`'s NonBlocking
         // writer count it as a drop.
-        let mut guard = self
-            .inner
-            .lock()
-            .map_err(|_| io::Error::other("reopenable-file mutex poisoned"))?;
+        let mut guard =
+            self.inner.lock().map_err(|_| io::Error::other("reopenable-file mutex poisoned"))?;
         guard.write(buf)
     }
     fn flush(&mut self) -> io::Result<()> {
-        let mut guard = self
-            .inner
-            .lock()
-            .map_err(|_| io::Error::other("reopenable-file mutex poisoned"))?;
+        let mut guard =
+            self.inner.lock().map_err(|_| io::Error::other("reopenable-file mutex poisoned"))?;
         guard.flush()
     }
 }

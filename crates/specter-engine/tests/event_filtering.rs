@@ -85,9 +85,9 @@ fn it_ef_1_default_subtree_root_emits_per_file_watch_on_leaves() {
 
     // The seed response emits a Watch op for the per-file FD.
     let saw_per_file_watch = seed_out.watch_ops.iter().any(|op| match op {
-        WatchOp::Watch {
-            resource, events, ..
-        } => *resource == file_id && *events == ClassSet::DEFAULT_SUBTREE_ROOT,
+        WatchOp::Watch { resource, events, .. } => {
+            *resource == file_id && *events == ClassSet::DEFAULT_SUBTREE_ROOT
+        }
         WatchOp::Unwatch { .. } => false,
     });
     assert!(
@@ -137,10 +137,7 @@ fn it_ef_1_structure_only_subtree_does_not_emit_per_file_watch() {
         WatchOp::Watch { resource, .. } => *resource == file_id,
         WatchOp::Unwatch { .. } => false,
     });
-    assert!(
-        !saw_per_file_watch,
-        "STRUCTURE-only Profile must not emit per-file Watch ops",
-    );
+    assert!(!saw_per_file_watch, "STRUCTURE-only Profile must not emit per-file Watch ops");
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -176,18 +173,12 @@ fn it_ef_2_two_subs_different_masks_fork_separate_profiles() {
         Instant::now(),
     );
 
-    assert_ne!(
-        pid_a, pid_b,
-        "Subs with distinct events forks fork into distinct Profiles",
-    );
+    assert_ne!(pid_a, pid_b, "Subs with distinct events forks fork into distinct Profiles");
 
     // Both Profiles record their own mask; the per-resource union contains both bits because both
     // contribute to the anchor.
-    assert_eq!(e.profiles().get(pid_a).unwrap().events(), ClassSet::CONTENT,);
-    assert_eq!(
-        e.profiles().get(pid_b).unwrap().events(),
-        ClassSet::METADATA,
-    );
+    assert_eq!(e.profiles().get(pid_a).unwrap().events(), ClassSet::CONTENT);
+    assert_eq!(e.profiles().get(pid_b).unwrap().events(), ClassSet::METADATA);
     assert_eq!(
         e.tree().get(root).unwrap().events_union(),
         ClassSet::CONTENT | ClassSet::METADATA,
@@ -247,15 +238,8 @@ fn it_ef_2b_profile_events_invariant_across_sub_attach_detach() {
 
     // Detaching one sibling leaves the Profile alive (b still attached) with its mask unchanged.
     let _ = e.step(Input::DetachSub(sid_a), Instant::now());
-    let p = e
-        .profiles()
-        .get(pid_a)
-        .expect("Profile lives while ≥1 Sub remains");
-    assert_eq!(
-        p.events(),
-        mask,
-        "events() is invariant across a sibling detach",
-    );
+    let p = e.profiles().get(pid_a).expect("Profile lives while ≥1 Sub remains");
+    assert_eq!(p.events(), mask, "events() is invariant across a sibling detach");
 
     // The surviving Sub still belongs to that same Profile.
     assert_eq!(e.subs().get(sid_b).unwrap().profile(), pid_a);
@@ -305,27 +289,17 @@ fn it_ef_2_chmod_only_fires_metadata_profile_not_content_profile() {
 
     // MetadataChanged at the anchor — anchor events bypass class filter for both Profiles. Both
     // should drive bursts.
-    let out = e.step(
-        Input::FsEvent {
-            resource: root,
-            event: FsEvent::MetadataChanged,
-        },
-        Instant::now(),
-    );
+    let out =
+        e.step(Input::FsEvent { resource: root, event: FsEvent::MetadataChanged }, Instant::now());
     assert!(
-        !out.diagnostics
-            .iter()
-            .any(|d| matches!(d, Diagnostic::EventClassDropped { .. })),
+        !out.diagnostics.iter().any(|d| matches!(d, Diagnostic::EventClassDropped { .. })),
         "anchor events bypass class filter for ALL covering Profiles",
     );
 
     // Both Profiles transition Idle → Active(Standard, Settling).
     for pid in [pid_a, pid_b] {
         assert!(
-            matches!(
-                e.profiles().get(pid).unwrap().state(),
-                ProfileState::Active(_, _),
-            ),
+            matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Active(_, _)),
             "anchor MetadataChanged drives a burst on Profile {pid:?} regardless of mask",
         );
     }
@@ -374,7 +348,7 @@ fn it_ef_3_descent_prefix_contributes_structure_only() {
     );
     // Profile's events_union still records the user's mask (drives mask on the eventual anchor
     // materialization).
-    assert_eq!(e.profiles().get(pid).unwrap().events(), ClassSet::CONTENT,);
+    assert_eq!(e.profiles().get(pid).unwrap().events(), ClassSet::CONTENT);
     let _ = e.cancel_all_in_flight_probes();
 }
 
@@ -425,17 +399,9 @@ fn it_ef_4_anchor_terminal_bypasses_filter_for_narrow_mask() {
     // `Removed` on the anchor (a Dir) folds to STRUCTURE — not in mask. Without the anchor-bypass,
     // this event would drop with EventClassDropped. With the anchor-bypass, it routes through
     // on_anchor_terminal_event.
-    let out = e.step(
-        Input::FsEvent {
-            resource: anchor,
-            event: FsEvent::Removed,
-        },
-        Instant::now(),
-    );
+    let out = e.step(Input::FsEvent { resource: anchor, event: FsEvent::Removed }, Instant::now());
     assert!(
-        !out.diagnostics
-            .iter()
-            .any(|d| matches!(d, Diagnostic::EventClassDropped { .. })),
+        !out.diagnostics.iter().any(|d| matches!(d, Diagnostic::EventClassDropped { .. })),
         "anchor terminal events bypass the class filter",
     );
 
@@ -447,11 +413,7 @@ fn it_ef_4_anchor_terminal_bypasses_filter_for_narrow_mask() {
     );
     assert!(p.baseline().is_none());
     assert!(p.current().is_none());
-    assert_eq!(
-        e.tree().get(anchor).unwrap().watch_demand(),
-        0,
-        "anchor's watch_demand released",
-    );
+    assert_eq!(e.tree().get(anchor).unwrap().watch_demand(), 0, "anchor's watch_demand released");
     // watch_root_parent is intact, and the loss step re-entered descent against it.
     assert_eq!(p.watch_root_parent(), Some(parent));
     assert!(
@@ -493,24 +455,17 @@ fn it_ef_6_descendant_metadata_drops_on_content_only_sub() {
 
     // Materialize a covered descendant File. Bump watch_demand so the event passes the
     // EventOnUnwatchedResource head guard.
-    let child = e
-        .tree_mut()
-        .ensure_child(root, "file.txt", ResourceRole::User)
-        .expect("test live parent");
+    let child =
+        e.tree_mut().ensure_child(root, "file.txt", ResourceRole::User).expect("test live parent");
     e.tree_mut().set_kind(child, ResourceKind::File);
-    e.tree_mut().get_mut(child).unwrap().insert_contribution(
-        specter_core::ContribKey::ProfileDescendant(pid),
-        ClassSet::CONTENT,
-    );
+    e.tree_mut()
+        .get_mut(child)
+        .unwrap()
+        .insert_contribution(specter_core::ContribKey::ProfileDescendant(pid), ClassSet::CONTENT);
 
     // chmod on the descendant file → MetadataChanged.
-    let out = e.step(
-        Input::FsEvent {
-            resource: child,
-            event: FsEvent::MetadataChanged,
-        },
-        Instant::now(),
-    );
+    let out =
+        e.step(Input::FsEvent { resource: child, event: FsEvent::MetadataChanged }, Instant::now());
 
     // The class filter drops with EventClassDropped.
     assert!(
@@ -553,28 +508,18 @@ fn it_ef_6_descendant_content_changed_drives_burst_on_content_sub() {
     );
     let _ = seed_to_idle(&mut e, pid, &dir_snap(&[]), t0);
 
-    let child = e
-        .tree_mut()
-        .ensure_child(root, "file.txt", ResourceRole::User)
-        .expect("test live parent");
+    let child =
+        e.tree_mut().ensure_child(root, "file.txt", ResourceRole::User).expect("test live parent");
     e.tree_mut().set_kind(child, ResourceKind::File);
-    e.tree_mut().get_mut(child).unwrap().insert_contribution(
-        specter_core::ContribKey::ProfileDescendant(pid),
-        ClassSet::CONTENT,
-    );
+    e.tree_mut()
+        .get_mut(child)
+        .unwrap()
+        .insert_contribution(specter_core::ContribKey::ProfileDescendant(pid), ClassSet::CONTENT);
 
-    let _ = e.step(
-        Input::FsEvent {
-            resource: child,
-            event: FsEvent::ContentChanged,
-        },
-        Instant::now(),
-    );
+    let _ =
+        e.step(Input::FsEvent { resource: child, event: FsEvent::ContentChanged }, Instant::now());
     assert!(
-        matches!(
-            e.profiles().get(pid).unwrap().state(),
-            ProfileState::Active(_, _),
-        ),
+        matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Active(_, _)),
         "ContentChanged on a CONTENT-class child drives a burst",
     );
 }
@@ -610,10 +555,7 @@ fn it_ef_7_dir_metadata_drops_outside_proof_object() {
     // `chmod` on the covered, descended-into directory: METADATA at sub's own FD (an Interior Dir
     // keeps its watch). The mask admits METADATA, but no proof object folds directory metadata.
     let out = e.step(
-        Input::FsEvent {
-            resource: sub,
-            event: FsEvent::MetadataChanged,
-        },
+        Input::FsEvent { resource: sub, event: FsEvent::MetadataChanged },
         seeded_at + SETTLE,
     );
     assert!(
@@ -657,10 +599,7 @@ fn it_ef_7_boundary_dir_structure_drops_for_outer_profile_via_co_located_demand(
     );
     let seed = dir_snap(&[("sub", EntryKind::Dir, 10)]);
     let outer_seeded = seed_to_idle(&mut e, outer, &seed, now);
-    let sub = e
-        .tree()
-        .lookup(Some(x), "sub")
-        .expect("boundary slot staged by the seed graft");
+    let sub = e.tree().lookup(Some(x), "sub").expect("boundary slot staged by the seed graft");
 
     let (_inner_sid, inner) = attach(
         &mut e,
@@ -674,10 +613,7 @@ fn it_ef_7_boundary_dir_structure_drops_for_outer_profile_via_co_located_demand(
     let inner_seeded = seed_to_idle(&mut e, inner, &dir_snap(&[]), outer_seeded);
 
     let out = e.step(
-        Input::FsEvent {
-            resource: sub,
-            event: FsEvent::StructureChanged,
-        },
+        Input::FsEvent { resource: sub, event: FsEvent::StructureChanged },
         inner_seeded + SETTLE,
     );
     assert!(
@@ -693,10 +629,7 @@ fn it_ef_7_boundary_dir_structure_drops_for_outer_profile_via_co_located_demand(
         "boundary churn never drives the outer Profile",
     );
     assert!(
-        matches!(
-            e.profiles().get(inner).unwrap().state(),
-            ProfileState::Active(_, _),
-        ),
+        matches!(e.profiles().get(inner).unwrap().state(), ProfileState::Active(_, _)),
         "the co-located anchor Profile drives its own burst from the same event",
     );
 }
@@ -721,10 +654,7 @@ fn it_ef_7_boundary_dir_holds_no_fd_and_events_drop_at_head_guard() {
     );
     let seed = dir_snap(&[("sub", EntryKind::Dir, 10)]);
     let seeded_at = seed_to_idle(&mut e, pid, &seed, now);
-    let sub = e
-        .tree()
-        .lookup(Some(x), "sub")
-        .expect("slot materialized by the seed graft");
+    let sub = e.tree().lookup(Some(x), "sub").expect("slot materialized by the seed graft");
     assert_eq!(
         e.tree().get(sub).unwrap().watch_demand(),
         0,
@@ -732,10 +662,7 @@ fn it_ef_7_boundary_dir_holds_no_fd_and_events_drop_at_head_guard() {
     );
 
     let out = e.step(
-        Input::FsEvent {
-            resource: sub,
-            event: FsEvent::StructureChanged,
-        },
+        Input::FsEvent { resource: sub, event: FsEvent::StructureChanged },
         seeded_at + SETTLE,
     );
     assert!(
@@ -744,15 +671,10 @@ fn it_ef_7_boundary_dir_holds_no_fd_and_events_drop_at_head_guard() {
         ),
         "the head guard drops the event — there is no FD to deliver it in production",
     );
-    assert!(
-        matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Idle),
-        "no burst",
-    );
+    assert!(matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Idle), "no burst");
     assert!(out.effects().is_empty(), "no effects");
     assert!(
-        !out.diagnostics
-            .iter()
-            .any(|d| matches!(d, Diagnostic::SpliceCrossedUncovered { .. })),
+        !out.diagnostics.iter().any(|d| matches!(d, Diagnostic::SpliceCrossedUncovered { .. })),
         "no splice breach on a healthy system",
     );
 }
@@ -792,17 +714,11 @@ fn it_ef_5_second_profile_widens_mask_emits_fresh_watch() {
         .iter()
         .rev()
         .find_map(|op| match op {
-            WatchOp::Watch {
-                resource, events, ..
-            } if *resource == root => Some(*events),
+            WatchOp::Watch { resource, events, .. } if *resource == root => Some(*events),
             _ => None,
         })
         .expect("Profile A's attach emits a Watch on root");
-    assert_eq!(
-        watch_after_a,
-        ClassSet::CONTENT,
-        "Profile A's Watch carries CONTENT only",
-    );
+    assert_eq!(watch_after_a, ClassSet::CONTENT, "Profile A's Watch carries CONTENT only");
     assert_eq!(
         e.tree().get(root).unwrap().events_union(),
         ClassSet::CONTENT,
@@ -826,9 +742,7 @@ fn it_ef_5_second_profile_widens_mask_emits_fresh_watch() {
         .watch_ops
         .iter()
         .find_map(|op| match op {
-            WatchOp::Watch {
-                resource, events, ..
-            } if *resource == root => Some(*events),
+            WatchOp::Watch { resource, events, .. } if *resource == root => Some(*events),
             _ => None,
         })
         .expect("Profile B's attach emits a fresh Watch on root (mask widening)");
@@ -880,14 +794,8 @@ fn it_ef_2_dedup_keys_disambiguated_by_profile_id() {
         MAX_SETTLE,
         Instant::now(),
     );
-    let dk_a = DedupKey::Subtree {
-        sub: sid_a,
-        profile: pid_a,
-    };
-    let dk_b = DedupKey::Subtree {
-        sub: sid_b,
-        profile: pid_b,
-    };
+    let dk_a = DedupKey::Subtree { sub: sid_a, profile: pid_a };
+    let dk_b = DedupKey::Subtree { sub: sid_b, profile: pid_b };
     assert_ne!(dk_a, dk_b, "DedupKey::Subtree partitions by (sub, profile)");
     let _ = e.cancel_all_in_flight_probes();
 }
@@ -905,10 +813,8 @@ fn it_ef_2_dedup_keys_disambiguated_by_profile_id() {
 fn seed_vanished_releases_anchor_claim_for_recovery() {
     let mut e = Engine::new();
     let parent = anchor_dir(&mut e, "p");
-    let anchor = e
-        .tree_mut()
-        .ensure_child(parent, "a", ResourceRole::User)
-        .expect("test live parent");
+    let anchor =
+        e.tree_mut().ensure_child(parent, "a", ResourceRole::User).expect("test live parent");
     e.tree_mut().set_kind(anchor, ResourceKind::Dir);
 
     let t0 = Instant::now();
@@ -921,10 +827,7 @@ fn seed_vanished_releases_anchor_claim_for_recovery() {
         MAX_SETTLE,
         t0,
     );
-    assert_eq!(
-        e.profiles().get(pid).unwrap().anchor_claim(),
-        AnchorClaim::Held,
-    );
+    assert_eq!(e.profiles().get(pid).unwrap().anchor_claim(), AnchorClaim::Held);
     assert_eq!(e.tree().get(anchor).unwrap().watch_demand(), 1);
 
     // Seed Vanished: anchor was found at attach but disappeared before the (settle-deferred) probe
@@ -947,11 +850,7 @@ fn seed_vanished_releases_anchor_claim_for_recovery() {
         AnchorClaim::None,
         "Seed Vanished releases anchor_claim",
     );
-    assert_eq!(
-        e.tree().get(anchor).unwrap().watch_demand(),
-        0,
-        "anchor's watch_demand released",
-    );
+    assert_eq!(e.tree().get(anchor).unwrap().watch_demand(), 0, "anchor's watch_demand released");
     assert!(
         out.watch_ops
             .iter()
@@ -959,15 +858,9 @@ fn seed_vanished_releases_anchor_claim_for_recovery() {
         "Unwatch emitted for the anchor; got {:?}",
         out.watch_ops,
     );
-    assert!(matches!(
-        e.profiles().get(pid).unwrap().state(),
-        ProfileState::Pending(_),
-    ));
+    assert!(matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Pending(_)));
     // watch_root_parent kept; it is the descent prefix now.
-    assert_eq!(
-        e.profiles().get(pid).unwrap().watch_root_parent(),
-        Some(parent)
-    );
+    assert_eq!(e.profiles().get(pid).unwrap().watch_root_parent(), Some(parent));
     let _ = e.cancel_all_in_flight_probes();
 }
 
@@ -976,10 +869,8 @@ fn seed_vanished_then_recovery_does_not_violate_trichotomy() {
     // Step 1: attach_sub: anchor_claim = Held
     let mut e = Engine::new();
     let parent = anchor_dir(&mut e, "p");
-    let anchor = e
-        .tree_mut()
-        .ensure_child(parent, "a", ResourceRole::User)
-        .expect("test live parent");
+    let anchor =
+        e.tree_mut().ensure_child(parent, "a", ResourceRole::User).expect("test live parent");
     e.tree_mut().set_kind(anchor, ResourceKind::Dir);
 
     let t0 = Instant::now();
@@ -1006,13 +897,7 @@ fn seed_vanished_then_recovery_does_not_violate_trichotomy() {
     );
 
     // Step 3: StructureChanged at watch_root_parent triggers recovery.
-    e.step(
-        Input::FsEvent {
-            resource: parent,
-            event: FsEvent::StructureChanged,
-        },
-        Instant::now(),
-    );
+    e.step(Input::FsEvent { resource: parent, event: FsEvent::StructureChanged }, Instant::now());
 
     // Profile is Pending now. anchor_claim must be None (the trichotomy invariant).
     let p = e.profiles().get(pid).expect("Profile alive");
@@ -1028,16 +913,10 @@ fn seed_vanished_then_recovery_does_not_violate_trichotomy() {
 
     // Step 4: detach. reap_profile must NOT debug_assert and must NOT leak the anchor's watch_demand.
     let out = e.step(Input::DetachSub(sid), Instant::now());
-    assert!(
-        e.profiles().get(pid).is_none(),
-        "Profile reaped without panic",
-    );
+    assert!(e.profiles().get(pid).is_none(), "Profile reaped without panic");
     // The descent prefix's contribution is released cleanly.
-    let unwatch_count = out
-        .watch_ops
-        .iter()
-        .filter(|op| matches!(op, WatchOp::Unwatch { .. }))
-        .count();
+    let unwatch_count =
+        out.watch_ops.iter().filter(|op| matches!(op, WatchOp::Unwatch { .. })).count();
     assert!(unwatch_count >= 1, "at least one Unwatch on reap");
 }
 
@@ -1046,10 +925,8 @@ fn seed_failed_releases_anchor_claim() {
     // Symmetric regression for dispatch_pre_fire_failed (Seed intent).
     let mut e = Engine::new();
     let parent = anchor_dir(&mut e, "p");
-    let anchor = e
-        .tree_mut()
-        .ensure_child(parent, "a", ResourceRole::User)
-        .expect("test live parent");
+    let anchor =
+        e.tree_mut().ensure_child(parent, "a", ResourceRole::User).expect("test live parent");
     e.tree_mut().set_kind(anchor, ResourceKind::Dir);
 
     let t0 = Instant::now();
@@ -1079,11 +956,7 @@ fn seed_failed_releases_anchor_claim() {
         AnchorClaim::None,
         "Seed Failed releases anchor_claim (post-fix, symmetric with Seed Vanished)",
     );
-    assert_eq!(
-        e.tree().get(anchor).unwrap().watch_demand(),
-        0,
-        "anchor's watch_demand released",
-    );
+    assert_eq!(e.tree().get(anchor).unwrap().watch_demand(), 0, "anchor's watch_demand released");
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -1118,10 +991,8 @@ fn setup_with_surviving_child(
     let snap = dir_snap(&[("subdir", EntryKind::Dir, 99)]);
     let _ = seed_to_idle(e, pid, &snap, t0);
 
-    let child = e
-        .tree()
-        .lookup(Some(root), "subdir")
-        .expect("Dir child materialized by Seed graft");
+    let child =
+        e.tree().lookup(Some(root), "subdir").expect("Dir child materialized by Seed graft");
     assert!(
         e.tree().get(child).unwrap().watch_demand() >= 1,
         "covered Dir child carries watch_demand",
@@ -1137,13 +1008,7 @@ fn standard_vanished_with_reap_pending_does_not_double_release_anchor() {
 
     // Drive a Standard burst.
     let t1 = Instant::now();
-    e.step(
-        Input::FsEvent {
-            resource: root,
-            event: FsEvent::ContentChanged,
-        },
-        t1,
-    );
+    e.step(Input::FsEvent { resource: root, event: FsEvent::ContentChanged }, t1);
 
     // Detach mid-burst to set reap_pending.
     let _ = e.step(Input::DetachSub(sid), Instant::now());
@@ -1166,10 +1031,7 @@ fn standard_vanished_with_reap_pending_does_not_double_release_anchor() {
         }),
         t2,
     );
-    assert!(
-        e.profiles().get(pid).is_none(),
-        "Profile reaped without panic",
-    );
+    assert!(e.profiles().get(pid).is_none(), "Profile reaped without panic");
     let unwatch_count = out
         .watch_ops
         .iter()
@@ -1189,13 +1051,7 @@ fn standard_failed_with_reap_pending_does_not_double_release_anchor() {
     let (root, _child, sid, pid) = setup_with_surviving_child(&mut e);
 
     let t1 = Instant::now();
-    e.step(
-        Input::FsEvent {
-            resource: root,
-            event: FsEvent::ContentChanged,
-        },
-        t1,
-    );
+    e.step(Input::FsEvent { resource: root, event: FsEvent::ContentChanged }, t1);
     let _ = e.step(Input::DetachSub(sid), Instant::now());
     assert!(matches!(
         e.profiles().get(pid).unwrap().state().burst_finish(),
@@ -1214,10 +1070,7 @@ fn standard_failed_with_reap_pending_does_not_double_release_anchor() {
         }),
         t2,
     );
-    assert!(
-        e.profiles().get(pid).is_none(),
-        "Profile reaped without panic on Failed",
-    );
+    assert!(e.profiles().get(pid).is_none(), "Profile reaped without panic on Failed");
     let unwatch_count = out
         .watch_ops
         .iter()
@@ -1236,13 +1089,7 @@ fn drive_anchor_terminal_with_reap_pending(event: FsEvent) -> (Engine, ResourceI
     let (root, _child, sid, pid) = setup_with_surviving_child(&mut e);
 
     let t1 = Instant::now();
-    e.step(
-        Input::FsEvent {
-            resource: root,
-            event: FsEvent::ContentChanged,
-        },
-        t1,
-    );
+    e.step(Input::FsEvent { resource: root, event: FsEvent::ContentChanged }, t1);
     let _ = e.step(Input::DetachSub(sid), Instant::now());
     assert!(matches!(
         e.profiles().get(pid).unwrap().state().burst_finish(),
@@ -1262,13 +1109,7 @@ fn drive_anchor_terminal_with_reap_pending(event: FsEvent) -> (Engine, ResourceI
         )
     ));
 
-    let out = e.step(
-        Input::FsEvent {
-            resource: root,
-            event,
-        },
-        t2,
-    );
+    let out = e.step(Input::FsEvent { resource: root, event }, t2);
     assert!(
         e.profiles().get(pid).is_none(),
         "Profile reaped after anchor terminal event ({event:?}) without panic",
@@ -1348,13 +1189,7 @@ fn anchor_terminal_with_reap_pending_multi_profile_each_released_once() {
 
     // Kick off a Standard burst on P.
     let t1 = Instant::now();
-    e.step(
-        Input::FsEvent {
-            resource: root,
-            event: FsEvent::ContentChanged,
-        },
-        t1,
-    );
+    e.step(Input::FsEvent { resource: root, event: FsEvent::ContentChanged }, t1);
     // Detach P to set reap_pending. Q stays alive.
     let _ = e.step(Input::DetachSub(sid_p), Instant::now());
     assert!(matches!(
@@ -1372,46 +1207,26 @@ fn anchor_terminal_with_reap_pending_multi_profile_each_released_once() {
 
     // FsEvent::Removed at root: covering_profiles returns [P, Q], each routes through
     // finalize_anchor_lost.
-    let out = e.step(
-        Input::FsEvent {
-            resource: root,
-            event: FsEvent::Removed,
-        },
-        t2,
-    );
+    let out = e.step(Input::FsEvent { resource: root, event: FsEvent::Removed }, t2);
 
     // P reaped; Q survives with anchor_claim cleared. Q's anchor is a root (no parent), so the loss
     // wrapper's fallback parks it.
     assert!(e.profiles().get(pid_p).is_none(), "P reaped");
     let q = e.profiles().get(pid_q).expect("Q survives");
-    assert_eq!(
-        q.anchor_claim(),
-        AnchorClaim::None,
-        "Q's anchor_claim cleared by terminal event",
-    );
+    assert_eq!(q.anchor_claim(), AnchorClaim::None, "Q's anchor_claim cleared by terminal event");
     assert!(matches!(q.state(), ProfileState::Parked));
 
     // Counter walked 2 → 1 → 0 cleanly. Anchor slot is reaped because the surviving-child only kept
     // it alive while P+Q were attached; Q's anchor_claim = None leaves only the child anchor, which
     // does keep root alive — confirm via watch_demand counter.
-    let final_counter = e
-        .tree()
-        .get(root)
-        .map_or(0, specter_core::Resource::watch_demand);
-    assert_eq!(
-        final_counter, 0,
-        "root.watch_demand() zeroed by both Profiles' terminal events",
-    );
+    let final_counter = e.tree().get(root).map_or(0, specter_core::Resource::watch_demand);
+    assert_eq!(final_counter, 0, "root.watch_demand() zeroed by both Profiles' terminal events");
     let unwatch_count = out
         .watch_ops
         .iter()
         .filter(|op| matches!(op, WatchOp::Unwatch { resource } if *resource == root))
         .count();
-    assert_eq!(
-        unwatch_count, 1,
-        "exactly one Unwatch on root (1→0 edge); got {:?}",
-        out.watch_ops,
-    );
+    assert_eq!(unwatch_count, 1, "exactly one Unwatch on root (1→0 edge); got {:?}", out.watch_ops);
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -1443,18 +1258,12 @@ fn release_descendant_claim_idle_detach_reaps_covered_dir() {
     let (_root, child, sid, pid) = setup_with_surviving_child(&mut e);
 
     // Pre-conditions: Profile is Idle, child has watch_demand >= 1.
-    assert!(matches!(
-        e.profiles().get(pid).unwrap().state(),
-        ProfileState::Idle,
-    ));
+    assert!(matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Idle));
     assert!(e.tree().get(child).is_some());
     assert!(e.tree().get(child).unwrap().watch_demand() >= 1);
 
     let out = e.step(Input::DetachSub(sid), Instant::now());
-    assert!(
-        e.profiles().get(pid).is_none(),
-        "Idle Profile reaped on last-Sub detach",
-    );
+    assert!(e.profiles().get(pid).is_none(), "Idle Profile reaped on last-Sub detach");
     assert!(
         e.tree().get(child).is_none(),
         "covered Dir descendant reaped — release_descendant_claim released its slot",
@@ -1498,10 +1307,7 @@ fn release_descendant_claim_idle_detach_reaps_covered_leaf() {
 
     let out = e.step(Input::DetachSub(sid), Instant::now());
     assert!(e.profiles().get(pid).is_none());
-    assert!(
-        e.tree().get(leaf).is_none(),
-        "covered Leaf with per-file FD reaped on Idle detach",
-    );
+    assert!(e.tree().get(leaf).is_none(), "covered Leaf with per-file FD reaped on Idle detach");
     let unwatch_for_leaf = out
         .watch_ops
         .iter()
@@ -1520,13 +1326,7 @@ fn release_descendant_claim_dispatch_pre_fire_vanished_releases_descendants() {
 
     // Drive a Standard burst.
     let t1 = Instant::now();
-    e.step(
-        Input::FsEvent {
-            resource: root,
-            event: FsEvent::ContentChanged,
-        },
-        t1,
-    );
+    e.step(Input::FsEvent { resource: root, event: FsEvent::ContentChanged }, t1);
     let _ = e.step(Input::DetachSub(sid), Instant::now());
     assert!(matches!(
         e.profiles().get(pid).unwrap().state().burst_finish(),
@@ -1548,10 +1348,7 @@ fn release_descendant_claim_dispatch_pre_fire_vanished_releases_descendants() {
     );
 
     assert!(e.profiles().get(pid).is_none(), "Profile reaped");
-    assert!(
-        e.tree().get(child).is_none(),
-        "subdir reaped via release_descendant_claim",
-    );
+    assert!(e.tree().get(child).is_none(), "subdir reaped via release_descendant_claim");
     let unwatch_for_child = out
         .watch_ops
         .iter()
@@ -1572,13 +1369,7 @@ fn release_descendant_claim_anchor_terminal_event_releases_descendants() {
     let mut e = Engine::new();
     let (root, child, _sid, pid) = setup_with_surviving_child(&mut e);
 
-    let out = e.step(
-        Input::FsEvent {
-            resource: root,
-            event: FsEvent::Removed,
-        },
-        Instant::now(),
-    );
+    let out = e.step(Input::FsEvent { resource: root, event: FsEvent::Removed }, Instant::now());
 
     // After Removed at the root anchor: no recovery parent, so the loss wrapper's fallback parks
     // the Profile; anchor_claim cleared to None, current taken by release_descendant_claim, child
@@ -1586,10 +1377,7 @@ fn release_descendant_claim_anchor_terminal_event_releases_descendants() {
     let p = e.profiles().get(pid).expect("Profile survives anchor loss");
     assert!(matches!(p.state(), ProfileState::Parked));
     assert_eq!(p.anchor_claim(), AnchorClaim::None);
-    assert!(
-        p.current().is_none(),
-        "current taken by release_descendant_claim"
-    );
+    assert!(p.current().is_none(), "current taken by release_descendant_claim");
     assert!(
         e.tree().get(child).is_none(),
         "subdir reaped via release_descendant_claim on anchor terminal",
@@ -1617,13 +1405,7 @@ fn release_descendant_claim_dispatch_rebase_vanished_releases_descendants() {
     let (root, child, sid, pid) = setup_with_surviving_child(&mut e);
 
     let t1 = Instant::now();
-    e.step(
-        Input::FsEvent {
-            resource: root,
-            event: FsEvent::ContentChanged,
-        },
-        t1,
-    );
+    e.step(Input::FsEvent { resource: root, event: FsEvent::ContentChanged }, t1);
 
     let t2 = t1 + SETTLE * 2;
     drain_due(&mut e, t2);
@@ -1633,12 +1415,8 @@ fn release_descendant_claim_dispatch_rebase_vanished_releases_descendants() {
     // transition_to_awaiting.
     let subdir_snap = dir_snap(&[("subdir", EntryKind::Dir, 99)]);
     let v = verify(&mut e, pid, &subdir_snap, t2);
-    let effect = v
-        .out
-        .effects()
-        .first()
-        .cloned()
-        .expect("Standard-Ok stable verdict fires one Effect");
+    let effect =
+        v.out.effects().first().cloned().expect("Standard-Ok stable verdict fires one Effect");
     assert!(matches!(
         e.profiles().get(pid).unwrap().state(),
         ProfileState::Active(
@@ -1675,10 +1453,7 @@ fn release_descendant_claim_dispatch_rebase_vanished_releases_descendants() {
     );
 
     // Root anchor — the rebase-Vanished loss has no recovery parent, so the wrapper's fallback parks.
-    assert!(matches!(
-        e.profiles().get(pid).unwrap().state(),
-        ProfileState::Parked,
-    ));
+    assert!(matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Parked));
     assert!(
         e.tree().get(child).is_none(),
         "subdir reaped via release_descendant_claim in dispatch_rebase_vanished",
@@ -1739,10 +1514,7 @@ fn release_descendant_claim_multi_profile_preserves_others() {
     let snap_q = dir_snap(&[("subdir", EntryKind::Dir, 99)]);
     let _ = seed_to_idle(&mut e, pid_q, &snap_q, t0_q);
 
-    let subdir = e
-        .tree()
-        .lookup(Some(root), "subdir")
-        .expect("subdir seeded");
+    let subdir = e.tree().lookup(Some(root), "subdir").expect("subdir seeded");
     assert_eq!(
         e.tree().get(subdir).unwrap().watch_demand(),
         2,
@@ -1753,13 +1525,7 @@ fn release_descendant_claim_multi_profile_preserves_others() {
     // is gone, but Q's stays. P's release_descendant_claim walks P's current and decrements subdir's
     // contribution; Q's contribution is preserved.
     let t1 = Instant::now();
-    e.step(
-        Input::FsEvent {
-            resource: root,
-            event: FsEvent::ContentChanged,
-        },
-        t1,
-    );
+    e.step(Input::FsEvent { resource: root, event: FsEvent::ContentChanged }, t1);
     let _ = e.step(Input::DetachSub(sid_p), Instant::now());
 
     let t2 = t1 + SETTLE * 2;
@@ -1779,10 +1545,7 @@ fn release_descendant_claim_multi_profile_preserves_others() {
     assert!(e.profiles().get(pid_p).is_none(), "P reaped");
     assert!(e.profiles().get(pid_q).is_some(), "Q survives P's teardown");
     // Q's descendant claim is intact.
-    assert!(
-        e.tree().get(subdir).is_some(),
-        "subdir slot survives — Q still contributes",
-    );
+    assert!(e.tree().get(subdir).is_some(), "subdir slot survives — Q still contributes");
     assert_eq!(
         e.tree().get(subdir).unwrap().watch_demand(),
         1,
@@ -1845,10 +1608,7 @@ fn delete_child_during_graft_recompute_skips_releasing_profile() {
     let snap_q = dir_snap(&[("subdir", EntryKind::Dir, 99)]);
     let _ = seed_to_idle(&mut e, pid_q, &snap_q, t0_q);
 
-    let subdir = e
-        .tree()
-        .lookup(Some(root), "subdir")
-        .expect("subdir seeded");
+    let subdir = e.tree().lookup(Some(root), "subdir").expect("subdir seeded");
     assert_eq!(e.tree().get(subdir).unwrap().watch_demand(), 2);
     assert_eq!(
         e.tree().get(subdir).unwrap().events_union(),
@@ -1858,13 +1618,7 @@ fn delete_child_during_graft_recompute_skips_releasing_profile() {
 
     // Drive P's Standard burst to Verifying.
     let t1 = Instant::now();
-    e.step(
-        Input::FsEvent {
-            resource: root,
-            event: FsEvent::ContentChanged,
-        },
-        t1,
-    );
+    e.step(Input::FsEvent { resource: root, event: FsEvent::ContentChanged }, t1);
     let t2 = t1 + SETTLE * 2;
     drain_due(&mut e, t2);
     let correlation = e.pending_probe_for(pid_p).expect("P probe in flight");
@@ -1891,10 +1645,7 @@ fn delete_child_during_graft_recompute_skips_releasing_profile() {
     // - Remaining contributor Q's mask defines events_union = METADATA.
     // - Without the contribution-map move (lazy-derivation era): the recompute could have over-masked
     //   at CONTENT|METADATA.
-    assert!(
-        e.tree().get(subdir).is_some(),
-        "subdir survives, Q anchors it"
-    );
+    assert!(e.tree().get(subdir).is_some(), "subdir survives, Q anchors it");
     assert_eq!(
         e.tree().get(subdir).unwrap().watch_demand(),
         1,

@@ -19,10 +19,7 @@ fn attach_sub_creates_watch_root_parent_contribution() {
     let mut e = Engine::new();
     let root = e.tree_mut().ensure_root("root", ResourceRole::User);
     e.tree_mut().set_kind(root, ResourceKind::Dir);
-    let src = e
-        .tree_mut()
-        .ensure_child(root, "src", ResourceRole::User)
-        .expect("test live parent");
+    let src = e.tree_mut().ensure_child(root, "src", ResourceRole::User).expect("test live parent");
     e.tree_mut().set_kind(src, ResourceKind::Dir);
 
     let req = SubAttachRequest::for_anchor(
@@ -39,16 +36,8 @@ fn attach_sub_creates_watch_root_parent_contribution() {
     let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile();
 
-    assert_eq!(
-        e.tree().get(src).unwrap().watch_demand(),
-        1,
-        "anchor watched"
-    );
-    assert_eq!(
-        e.tree().get(root).unwrap().watch_demand(),
-        1,
-        "watch_root_parent contributes",
-    );
+    assert_eq!(e.tree().get(src).unwrap().watch_demand(), 1, "anchor watched");
+    assert_eq!(e.tree().get(root).unwrap().watch_demand(), 1, "watch_root_parent contributes");
     assert_eq!(
         e.profiles().get(pid).unwrap().watch_root_parent(),
         Some(root),
@@ -86,10 +75,7 @@ fn detach_sub_releases_watch_root_parent_contribution() {
     let mut e = Engine::new();
     let root = e.tree_mut().ensure_root("root", ResourceRole::User);
     e.tree_mut().set_kind(root, ResourceKind::Dir);
-    let src = e
-        .tree_mut()
-        .ensure_child(root, "src", ResourceRole::User)
-        .expect("test live parent");
+    let src = e.tree_mut().ensure_child(root, "src", ResourceRole::User).expect("test live parent");
     e.tree_mut().set_kind(src, ResourceKind::Dir);
 
     let now = Instant::now();
@@ -119,11 +105,8 @@ fn detach_sub_releases_watch_root_parent_contribution() {
         e.tree().get(root).is_none_or(|r| r.watch_demand() == 0),
         "/root's watch_demand back to 0 (or slot reaped by the cascade)",
     );
-    let unwatch_count = out
-        .watch_ops
-        .iter()
-        .filter(|op| matches!(op, WatchOp::Unwatch { .. }))
-        .count();
+    let unwatch_count =
+        out.watch_ops.iter().filter(|op| matches!(op, WatchOp::Unwatch { .. })).count();
     // One Unwatch each for anchor and watch_root_parent (sorted by id).
     assert!(unwatch_count >= 2, "anchor + parent both unwatched");
 }
@@ -135,15 +118,11 @@ fn multiple_profiles_share_one_watch_root_parent() {
     let mut e = Engine::new();
     let root = e.tree_mut().ensure_root("root", ResourceRole::User);
     e.tree_mut().set_kind(root, ResourceKind::Dir);
-    let src_a = e
-        .tree_mut()
-        .ensure_child(root, "srcA", ResourceRole::User)
-        .expect("test live parent");
+    let src_a =
+        e.tree_mut().ensure_child(root, "srcA", ResourceRole::User).expect("test live parent");
     e.tree_mut().set_kind(src_a, ResourceKind::Dir);
-    let src_b = e
-        .tree_mut()
-        .ensure_child(root, "srcB", ResourceRole::User)
-        .expect("test live parent");
+    let src_b =
+        e.tree_mut().ensure_child(root, "srcB", ResourceRole::User).expect("test live parent");
     e.tree_mut().set_kind(src_b, ResourceKind::Dir);
 
     let now = Instant::now();
@@ -188,10 +167,7 @@ fn watch_root_parent_role_stays_user_when_already_user() {
     let mut e = Engine::new();
     let root = e.tree_mut().ensure_root("root", ResourceRole::User);
     e.tree_mut().set_kind(root, ResourceKind::Dir);
-    let src = e
-        .tree_mut()
-        .ensure_child(root, "src", ResourceRole::User)
-        .expect("test live parent");
+    let src = e.tree_mut().ensure_child(root, "src", ResourceRole::User).expect("test live parent");
     e.tree_mut().set_kind(src, ResourceKind::Dir);
 
     let now = Instant::now();
@@ -209,10 +185,7 @@ fn watch_root_parent_role_stays_user_when_already_user() {
         )),
         now,
     );
-    assert!(matches!(
-        e.tree().get(root).unwrap().role,
-        ResourceRole::User,
-    ));
+    assert!(matches!(e.tree().get(root).unwrap().role, ResourceRole::User));
 
     // Sub at /root/src — /root becomes its watch_root_parent.
     let _ = e.step(
@@ -230,10 +203,7 @@ fn watch_root_parent_role_stays_user_when_already_user() {
     );
 
     // /root's role stays User (never demote User).
-    assert!(matches!(
-        e.tree().get(root).unwrap().role,
-        ResourceRole::User,
-    ));
+    assert!(matches!(e.tree().get(root).unwrap().role, ResourceRole::User));
     // watch_demand has both contributions (root's own + inner's parent).
     assert_eq!(e.tree().get(root).unwrap().watch_demand(), 2);
     let _ = e.cancel_all_in_flight_probes();

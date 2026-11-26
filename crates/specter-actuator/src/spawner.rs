@@ -121,9 +121,7 @@ pub struct SpawnHandles {
 
 impl std::fmt::Debug for SpawnHandles {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SpawnHandles")
-            .field("pid", &self.pid)
-            .finish_non_exhaustive()
+        f.debug_struct("SpawnHandles").field("pid", &self.pid).finish_non_exhaustive()
     }
 }
 

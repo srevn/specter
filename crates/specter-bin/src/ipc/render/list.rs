@@ -33,21 +33,14 @@ pub(crate) fn render(out: &mut String, resp: &ListResponse, wide: bool, sty: Sty
 
     // Render every cell once into a `cols × rows` grid. Indexed by `[col][row]` so the width fold
     // is a single linear pass per column.
-    let grid: Vec<Vec<Cell>> = columns
-        .iter()
-        .map(|col| resp.rows.iter().map(col.render).collect())
-        .collect();
+    let grid: Vec<Vec<Cell>> =
+        columns.iter().map(|col| resp.rows.iter().map(col.render).collect()).collect();
 
     let widths: Vec<usize> = columns
         .iter()
         .zip(&grid)
         .map(|(col, cells)| {
-            cells
-                .iter()
-                .map(|c| c.text.len())
-                .max()
-                .unwrap_or(0)
-                .max(col.header.len())
+            cells.iter().map(|c| c.text.len()).max().unwrap_or(0).max(col.header.len())
         })
         .collect();
 
@@ -81,18 +74,12 @@ struct Cell {
 impl Cell {
     /// An unstyled value cell.
     const fn data(text: String) -> Self {
-        Self {
-            text,
-            style: Style::new(),
-        }
+        Self { text, style: Style::new() }
     }
 
     /// The `-` placeholder for an absent value, painted [`style::MISSING`].
     fn missing() -> Self {
-        Self {
-            text: "-".to_string(),
-            style: style::MISSING,
-        }
+        Self { text: "-".to_string(), style: style::MISSING }
     }
 
     /// A value cell painted with an explicit style.
@@ -109,81 +96,27 @@ fn present_or_missing<T>(value: Option<T>, f: impl FnOnce(T) -> Cell) -> Cell {
 }
 
 const DEFAULT_COLUMNS: &[Column] = &[
-    Column {
-        header: "NAME",
-        render: col_name,
-    },
-    Column {
-        header: "STATE",
-        render: col_state,
-    },
-    Column {
-        header: "ANCHOR",
-        render: col_anchor,
-    },
-    Column {
-        header: "LAST_FIRED",
-        render: col_last_fired,
-    },
-    Column {
-        header: "FIRES",
-        render: col_fires,
-    },
-    Column {
-        header: "REACTION",
-        render: col_reaction,
-    },
-    Column {
-        header: "DISABLED",
-        render: col_disabled,
-    },
+    Column { header: "NAME", render: col_name },
+    Column { header: "STATE", render: col_state },
+    Column { header: "ANCHOR", render: col_anchor },
+    Column { header: "LAST_FIRED", render: col_last_fired },
+    Column { header: "FIRES", render: col_fires },
+    Column { header: "REACTION", render: col_reaction },
+    Column { header: "DISABLED", render: col_disabled },
 ];
 
 const ALL_COLUMNS: &[Column] = &[
-    Column {
-        header: "NAME",
-        render: col_name,
-    },
-    Column {
-        header: "STATE",
-        render: col_state,
-    },
-    Column {
-        header: "ANCHOR",
-        render: col_anchor,
-    },
-    Column {
-        header: "LAST_FIRED",
-        render: col_last_fired,
-    },
-    Column {
-        header: "FIRES",
-        render: col_fires,
-    },
-    Column {
-        header: "REACTION",
-        render: col_reaction,
-    },
-    Column {
-        header: "DISABLED",
-        render: col_disabled,
-    },
-    Column {
-        header: "PROFILE_ID",
-        render: col_profile_id,
-    },
-    Column {
-        header: "SUB_ID",
-        render: col_sub_id,
-    },
-    Column {
-        header: "DEDUP_SUPPRESSED",
-        render: col_dedup,
-    },
-    Column {
-        header: "SETTLE",
-        render: col_settle,
-    },
+    Column { header: "NAME", render: col_name },
+    Column { header: "STATE", render: col_state },
+    Column { header: "ANCHOR", render: col_anchor },
+    Column { header: "LAST_FIRED", render: col_last_fired },
+    Column { header: "FIRES", render: col_fires },
+    Column { header: "REACTION", render: col_reaction },
+    Column { header: "DISABLED", render: col_disabled },
+    Column { header: "PROFILE_ID", render: col_profile_id },
+    Column { header: "SUB_ID", render: col_sub_id },
+    Column { header: "DEDUP_SUPPRESSED", render: col_dedup },
+    Column { header: "SETTLE", render: col_settle },
 ];
 
 /// Two-space inter-column padding on every join. The last column also carries a trailing `"  "` —
@@ -192,11 +125,7 @@ const COL_GAP: &str = "  ";
 
 fn write_header(out: &mut String, columns: &[Column], widths: &[usize], sty: Styler) {
     for (col, &w) in columns.iter().zip(widths) {
-        let _ = write!(
-            out,
-            "{}{COL_GAP}",
-            sty.paint(style::LABEL, PadRight(col.header, w))
-        );
+        let _ = write!(out, "{}{COL_GAP}", sty.paint(style::LABEL, PadRight(col.header, w)));
     }
     out.push('\n');
 }
@@ -218,11 +147,7 @@ fn write_separator(out: &mut String, widths: &[usize], sty: Styler) {
 fn write_row(out: &mut String, grid: &[Vec<Cell>], widths: &[usize], row_idx: usize, sty: Styler) {
     for (col_idx, &w) in widths.iter().enumerate() {
         let cell = &grid[col_idx][row_idx];
-        let _ = write!(
-            out,
-            "{}{COL_GAP}",
-            sty.paint(cell.style, PadRight(&cell.text, w))
-        );
+        let _ = write!(out, "{}{COL_GAP}", sty.paint(cell.style, PadRight(&cell.text, w)));
     }
     out.push('\n');
 }
@@ -258,21 +183,15 @@ fn col_reaction(row: &ListRow) -> Cell {
 }
 
 fn col_disabled(row: &ListRow) -> Cell {
-    present_or_missing(row.disabled, |src| {
-        Cell::styled(src.to_string(), style::OFF)
-    })
+    present_or_missing(row.disabled, |src| Cell::styled(src.to_string(), style::OFF))
 }
 
 fn col_profile_id(row: &ListRow) -> Cell {
-    present_or_missing(row.profile, |id| {
-        Cell::styled(id.0.to_string(), style::SECONDARY)
-    })
+    present_or_missing(row.profile, |id| Cell::styled(id.0.to_string(), style::SECONDARY))
 }
 
 fn col_sub_id(row: &ListRow) -> Cell {
-    present_or_missing(row.sub, |id| {
-        Cell::styled(id.0.to_string(), style::SECONDARY)
-    })
+    present_or_missing(row.sub, |id| Cell::styled(id.0.to_string(), style::SECONDARY))
 }
 
 fn col_dedup(row: &ListRow) -> Cell {
@@ -353,37 +272,21 @@ mod tests {
         assert_eq!(buf, "no watches declared\n");
         let mut buf = String::new();
         render(&mut buf, &resp, true, Styler::Plain);
-        assert_eq!(
-            buf, "no watches declared\n",
-            "wide mode also surfaces the no-watches signal",
-        );
+        assert_eq!(buf, "no watches declared\n", "wide mode also surfaces the no-watches signal");
     }
 
     /// Default columns include NAME / STATE / ANCHOR / LAST_FIRED / FIRES / REACTION / DISABLED,
     /// and NOT the four wide-only columns (PROFILE_ID / SUB_ID / DEDUP_SUPPRESSED / SETTLE).
     #[test]
     fn list_table_default_columns_excludes_wide_only() {
-        let resp = ListResponse {
-            rows: vec![attached_row("foo")],
-        };
+        let resp = ListResponse { rows: vec![attached_row("foo")] };
         let mut out = String::new();
         render(&mut out, &resp, false, Styler::Plain);
-        for label in [
-            "NAME",
-            "STATE",
-            "ANCHOR",
-            "LAST_FIRED",
-            "FIRES",
-            "REACTION",
-            "DISABLED",
-        ] {
+        for label in ["NAME", "STATE", "ANCHOR", "LAST_FIRED", "FIRES", "REACTION", "DISABLED"] {
             assert!(out.contains(label), "missing column {label}: {out}");
         }
         for wide in ["PROFILE_ID", "SUB_ID", "DEDUP_SUPPRESSED", "SETTLE"] {
-            assert!(
-                !out.contains(wide),
-                "default mode must not include wide column {wide}: {out}",
-            );
+            assert!(!out.contains(wide), "default mode must not include wide column {wide}: {out}");
         }
     }
 
@@ -391,9 +294,7 @@ mod tests {
     /// not replacing).
     #[test]
     fn list_table_wide_adds_profile_sub_dedup_settle() {
-        let resp = ListResponse {
-            rows: vec![attached_row("foo")],
-        };
+        let resp = ListResponse { rows: vec![attached_row("foo")] };
         let mut out = String::new();
         render(&mut out, &resp, true, Styler::Plain);
         for label in [
@@ -418,40 +319,21 @@ mod tests {
     /// "not attached".
     #[test]
     fn list_table_mint_row_attributes_missing_fire_stats() {
-        let resp = ListResponse {
-            rows: vec![mint_row("disc"), attached_row("plain")],
-        };
+        let resp = ListResponse { rows: vec![mint_row("disc"), attached_row("plain")] };
         let mut out = String::new();
         render(&mut out, &resp, false, Styler::Plain);
-        let disc = out
-            .lines()
-            .find(|l| l.starts_with("disc"))
-            .expect("template row present");
-        assert!(
-            disc.contains("mint"),
-            "REACTION cell carries mint: {disc:?}"
-        );
-        assert!(
-            disc.contains('-'),
-            "fire-stat cells render the `-` marker: {disc:?}",
-        );
-        let plain = out
-            .lines()
-            .find(|l| l.starts_with("plain"))
-            .expect("spawn row present");
-        assert!(
-            plain.contains("spawn"),
-            "REACTION cell carries spawn: {plain:?}",
-        );
+        let disc = out.lines().find(|l| l.starts_with("disc")).expect("template row present");
+        assert!(disc.contains("mint"), "REACTION cell carries mint: {disc:?}");
+        assert!(disc.contains('-'), "fire-stat cells render the `-` marker: {disc:?}");
+        let plain = out.lines().find(|l| l.starts_with("plain")).expect("spawn row present");
+        assert!(plain.contains("spawn"), "REACTION cell carries spawn: {plain:?}");
     }
 
     /// The separator row spans each column's width with the box-drawing dash. The separator is at
     /// least as wide as the corresponding header — never empty (`"─".repeat(0)` would regress this).
     #[test]
     fn list_table_separator_repeats_per_column_width() {
-        let resp = ListResponse {
-            rows: vec![attached_row("foo")],
-        };
+        let resp = ListResponse { rows: vec![attached_row("foo")] };
         let mut out = String::new();
         render(&mut out, &resp, false, Styler::Plain);
         let mut lines = out.lines();
@@ -468,10 +350,7 @@ mod tests {
             !separator.is_empty(),
             "separator must not be empty (regression guard against `repeat(0)`)",
         );
-        assert!(
-            header.contains("NAME"),
-            "header line carries column labels: {header:?}",
-        );
+        assert!(header.contains("NAME"), "header line carries column labels: {header:?}");
     }
 
     /// Disabled-source labels render verbatim — `runtime` / `toml` match the `DisabledSource`
@@ -510,10 +389,7 @@ mod tests {
             render(&mut active, &resp, wide, Styler::Active);
             let mut plain = String::new();
             render(&mut plain, &resp, wide, Styler::Plain);
-            assert!(
-                active.contains('\x1b'),
-                "Active emits SGR (wide={wide}): {active:?}",
-            );
+            assert!(active.contains('\x1b'), "Active emits SGR (wide={wide}): {active:?}");
             assert_eq!(
                 strip_ansi(&active),
                 plain,

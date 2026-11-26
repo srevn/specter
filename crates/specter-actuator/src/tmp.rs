@@ -71,10 +71,7 @@ impl DiffTmpFile {
     /// I/O error during write or `sync_data`, the partial file is rolled back via a best-effort
     /// unlink before `Err` returns.
     pub(crate) fn create(
-        temp_dir: &Path,
-        actuator_pid: u32,
-        correlation: CorrelationId,
-        diff: &Diff,
+        temp_dir: &Path, actuator_pid: u32, correlation: CorrelationId, diff: &Diff,
     ) -> io::Result<Self> {
         let path = build_path(temp_dir, actuator_pid, correlation);
         match write_inner(&path, diff) {
@@ -103,10 +100,7 @@ impl Drop for DiffTmpFile {
 /// Build the tmp path. Pure function; the caller decides whether to create the file at the returned
 /// location.
 fn build_path(temp_dir: &Path, actuator_pid: u32, correlation: CorrelationId) -> PathBuf {
-    temp_dir.join(format!(
-        "specter-{actuator_pid}-{corr:016x}.diff",
-        corr = correlation.as_u64(),
-    ))
+    temp_dir.join(format!("specter-{actuator_pid}-{corr:016x}.diff", corr = correlation.as_u64()))
 }
 
 /// Write the [`Diff`] to `path` in the tab-separated format documented in this module's header,
@@ -134,20 +128,13 @@ fn write_inner(path: &Path, diff: &Diff) -> io::Result<()> {
     }
     // `into_inner` flushes the buffer; an IntoInnerError carries the flush failure as its inner
     // `io::Error`.
-    let f = buf
-        .into_inner()
-        .map_err(std::io::IntoInnerError::into_error)?;
+    let f = buf.into_inner().map_err(std::io::IntoInnerError::into_error)?;
     f.sync_data()?;
     Ok(())
 }
 
 fn write_entry<W: Write>(w: &mut W, kind: &str, e: &EntryRef) -> io::Result<()> {
-    writeln!(
-        w,
-        "{kind}\t{seg}\t{inode}",
-        seg = e.segment,
-        inode = e.fs_id.inode(),
-    )
+    writeln!(w, "{kind}\t{seg}\t{inode}", seg = e.segment, inode = e.fs_id.inode())
 }
 
 fn write_rename<W: Write>(w: &mut W, r: &Rename) -> io::Result<()> {
@@ -157,12 +144,7 @@ fn write_rename<W: Write>(w: &mut W, r: &Rename) -> io::Result<()> {
         seg = r.from.segment,
         inode = r.from.fs_id.inode(),
     )?;
-    writeln!(
-        w,
-        "renamed_to\t{seg}\t{inode}",
-        seg = r.to.segment,
-        inode = r.to.fs_id.inode(),
-    )?;
+    writeln!(w, "renamed_to\t{seg}\t{inode}", seg = r.to.segment, inode = r.to.fs_id.inode())?;
     Ok(())
 }
 
@@ -210,11 +192,7 @@ mod tests {
             path.display(),
             dir.path().display(),
         );
-        let name = path
-            .file_name()
-            .expect("name")
-            .to_string_lossy()
-            .into_owned();
+        let name = path.file_name().expect("name").to_string_lossy().into_owned();
         assert_eq!(name, "specter-42-00000000000000ab.diff");
     }
 
@@ -225,10 +203,7 @@ mod tests {
             created: smallvec![entry("c1", 1)],
             deleted: smallvec![entry("d1", 2)],
             modified: smallvec![entry("m1", 3)],
-            renamed: smallvec![Rename {
-                from: entry("from", 4),
-                to: entry("to", 4),
-            }],
+            renamed: smallvec![Rename { from: entry("from", 4), to: entry("to", 4) }],
         };
         let handle =
             DiffTmpFile::create(dir.path(), 1, CorrelationId::from(0), &diff).expect("create");
@@ -243,14 +218,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let diff = Diff {
             renamed: smallvec![
-                Rename {
-                    from: entry("a", 1),
-                    to: entry("A", 1),
-                },
-                Rename {
-                    from: entry("b", 2),
-                    to: entry("B", 2),
-                },
+                Rename { from: entry("a", 1), to: entry("A", 1) },
+                Rename { from: entry("b", 2), to: entry("B", 2) },
             ],
             ..Default::default()
         };
@@ -268,10 +237,7 @@ mod tests {
     #[test]
     fn create_uses_segment_as_relative_path() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let diff = Diff {
-            created: smallvec![entry("src/sub/a.c", 7)],
-            ..Default::default()
-        };
+        let diff = Diff { created: smallvec![entry("src/sub/a.c", 7)], ..Default::default() };
         let handle =
             DiffTmpFile::create(dir.path(), 1, CorrelationId::from(0), &diff).expect("create");
         let body = std::fs::read_to_string(handle.path()).expect("read");
@@ -288,11 +254,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let handle = DiffTmpFile::create(dir.path(), 1, CorrelationId::from(0), &Diff::default())
             .expect("create");
-        let mode = std::fs::metadata(handle.path())
-            .expect("metadata")
-            .permissions()
-            .mode()
-            & 0o777;
+        let mode = std::fs::metadata(handle.path()).expect("metadata").permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "diff tmp file must be owner read/write only");
     }
 
@@ -307,10 +269,7 @@ mod tests {
         std::fs::write(&blocker, "x").expect("write blocker");
         let bad_temp = blocker.as_path();
         let result = DiffTmpFile::create(bad_temp, 1, CorrelationId::from(0), &Diff::default());
-        assert!(
-            result.is_err(),
-            "create must fail when temp_dir is a regular file",
-        );
+        assert!(result.is_err(), "create must fail when temp_dir is a regular file");
         let expected_path = bad_temp.join("specter-1-0000000000000000.diff");
         assert!(
             !expected_path.exists(),

@@ -42,10 +42,7 @@ use crate::ipc::wire::{KNOWN_WIRE_VARIANTS, WireDiagnostic};
 /// Run the `specter tail` stream loop.
 pub(crate) fn run(args: &TailArgs) -> ExitCode {
     if let Err(tag) = validate_filter(&args.filter) {
-        connect::emit_error(
-            &args.client,
-            format_args!("specter tail: unknown filter '{tag}'"),
-        );
+        connect::emit_error(&args.client, format_args!("specter tail: unknown filter '{tag}'"));
         connect::emit_hint(
             &args.client,
             format_args!("Known filters: {}", KNOWN_WIRE_VARIANTS.join(", ")),
@@ -118,10 +115,7 @@ pub(crate) fn run(args: &TailArgs) -> ExitCode {
 /// caller reports the rejection and owns the exit code (`2`, matching clap's argument-error shape),
 /// so the rule pins as a unit test independent of the surrounding I/O.
 fn validate_filter(filter: &[String]) -> Result<(), &str> {
-    match filter
-        .iter()
-        .find(|f| !KNOWN_WIRE_VARIANTS.contains(&f.as_str()))
-    {
+    match filter.iter().find(|f| !KNOWN_WIRE_VARIANTS.contains(&f.as_str())) {
         Some(tag) => Err(tag.as_str()),
         None => Ok(()),
     }
@@ -152,11 +146,7 @@ fn should_emit(wire: &WireDiagnostic, filter: &[String]) -> bool {
 /// [`crate::ipc::framing::InfallibleSerialize`] bound asserts the re-emit's `Vec<u8>`-build cannot
 /// fail (audited at the marker impl in [`crate::ipc::wire`]).
 fn emit<W: Write>(
-    out: &mut W,
-    wire: &WireDiagnostic,
-    output: OutputFormat,
-    buf: &mut String,
-    sty: Styler,
+    out: &mut W, wire: &WireDiagnostic, output: OutputFormat, buf: &mut String, sty: Styler,
 ) -> io::Result<()> {
     match output {
         OutputFormat::Human => {
@@ -189,10 +179,7 @@ mod tests {
     }
 
     fn missed() -> WireDiagnostic {
-        WireDiagnostic::Missed {
-            at: WireTime::from(UNIX_EPOCH),
-            count: 3,
-        }
+        WireDiagnostic::Missed { at: WireTime::from(UNIX_EPOCH), count: 3 }
     }
 
     /// Empty filter admits every variant — the default `tail` behaviour.

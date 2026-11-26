@@ -34,15 +34,9 @@ fn abandoned_burst_evidence_rides_next_bursts_obligation_and_fires() {
     // read fires the originally-witnessed change.
     let mut e = Engine::new();
     let r = anchor_dir(&mut e, "src");
-    let file_a = e
-        .tree_mut()
-        .ensure_child(r, "a", ResourceRole::User)
-        .expect("test live parent");
+    let file_a = e.tree_mut().ensure_child(r, "a", ResourceRole::User).expect("test live parent");
     e.tree_mut().set_kind(file_a, ResourceKind::File);
-    let file_b = e
-        .tree_mut()
-        .ensure_child(r, "b", ResourceRole::User)
-        .expect("test live parent");
+    let file_b = e.tree_mut().ensure_child(r, "b", ResourceRole::User).expect("test live parent");
     e.tree_mut().set_kind(file_b, ResourceKind::File);
 
     // CONTENT mask: events-complete for a `Subtree` shape, so a single Authoritative sample closes
@@ -67,13 +61,7 @@ fn abandoned_burst_evidence_rides_next_bursts_obligation_and_fires() {
 
     // The witnessed change: an in-mask event at `a` opens the Standard burst.
     let t0 = seed_done + Duration::from_millis(10);
-    let _ = e.step(
-        Input::FsEvent {
-            resource: file_a,
-            event: FsEvent::ContentChanged,
-        },
-        t0,
-    );
+    let _ = e.step(Input::FsEvent { resource: file_a, event: FsEvent::ContentChanged }, t0);
 
     let a_path: Arc<Path> = Arc::clone(e.tree().get(file_a).unwrap().path());
     let locked: Arc<Path> = Arc::from(a_path.with_file_name("locked"));
@@ -105,9 +93,7 @@ fn abandoned_burst_evidence_rides_next_bursts_obligation_and_fires() {
     // Profile rests Idle.
     let t2 = t0 + MAX_SETTLE + Duration::from_secs(1);
     let _ = drain_due(&mut e, t2);
-    let corr = e
-        .pending_probe_for(pid)
-        .expect("deadline-forced verify in flight");
+    let corr = e.pending_probe_for(pid).expect("deadline-forced verify in flight");
     let abandon_out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: pid,
@@ -143,13 +129,7 @@ fn abandoned_burst_evidence_rides_next_bursts_obligation_and_fires() {
     // The obstruction heals silently. A later, unrelated in-mask event at `b` opens a fresh burst;
     // the constructor drains the parked set into its provenance.
     let t3 = t2 + Duration::from_secs(5);
-    let _ = e.step(
-        Input::FsEvent {
-            resource: file_b,
-            event: FsEvent::ContentChanged,
-        },
-        t3,
-    );
+    let _ = e.step(Input::FsEvent { resource: file_b, event: FsEvent::ContentChanged }, t3);
 
     // The fresh burst's verify must obligate over the parked chain: dirty = {a (parked), b
     // (trigger)}, so the emitted probe's `Chains` covers `/src/a` — the walker cannot mtime-skip
@@ -158,11 +138,7 @@ fn abandoned_burst_evidence_rides_next_bursts_obligation_and_fires() {
     let mut probe_req: Option<ProbeRequest> = None;
     while let Some(entry) = e.pop_expired(t4) {
         let s = e.step(
-            Input::TimerExpired {
-                profile: entry.profile,
-                kind: entry.kind,
-                id: entry.id,
-            },
+            Input::TimerExpired { profile: entry.profile, kind: entry.kind, id: entry.id },
             t4,
         );
         for op in s.probe_ops().iter() {
@@ -172,11 +148,7 @@ fn abandoned_burst_evidence_rides_next_bursts_obligation_and_fires() {
         }
     }
     let corr = match probe_req.expect("settle expiry drives the fresh burst's Verifying") {
-        ProbeRequest::Subtree {
-            correlation,
-            obligation,
-            ..
-        } => {
+        ProbeRequest::Subtree { correlation, obligation, .. } => {
             match &obligation {
                 ProofObligation::Chains(chains) => {
                     assert!(

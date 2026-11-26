@@ -73,11 +73,7 @@ impl Engine {
     ///      across static, mixed, and minted Profiles. Anything else that passes the filter →
     ///      `drive_burst`.
     pub(crate) fn on_fs_event(
-        &mut self,
-        resource: ResourceId,
-        event: FsEvent,
-        now: Instant,
-        out: &mut StepOutput,
+        &mut self, resource: ResourceId, event: FsEvent, now: Instant, out: &mut StepOutput,
     ) {
         // Idempotence + the single pre-dispatch resource resolution. One `tree.get`: a stale id or
         // `watch_demand == 0` is a race between Unwatch and the Sensor's drain (drop with
@@ -87,13 +83,11 @@ impl Engine {
         // post-dispatch `path_of` would be fallible exactly where the obligation must not lose an
         // entry.
         let Some(r) = self.tree.get(resource) else {
-            out.diagnostics
-                .push(Diagnostic::EventOnUnwatchedResource { resource });
+            out.diagnostics.push(Diagnostic::EventOnUnwatchedResource { resource });
             return;
         };
         if r.watch_demand() == 0 {
-            out.diagnostics
-                .push(Diagnostic::EventOnUnwatchedResource { resource });
+            out.diagnostics.push(Diagnostic::EventOnUnwatchedResource { resource });
             return;
         }
         // `Arc::clone` of the slot's materialised path — an O(1) refcount bump, total by construction
@@ -134,8 +128,7 @@ impl Engine {
             // `WatchRootParent` event for an entry we don't track) and drop. Distinct from
             // `EventOnUnwatchedResource` (the `watch_demand == 0` race earlier) so log levels can
             // diverge.
-            out.diagnostics
-                .push(Diagnostic::EventNoConsumer { resource });
+            out.diagnostics.push(Diagnostic::EventNoConsumer { resource });
             return;
         }
 
@@ -147,10 +140,8 @@ impl Engine {
         let is_identity = event.is_identity();
 
         for (profile_id, class) in covering {
-            let Some((is_anchor, profile_events)) = self
-                .profiles
-                .get(profile_id)
-                .map(|p| (p.resource() == resource, p.events()))
+            let Some((is_anchor, profile_events)) =
+                self.profiles.get(profile_id).map(|p| (p.resource() == resource, p.events()))
             else {
                 continue;
             };
@@ -261,10 +252,7 @@ impl Engine {
         let Some(p) = self.profiles.get(profile_id) else {
             return;
         };
-        let Some(parent) = p
-            .watch_root_parent()
-            .or_else(|| self.tree.parent(p.resource()))
-        else {
+        let Some(parent) = p.watch_root_parent().or_else(|| self.tree.parent(p.resource())) else {
             return;
         };
         self.enter_anchor_recovery_descent(profile_id, parent, DescentWitness::Unobserved, out);
@@ -280,10 +268,7 @@ impl Engine {
     /// The early returns are structural no-recovery cases, not races: a reaped Profile has nothing
     /// to recover, and an anchor with no segment name (the FS root) has no parent to descend from.
     fn enter_anchor_recovery_descent(
-        &mut self,
-        profile_id: ProfileId,
-        parent: ResourceId,
-        witness: DescentWitness,
+        &mut self, profile_id: ProfileId, parent: ResourceId, witness: DescentWitness,
         out: &mut StepOutput,
     ) {
         let Some(anchor) = self.profiles.get(profile_id).map(Profile::resource) else {
@@ -329,10 +314,7 @@ impl Engine {
     /// self-healing on the next `FsEvent`. The match is total over `ProfileProbeRoute`'s three
     /// variants.
     pub(crate) fn on_probe_response(
-        &mut self,
-        response: ProbeResponse,
-        now: Instant,
-        out: &mut StepOutput,
+        &mut self, response: ProbeResponse, now: Instant, out: &mut StepOutput,
     ) {
         let profile_id = response.owner;
         let received = response.correlation;
@@ -341,14 +323,10 @@ impl Engine {
         // with the gate — before the disarm — so it stays valid through dispatch (disarm empties
         // the slot but leaves the carrier variant intact). An absent gate or a `received` mismatch
         // is every stale path.
-        let Some((_, route)) = self
-            .profile_probe_gate(profile_id)
-            .filter(|&(c, _)| c == received)
+        let Some((_, route)) = self.profile_probe_gate(profile_id).filter(|&(c, _)| c == received)
         else {
-            out.diagnostics.push(Diagnostic::StaleProbeResponse {
-                owner: profile_id,
-                correlation: received,
-            });
+            out.diagnostics
+                .push(Diagnostic::StaleProbeResponse { owner: profile_id, correlation: received });
             return;
         };
         let consumed = self.take_owner_probe(profile_id);
@@ -431,8 +409,7 @@ impl Engine {
              a non-proof outcome (SegmentObserved) — a structural answer is not a \
              quiescence observation (owner = {profile_id:?})",
         );
-        out.diagnostics
-            .push(Diagnostic::WalkerContractViolated { owner: profile_id });
+        out.diagnostics.push(Diagnostic::WalkerContractViolated { owner: profile_id });
         self.finish_burst_to_idle(profile_id, out);
     }
 
@@ -457,20 +434,15 @@ impl Engine {
     ///   forced.
     #[must_use]
     fn certify_probe_response(
-        &mut self,
-        profile_id: ProfileId,
-        proof: ProofOutcome,
-        forced: bool,
-        out: &mut StepOutput,
+        &mut self, profile_id: ProfileId, proof: ProofOutcome, forced: bool, out: &mut StepOutput,
     ) -> CertifiedResponse {
         let (snap, authority) = match proof {
             ProofOutcome::AnchorOk(leaf) => {
                 (TreeSnapshot::File(leaf), ProofAuthority::Authoritative)
             }
-            ProofOutcome::SubtreeProven {
-                snapshot,
-                authority,
-            } => (TreeSnapshot::Dir(snapshot), authority),
+            ProofOutcome::SubtreeProven { snapshot, authority } => {
+                (TreeSnapshot::Dir(snapshot), authority)
+            }
             ProofOutcome::Vanished => return CertifiedResponse::Vanished,
             ProofOutcome::Failed(failure) => return CertifiedResponse::Failed(failure),
         };
@@ -536,10 +508,7 @@ impl Engine {
             None
         };
         let witness = if needs_hash_channel {
-            QuiescenceWitness::HashChannel {
-                prior,
-                response: response_hash,
-            }
+            QuiescenceWitness::HashChannel { prior, response: response_hash }
         } else {
             QuiescenceWitness::EventsReliable
         };
@@ -629,13 +598,8 @@ impl Engine {
     /// terminal: its kind-mismatch producer emitted the diagnostic and tore the burst down; its
     /// absent-Profile producer found nothing to tear down.
     fn dispatch_burst_outcome(
-        &mut self,
-        profile_id: ProfileId,
-        intent: BurstIntent,
-        forced: bool,
-        proof: ProofOutcome,
-        now: Instant,
-        out: &mut StepOutput,
+        &mut self, profile_id: ProfileId, intent: BurstIntent, forced: bool, proof: ProofOutcome,
+        now: Instant, out: &mut StepOutput,
     ) {
         match self.certify_probe_response(profile_id, proof, forced, out) {
             CertifiedResponse::Proceed { snapshot, verdict } => {
@@ -670,10 +634,7 @@ impl Engine {
     /// `dispatch_burst_outcome`, Rebasing via the post-fire arm). The setters' debug_assert is a
     /// defensive backstop for any future caller bypassing the boundary.
     pub(crate) fn apply_snapshot(
-        &mut self,
-        profile_id: ProfileId,
-        target: ResourceId,
-        snapshot: TreeSnapshot,
+        &mut self, profile_id: ProfileId, target: ResourceId, snapshot: TreeSnapshot,
         out: &mut StepOutput,
     ) {
         match snapshot {
@@ -682,10 +643,7 @@ impl Engine {
                 // unclassified, File-kinded, or not-yet-grafted Profile. The anchor sum makes a
                 // kind-mismatched prior unrepresentable, so the old kind-agreement defensive arm is
                 // now structural.
-                let prior = self
-                    .profiles
-                    .get(profile_id)
-                    .and_then(|p| p.current_dir().cloned());
+                let prior = self.profiles.get(profile_id).and_then(|p| p.current_dir().cloned());
                 graft(
                     profile_id,
                     target,
@@ -723,11 +681,7 @@ impl Engine {
     /// probe is in flight). `BurstDeadline` is the only arm that ignores `now` —
     /// `handle_burst_deadline` sets `forced` and re-points the phase, scheduling nothing.
     pub(crate) fn on_timer_expired(
-        &mut self,
-        profile: ProfileId,
-        kind: TimerKind,
-        id: TimerId,
-        now: Instant,
+        &mut self, profile: ProfileId, kind: TimerKind, id: TimerId, now: Instant,
         out: &mut StepOutput,
     ) {
         if !is_timer_referenced(&self.profiles, profile, kind, id) {
@@ -769,10 +723,7 @@ impl Engine {
     /// The defensive early returns below cover direct `step(Input::TimerExpired)` calls that bypass
     /// `pop_expired`.
     pub(crate) fn on_settle_expired(
-        &mut self,
-        profile_id: ProfileId,
-        now: Instant,
-        out: &mut StepOutput,
+        &mut self, profile_id: ProfileId, now: Instant, out: &mut StepOutput,
     ) {
         let Some(p) = self.profiles.get(profile_id) else {
             return;
@@ -793,9 +744,7 @@ impl Engine {
         match pre.last_event_time {
             Some(last) if now.saturating_duration_since(last) < settle => {
                 let new_deadline = last + settle;
-                let new_timer = self
-                    .timers
-                    .schedule(new_deadline, profile_id, TimerKind::Settle);
+                let new_timer = self.timers.schedule(new_deadline, profile_id, TimerKind::Settle);
                 self.reschedule_batching(profile_id, new_timer);
             }
             Some(_) => self.transition_to_verifying(profile_id, out),
@@ -842,11 +791,7 @@ impl Engine {
     /// itself needs no `now` (the `WholeSubtree` walk reckons from its response, not from a window
     /// deadline).
     pub(crate) fn on_effect_complete(
-        &mut self,
-        sub: SubId,
-        key: &DedupKey,
-        outcome: &EffectOutcome,
-        now: Instant,
+        &mut self, sub: SubId, key: &DedupKey, outcome: &EffectOutcome, now: Instant,
         out: &mut StepOutput,
     ) {
         // The Sub registry is consulted only for the unknown-Sub diagnostic in the `Diagnose` arm:
@@ -870,11 +815,7 @@ impl Engine {
         // Pass 1 (read borrow): route only. Capture the `Copy` `BurstFinish` here — a Sub detaching
         // mid-Awaiting flips it via `mark_active_for_reap`, so the captured value is post-flip;
         // capturing keeps pass 2 a single `&mut` borrow.
-        let route = match self
-            .profiles
-            .get(profile_id)
-            .map(specter_core::Profile::state)
-        {
+        let route = match self.profiles.get(profile_id).map(specter_core::Profile::state) {
             Some(ProfileState::Active(ActiveBurst::PostFire(post), finish)) => match &post.phase {
                 PostFirePhase::Awaiting { .. } => CompletionRoute::CountDown(*finish),
                 // The counter drained at the `Awaiting → Rebasing` edge; a completion arriving
@@ -979,18 +920,13 @@ impl Engine {
     /// All resulting ops (across every attach / detach / rebind in the diff) merge into a single
     /// sorted `StepOutput`.
     pub(crate) fn on_config_diff(
-        &mut self,
-        subs: SubRegistryDiff,
-        now: Instant,
-        out: &mut StepOutput,
+        &mut self, subs: SubRegistryDiff, now: Instant, out: &mut StepOutput,
     ) {
         // removed → modified_params → modified_identity → added
         for name in subs.removed {
             match self.subs.find_by_name(&name) {
                 Some(sid) => self.detach_sub_inner(sid, DetachReason::ConfigDiffRemoved, out),
-                None => out
-                    .diagnostics
-                    .push(Diagnostic::ConfigDiffUnknownSub { name }),
+                None => out.diagnostics.push(Diagnostic::ConfigDiffUnknownSub { name }),
             }
         }
         for req in subs.modified_params {
@@ -1000,10 +936,9 @@ impl Engine {
                     // Prior attach failed; the Sub never entered the registry. Params alone cannot
                     // apply to a non-existent Sub — degrade to a fresh attach, narrating the *reason*
                     // (the fallback attach emits its own lifecycle diagnostics).
-                    out.diagnostics
-                        .push(Diagnostic::ConfigDiffRebindFallbackAttach {
-                            name: req.name.clone(),
-                        });
+                    out.diagnostics.push(Diagnostic::ConfigDiffRebindFallbackAttach {
+                        name: req.name.clone(),
+                    });
                     self.attach_sub_inner(req, now, out);
                 }
             }
@@ -1045,13 +980,9 @@ impl Engine {
     /// the per-claim walk yields nothing because owner back-references would have been cleared at
     /// reap.
     pub(crate) fn on_watch_op_rejected(
-        &mut self,
-        resource: ResourceId,
-        failure: WatchFailure,
-        out: &mut StepOutput,
+        &mut self, resource: ResourceId, failure: WatchFailure, out: &mut StepOutput,
     ) {
-        out.diagnostics
-            .push(Diagnostic::WatchOpRejected { resource, failure });
+        out.diagnostics.push(Diagnostic::WatchOpRejected { resource, failure });
 
         // Snapshot every claimer BEFORE any mutation. Borrow checker (we'll mutate self.profiles in
         // the loops) and we want a stable view of the pre-clamp world: a Profile that's `Pending(d)`
@@ -1174,10 +1105,7 @@ impl Engine {
     /// One [`Diagnostic::SensorOverflow`] per call surfaces the event in operator logs — the bursts
     /// the reseed schedules carry no per-Profile annotation that they were triggered by overflow.
     pub(crate) fn on_sensor_overflow(
-        &mut self,
-        scope: OverflowScope,
-        now: Instant,
-        out: &mut StepOutput,
+        &mut self, scope: OverflowScope, now: Instant, out: &mut StepOutput,
     ) {
         // Snapshot the in-scope ProfileId set BEFORE any mutation. The loop below transitions
         // Profiles through Idle and re-into Active(Seed); a fresh `iter()` mid-loop would observe
@@ -1199,11 +1127,7 @@ impl Engine {
         // such an ancestor, the loop never reaches a second same-owner emission for it.
         let profiles_to_reseed: SmallVec<[ProfileId; 8]> = profiles_to_reseed
             .into_iter()
-            .filter(|&pid| {
-                self.profiles
-                    .get(pid)
-                    .is_some_and(|p| !p.state().is_draining())
-            })
+            .filter(|&pid| self.profiles.get(pid).is_some_and(|p| !p.state().is_draining()))
             .collect();
 
         for pid in profiles_to_reseed {
@@ -1326,13 +1250,8 @@ impl Engine {
     /// post-`Vanished` Idle state (`current.is_none()`): a Standard burst with no baseline cannot
     /// dispatch a stability verdict.
     pub(crate) fn drive_burst(
-        &mut self,
-        profile_id: ProfileId,
-        event_resource: ResourceId,
-        event_path: &Arc<Path>,
-        event: FsEvent,
-        now: Instant,
-        out: &mut StepOutput,
+        &mut self, profile_id: ProfileId, event_resource: ResourceId, event_path: &Arc<Path>,
+        event: FsEvent, now: Instant, out: &mut StepOutput,
     ) {
         let Some(p) = self.profiles.get(profile_id) else {
             return;
@@ -1404,11 +1323,7 @@ impl Engine {
     /// order, so a `tail` sees every arm, not only the eventual [`Diagnostic::QuiescenceAbsorbed`]
     /// fold.
     pub(crate) fn on_arm_absorb(
-        &mut self,
-        sub: SubId,
-        duration: Option<Duration>,
-        now: Instant,
-        out: &mut StepOutput,
+        &mut self, sub: SubId, duration: Option<Duration>, now: Instant, out: &mut StepOutput,
     ) {
         for profile_id in self.subs.firing_profiles(sub) {
             let Some(p) = self.profiles.get_mut(profile_id) else {
@@ -1419,10 +1334,7 @@ impl Engine {
                 None => (now + p.settle, AbsorbMode::ConsumeOnFirst),
             };
             p.arm_absorb(expiry, mode);
-            out.diagnostics.push(Diagnostic::AbsorbArmed {
-                profile: profile_id,
-                mode,
-            });
+            out.diagnostics.push(Diagnostic::AbsorbArmed { profile: profile_id, mode });
         }
     }
 
@@ -1575,16 +1487,9 @@ impl Engine {
     /// own teardown in the same step ([`Engine::reap_profile`]'s descent release) is silent — a
     /// Profile detached in the same step must not log as parked.
     pub(crate) fn park_profile(
-        &mut self,
-        profile_id: ProfileId,
-        narration: ParkNarration,
-        out: &mut StepOutput,
+        &mut self, profile_id: ProfileId, narration: ParkNarration, out: &mut StepOutput,
     ) {
-        if self
-            .profiles
-            .transition_state(profile_id, ProfileState::Parked)
-            .is_none()
-        {
+        if self.profiles.transition_state(profile_id, ProfileState::Parked).is_none() {
             return;
         }
         let Some(p) = self.profiles.get(profile_id) else {
@@ -1620,10 +1525,7 @@ impl Engine {
             && current_h != witness
             && self.subs.has_per_stable_file_sub(profile_id)
         {
-            out.diagnostics
-                .push(Diagnostic::PerFileDriftDroppedOnRecovery {
-                    profile: profile_id,
-                });
+            out.diagnostics.push(Diagnostic::PerFileDriftDroppedOnRecovery { profile: profile_id });
         }
     }
 
@@ -1664,11 +1566,7 @@ impl Engine {
     fn classify_consequence(&self, profile_id: ProfileId, intent: BurstIntent) -> Consequence {
         // Shape layer: a discovery Profile's stable verdict reconciles the match set, whatever the
         // intent, ahead of the fold override.
-        if self
-            .profiles
-            .get(profile_id)
-            .is_some_and(|p| p.config().match_chain().is_some())
-        {
+        if self.profiles.get(profile_id).is_some_and(|p| p.config().match_chain().is_some()) {
             return Consequence::Reconcile;
         }
 
@@ -1702,10 +1600,7 @@ impl Engine {
         // not). A non-firing `base` passes through untouched, so a Cold-Seed `SilentPin` (which
         // proves nothing) leaves the window unconsumed for the first genuinely fireable burst.
         if base.is_firing()
-            && self
-                .profiles
-                .get(profile_id)
-                .is_some_and(|p| p.state().burst_fold_latched())
+            && self.profiles.get(profile_id).is_some_and(|p| p.state().burst_fold_latched())
         {
             Consequence::AbsorbFold
         } else {
@@ -1729,38 +1624,18 @@ impl Engine {
     /// the seal may reap the Profile. The three firing consequences cross the single gate in
     /// [`Engine::gated_fire`].
     fn fire_or_seal(
-        &mut self,
-        profile_id: ProfileId,
-        snapshot: TreeSnapshot,
-        target: ResourceId,
-        forced: bool,
-        intent: BurstIntent,
-        now: Instant,
-        out: &mut StepOutput,
+        &mut self, profile_id: ProfileId, snapshot: TreeSnapshot, target: ResourceId, forced: bool,
+        intent: BurstIntent, now: Instant, out: &mut StepOutput,
     ) {
         // Kind agreement is verified upstream at the `dispatch_burst_outcome` choke (hoisted, once
         // for Seed + Standard, before this dispatch).
         self.apply_snapshot(profile_id, target, snapshot, out);
         match self.classify_consequence(profile_id, intent) {
             Consequence::StandardFire => {
-                self.gated_fire(
-                    profile_id,
-                    EmitMode::Standard { forced },
-                    forced,
-                    false,
-                    now,
-                    out,
-                );
+                self.gated_fire(profile_id, EmitMode::Standard { forced }, forced, false, now, out);
             }
             Consequence::FreshSeedFire => {
-                self.gated_fire(
-                    profile_id,
-                    EmitMode::Standard { forced },
-                    forced,
-                    true,
-                    now,
-                    out,
-                );
+                self.gated_fire(profile_id, EmitMode::Standard { forced }, forced, true, now, out);
             }
             Consequence::RecoveryFire(drifted) => {
                 self.gated_fire(
@@ -1787,9 +1662,7 @@ impl Engine {
                 // bookkeeping runs *before* the seal: `seal_baseline_silently` finishes the burst,
                 // which can reap the Profile (and its Subs), so the diagnostic and the count
                 // bump/consume must land while the Profile is still live.
-                out.diagnostics.push(Diagnostic::QuiescenceAbsorbed {
-                    profile: profile_id,
-                });
+                out.diagnostics.push(Diagnostic::QuiescenceAbsorbed { profile: profile_id });
                 if let Some(p) = self.profiles.get_mut(profile_id) {
                     p.note_absorb_fold();
                 }
@@ -1840,13 +1713,8 @@ impl Engine {
     /// here `forced = true` — a recovery that hit the bounded ceiling bypasses the gate without
     /// marking its `Effect`.
     fn gated_fire(
-        &mut self,
-        profile_id: ProfileId,
-        mode: EmitMode<'_>,
-        forced: bool,
-        fresh_seed: bool,
-        now: Instant,
-        out: &mut StepOutput,
+        &mut self, profile_id: ProfileId, mode: EmitMode<'_>, forced: bool, fresh_seed: bool,
+        now: Instant, out: &mut StepOutput,
     ) {
         if forced
             || !crate::coverage::has_active_standard_descendant(
@@ -1885,13 +1753,8 @@ impl Engine {
     ///   the dedup / Seed baseline. Its evidence parks rather than re-batching against a region that
     ///   stays unreadable, and the next burst re-proves it.
     fn dispatch_quiescence_ok(
-        &mut self,
-        profile_id: ProfileId,
-        snapshot: TreeSnapshot,
-        verdict: QuiescenceVerdict,
-        intent: BurstIntent,
-        now: Instant,
-        out: &mut StepOutput,
+        &mut self, profile_id: ProfileId, snapshot: TreeSnapshot, verdict: QuiescenceVerdict,
+        intent: BurstIntent, now: Instant, out: &mut StepOutput,
     ) {
         // Profile-presence guard + the snapshot-commit target read back off the in-flight Verifying
         // probe (the latest emitted probe target). The covered-descendant fire-gate lives at the
@@ -1904,9 +1767,7 @@ impl Engine {
             QuiescenceVerdict::Stable(StableReason::Natural) => {
                 self.fire_or_seal(profile_id, snapshot, target, false, intent, now, out);
             }
-            QuiescenceVerdict::Stable(StableReason::Forced {
-                hash_channel_disagreed,
-            }) => {
+            QuiescenceVerdict::Stable(StableReason::Forced { hash_channel_disagreed }) => {
                 // N event-silent windows that each hashed differently are motion outside the `events`
                 // mask, not a slow writer the deadline caught.
                 if hash_channel_disagreed {
@@ -1922,11 +1783,10 @@ impl Engine {
                             retries,
                         });
                     } else {
-                        out.diagnostics
-                            .push(Diagnostic::QuiescenceCeilingForcedDespiteChange {
-                                profile: profile_id,
-                                intent,
-                            });
+                        out.diagnostics.push(Diagnostic::QuiescenceCeilingForcedDespiteChange {
+                            profile: profile_id,
+                            intent,
+                        });
                     }
                 }
                 self.fire_or_seal(profile_id, snapshot, target, true, intent, now, out);
@@ -1935,12 +1795,11 @@ impl Engine {
                 self.retry_drives_batching(profile_id, observed_motion, now, out);
             }
             QuiescenceVerdict::Abandon { first_unread } => {
-                out.diagnostics
-                    .push(Diagnostic::QuiescenceCeilingUnreadable {
-                        profile: profile_id,
-                        first_unread,
-                        intent,
-                    });
+                out.diagnostics.push(Diagnostic::QuiescenceCeilingUnreadable {
+                    profile: profile_id,
+                    first_unread,
+                    intent,
+                });
                 self.finish_verdict_terminal(
                     profile_id,
                     EvidenceDisposition::ParkResidue,
@@ -2090,11 +1949,7 @@ impl Engine {
     /// event. Sealing even when `count == 0` (every recovery Sub dedup-suppressed, or detached) is
     /// intentional and matches the prior pin exactly.
     fn fire_and_settle(
-        &mut self,
-        profile_id: ProfileId,
-        mode: EmitMode<'_>,
-        now: Instant,
-        out: &mut StepOutput,
+        &mut self, profile_id: ProfileId, mode: EmitMode<'_>, now: Instant, out: &mut StepOutput,
     ) {
         let outcome = self.emit_effects(profile_id, mode, now, out);
         if matches!(mode, EmitMode::SeedDrift { .. })
@@ -2119,10 +1974,7 @@ impl Engine {
     /// reconfirm pass, so the note emits exactly once.
     fn warn_perfile_skipped_on_fresh_seed(&self, profile_id: ProfileId, out: &mut StepOutput) {
         if self.subs.has_per_stable_file_sub(profile_id) {
-            out.diagnostics
-                .push(Diagnostic::PerFileFireSkippedOnFreshSeed {
-                    profile: profile_id,
-                });
+            out.diagnostics.push(Diagnostic::PerFileFireSkippedOnFreshSeed { profile: profile_id });
         }
     }
 
@@ -2149,18 +2001,12 @@ impl Engine {
     /// baseline-less `FsEvent`s to Seed instead), so the guard is effectively unconditional in v1 —
     /// kept for robustness against future routing changes.
     fn dispatch_pre_fire_vanished(
-        &mut self,
-        profile_id: ProfileId,
-        intent: BurstIntent,
-        out: &mut StepOutput,
+        &mut self, profile_id: ProfileId, intent: BurstIntent, out: &mut StepOutput,
     ) {
         if self.profiles.get(profile_id).is_none() {
             return;
         }
-        out.diagnostics.push(Diagnostic::ProbeVanished {
-            profile: profile_id,
-            intent,
-        });
+        out.diagnostics.push(Diagnostic::ProbeVanished { profile: profile_id, intent });
         self.finalize_anchor_lost_and_descend(profile_id, out);
     }
 
@@ -2182,22 +2028,13 @@ impl Engine {
     /// [`Diagnostic::ProbeFailed`] is emitted on every window, retry included: pressure is the
     /// daemon's own health signal, bounded by the ceiling, and silence would hide it.
     fn dispatch_pre_fire_failed(
-        &mut self,
-        profile_id: ProfileId,
-        intent: BurstIntent,
-        failure: ProbeFailure,
-        forced: bool,
-        now: Instant,
-        out: &mut StepOutput,
+        &mut self, profile_id: ProfileId, intent: BurstIntent, failure: ProbeFailure, forced: bool,
+        now: Instant, out: &mut StepOutput,
     ) {
         if self.profiles.get(profile_id).is_none() {
             return;
         }
-        out.diagnostics.push(Diagnostic::ProbeFailed {
-            profile: profile_id,
-            intent,
-            failure,
-        });
+        out.diagnostics.push(Diagnostic::ProbeFailed { profile: profile_id, intent, failure });
         match failure {
             ProbeFailure::Denied { .. } => self.finalize_anchor_lost_and_park(profile_id, out),
             ProbeFailure::Transient { .. } if forced => {
@@ -2234,12 +2071,8 @@ impl Engine {
     ///   region the walk could not read. A recovery's baseline is safe to keep: the recovery fire
     ///   already sealed its witness into a snapshot, so the next event routes Standard.
     fn dispatch_rebase_ok(
-        &mut self,
-        profile_id: ProfileId,
-        snapshot: TreeSnapshot,
-        verdict: QuiescenceVerdict,
-        now: Instant,
-        out: &mut StepOutput,
+        &mut self, profile_id: ProfileId, snapshot: TreeSnapshot, verdict: QuiescenceVerdict,
+        now: Instant, out: &mut StepOutput,
     ) {
         // The rebase walk is always the anchor's (`transition_to_rebasing`).
         let Some(target) = self.profiles.get(profile_id).map(Profile::resource) else {
@@ -2252,10 +2085,7 @@ impl Engine {
                 if let Some(p) = self.profiles.get_mut(profile_id) {
                     p.rebase_baseline();
                 }
-                if let StableReason::Forced {
-                    hash_channel_disagreed,
-                } = reason
-                {
+                if let StableReason::Forced { hash_channel_disagreed } = reason {
                     // Narrated before the exit, so the stream names the ceiling ahead of any restart
                     // it produces.
                     let intent = self.rebase_burst_intent(profile_id);
@@ -2340,10 +2170,7 @@ impl Engine {
         // read is order-insensitive in v1; pinning it before the call guards against future
         // coordinator changes that might touch state.
         let intent = self.rebase_burst_intent(profile_id);
-        out.diagnostics.push(Diagnostic::ProbeVanished {
-            profile: profile_id,
-            intent,
-        });
+        out.diagnostics.push(Diagnostic::ProbeVanished { profile: profile_id, intent });
         self.finalize_anchor_lost_and_descend(profile_id, out);
     }
 
@@ -2360,22 +2187,14 @@ impl Engine {
     /// Diagnostic carries the burst's actual intent (Standard fallback on the same defensive path
     /// noted on the `Vanished` sibling; read before the consequence for the same reason).
     fn dispatch_rebase_failed(
-        &mut self,
-        profile_id: ProfileId,
-        failure: ProbeFailure,
-        forced: bool,
-        now: Instant,
+        &mut self, profile_id: ProfileId, failure: ProbeFailure, forced: bool, now: Instant,
         out: &mut StepOutput,
     ) {
         if self.profiles.get(profile_id).is_none() {
             return;
         }
         let intent = self.rebase_burst_intent(profile_id);
-        out.diagnostics.push(Diagnostic::ProbeFailed {
-            profile: profile_id,
-            intent,
-            failure,
-        });
+        out.diagnostics.push(Diagnostic::ProbeFailed { profile: profile_id, intent, failure });
         match failure {
             ProbeFailure::Denied { .. } => self.finalize_anchor_lost_and_park(profile_id, out),
             ProbeFailure::Transient { .. } if forced => {
@@ -2429,27 +2248,21 @@ impl Engine {
     /// requires [`BurstFinish::ReturnToIdle`]); the `ParkResidue` arm consults
     /// [`Engine::burst_is_zombie`] explicitly.
     fn finish_verdict_terminal(
-        &mut self,
-        profile_id: ProfileId,
-        disposition: EvidenceDisposition,
-        now: Instant,
+        &mut self, profile_id: ProfileId, disposition: EvidenceDisposition, now: Instant,
         out: &mut StepOutput,
     ) {
         match disposition {
             EvidenceDisposition::Restart => {
                 // Restart iff the final-window residual is non-empty AND the burst returns to Idle.
                 // Resolved under one read borrow; the bool carries no borrow out.
-                let should_restart = match self
-                    .profiles
-                    .get(profile_id)
-                    .map(specter_core::Profile::state)
-                {
-                    Some(ProfileState::Active(
-                        ActiveBurst::PostFire(post),
-                        BurstFinish::ReturnToIdle,
-                    )) => !post.final_window_residual.is_empty(),
-                    _ => false,
-                };
+                let should_restart =
+                    match self.profiles.get(profile_id).map(specter_core::Profile::state) {
+                        Some(ProfileState::Active(
+                            ActiveBurst::PostFire(post),
+                            BurstFinish::ReturnToIdle,
+                        )) => !post.final_window_residual.is_empty(),
+                        _ => false,
+                    };
                 if should_restart {
                     self.restart_burst_from_fire_tail_residual(profile_id, now, out);
                 } else {
@@ -2594,15 +2407,9 @@ impl Engine {
         out.push_cancel_effect(profile_id);
 
         out.diagnostics.push(if zombie {
-            Diagnostic::AwaitGateDeadlineReap {
-                profile: profile_id,
-                outstanding,
-            }
+            Diagnostic::AwaitGateDeadlineReap { profile: profile_id, outstanding }
         } else {
-            Diagnostic::AwaitGateDeadlineForceRebasing {
-                profile: profile_id,
-                outstanding,
-            }
+            Diagnostic::AwaitGateDeadlineForceRebasing { profile: profile_id, outstanding }
         });
         if zombie {
             self.finish_burst_to_idle(profile_id, out);
@@ -2641,10 +2448,7 @@ impl Engine {
     /// Active(PostFire(Settling { settle_timer == popped_id }))`. The defensive early returns below
     /// cover direct `step(Input::TimerExpired)` calls that bypass `pop_expired`.
     fn handle_post_fire_settle_expired(
-        &mut self,
-        profile_id: ProfileId,
-        now: Instant,
-        out: &mut StepOutput,
+        &mut self, profile_id: ProfileId, now: Instant, out: &mut StepOutput,
     ) {
         let Some(p) = self.profiles.get(profile_id) else {
             return;
@@ -2664,8 +2468,7 @@ impl Engine {
             Some(last) if now.saturating_duration_since(last) < settle => {
                 let new_deadline = last + settle;
                 let new_timer =
-                    self.timers
-                        .schedule(new_deadline, profile_id, TimerKind::PostFireSettle);
+                    self.timers.schedule(new_deadline, profile_id, TimerKind::PostFireSettle);
                 self.reschedule_settling(profile_id, new_timer);
             }
             Some(_) => self.transition_to_rebasing(profile_id, out),
@@ -2753,11 +2556,7 @@ impl Engine {
     /// [`specter_core::SubRegistry::mark_fired`] stays the SubtreeRoot edge — separate signal,
     /// separate writer.
     fn emit_effects(
-        &mut self,
-        profile_id: ProfileId,
-        mode: EmitMode<'_>,
-        now: Instant,
-        out: &mut StepOutput,
+        &mut self, profile_id: ProfileId, mode: EmitMode<'_>, now: Instant, out: &mut StepOutput,
     ) -> EmitOutcome {
         let Some(p) = self.profiles.get(profile_id) else {
             return EmitOutcome::default();
@@ -2803,10 +2602,7 @@ impl Engine {
         // `nothing_changed` with the per-Sub `has_fired` flag (read with each Sub's other facts at
         // the loop head): a Sub that has never fired suppresses nothing — it is its own "first
         // emission" — even when the tree happens to match.
-        let nothing_changed = p
-            .baseline_hash()
-            .zip(p.current_hash())
-            .is_some_and(|(b, c)| b == c);
+        let nothing_changed = p.baseline_hash().zip(p.current_hash()).is_some_and(|(b, c)| b == c);
 
         let effect_forced = mode.effect_forced();
 
@@ -2818,11 +2614,9 @@ impl Engine {
         for sub_id in sub_ids {
             let (name, spec, already_fired, minted_by) = match self.subs.get(sub_id) {
                 Some(s) => match s.reaction() {
-                    Reaction::Spawn {
-                        params: SubParams { spawn, .. },
-                        minted_by,
-                        history,
-                    } => (&s.name, spawn, history.has_fired, *minted_by),
+                    Reaction::Spawn { params: SubParams { spawn, .. }, minted_by, history } => {
+                        (&s.name, spawn, history.has_fired, *minted_by)
+                    }
                     // A template never fires — discovery's "fire" is the reconcile's batch of
                     // attachments, and the verdict floor classifies its Profile to Reconcile before
                     // the fire fork. Reaching here is a routing breach; the skip is the semantically
@@ -2864,11 +2658,7 @@ impl Engine {
             };
             let pushed: u32 = match spec.scope() {
                 EffectScope::SubtreeRoot => {
-                    let diff = if spec.needs_diff() {
-                        ensure_diff(&mut diff_arc)
-                    } else {
-                        None
-                    };
+                    let diff = if spec.needs_diff() { ensure_diff(&mut diff_arc) } else { None };
                     out.push_effect(Effect::subtree(
                         effect_common(self.effect_correlations.next()),
                         diff,
@@ -2952,10 +2742,7 @@ impl Engine {
         {
             debug_assert_eq!(
                 self.profiles.nonsteady(),
-                self.profiles
-                    .iter()
-                    .filter(|(_, p)| p.is_nonsteady())
-                    .count(),
+                self.profiles.iter().filter(|(_, p)| p.is_nonsteady()).count(),
                 "ProfileMap.nonsteady desynced from a full carrier recount",
             );
         }
@@ -3018,10 +2805,7 @@ impl EventCarriers {
     /// The no-carrier value: the O(1) carrier-gate return and the seed the scan pushes into. Both
     /// `SmallVec`s start inline-empty, no allocation.
     fn empty() -> Self {
-        Self {
-            descents: SmallVec::new(),
-            recoveries: SmallVec::new(),
-        }
+        Self { descents: SmallVec::new(), recoveries: SmallVec::new() }
     }
 }
 
@@ -3196,19 +2980,12 @@ enum FireVerdict {
 /// - **PerStableFile under SeedDrift.** Skipped entirely — Seed-time drift is Subtree-only (PerFile
 ///   keeps no per-leaf fire history).
 fn fire_decision(
-    mode: EmitMode<'_>,
-    scope: EffectScope,
-    sub_id: SubId,
-    already_fired: bool,
+    mode: EmitMode<'_>, scope: EffectScope, sub_id: SubId, already_fired: bool,
     nothing_changed: bool,
 ) -> FireVerdict {
     match (scope, mode) {
         (EffectScope::SubtreeRoot, EmitMode::SeedDrift { drifted }) => {
-            if drifted.contains(&sub_id) {
-                FireVerdict::Emit
-            } else {
-                FireVerdict::SkipScope
-            }
+            if drifted.contains(&sub_id) { FireVerdict::Emit } else { FireVerdict::SkipScope }
         }
         (EffectScope::SubtreeRoot, EmitMode::Standard { forced }) => {
             if !forced && nothing_changed && already_fired {
@@ -3230,9 +3007,7 @@ fn fire_decision(
 /// one, to one [`ensure_descendant`] materializes under reconcile's own rules, so no file goes unrun
 /// for want of a slot.
 fn stable_file_targets<'a>(
-    tree: &'a mut Tree,
-    anchor: ResourceId,
-    diff: &'a Diff,
+    tree: &'a mut Tree, anchor: ResourceId, diff: &'a Diff,
 ) -> impl Iterator<Item = (ResourceId, &'a CompactString)> {
     diff.created
         .iter()
@@ -3278,10 +3053,7 @@ fn stable_file_targets<'a>(
 /// not to handle a reachable fault.
 #[derive(Debug)]
 enum CertifiedResponse {
-    Proceed {
-        snapshot: TreeSnapshot,
-        verdict: QuiescenceVerdict,
-    },
+    Proceed { snapshot: TreeSnapshot, verdict: QuiescenceVerdict },
     Vanished,
     Failed(ProbeFailure),
     Degraded,

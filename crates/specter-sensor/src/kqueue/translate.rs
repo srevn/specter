@@ -123,19 +123,13 @@ mod tests {
     #[test]
     fn structure_on_file_is_noop() {
         // STRUCTURE is dir-only; on File it contributes no extra bits.
-        assert_eq!(
-            class_set_to_fflags(ClassSet::STRUCTURE, ResourceKind::File),
-            IDENTITY_FLOOR
-        );
+        assert_eq!(class_set_to_fflags(ClassSet::STRUCTURE, ResourceKind::File), IDENTITY_FLOOR);
     }
 
     #[test]
     fn structure_on_unknown_is_noop() {
         // Unknown defaults to File-shape; STRUCTURE is dir-only ⇒ no bits.
-        assert_eq!(
-            class_set_to_fflags(ClassSet::STRUCTURE, ResourceKind::Unknown),
-            IDENTITY_FLOOR
-        );
+        assert_eq!(class_set_to_fflags(ClassSet::STRUCTURE, ResourceKind::Unknown), IDENTITY_FLOOR);
     }
 
     // ── CONTENT ──────────────────────────────────────────────────────
@@ -158,10 +152,7 @@ mod tests {
     #[test]
     fn content_on_dir_is_noop() {
         // CONTENT is file-only; on Dir it contributes no extra bits.
-        assert_eq!(
-            class_set_to_fflags(ClassSet::CONTENT, ResourceKind::Dir),
-            IDENTITY_FLOOR
-        );
+        assert_eq!(class_set_to_fflags(ClassSet::CONTENT, ResourceKind::Dir), IDENTITY_FLOOR);
     }
 
     // ── METADATA ─────────────────────────────────────────────────────
@@ -210,10 +201,7 @@ mod tests {
     fn content_and_metadata_on_file_yields_full_file_mask() {
         // The `DEFAULT_PER_FILE` mask × File anchor.
         let f = class_set_to_fflags(ClassSet::DEFAULT_PER_FILE, ResourceKind::File);
-        assert_eq!(
-            f,
-            IDENTITY_FLOOR | NOTE_WRITE | NOTE_EXTEND | NOTE_ATTRIB | NOTE_LINK
-        );
+        assert_eq!(f, IDENTITY_FLOOR | NOTE_WRITE | NOTE_EXTEND | NOTE_ATTRIB | NOTE_LINK);
     }
 
     #[test]
@@ -221,10 +209,7 @@ mod tests {
         let all = ClassSet::STRUCTURE | ClassSet::CONTENT | ClassSet::METADATA;
         let f = class_set_to_fflags(all, ResourceKind::Dir);
         // Dir gets STRUCTURE (W|E|L) + METADATA (A); CONTENT is no-op.
-        assert_eq!(
-            f,
-            IDENTITY_FLOOR | NOTE_WRITE | NOTE_EXTEND | NOTE_LINK | NOTE_ATTRIB
-        );
+        assert_eq!(f, IDENTITY_FLOOR | NOTE_WRITE | NOTE_EXTEND | NOTE_LINK | NOTE_ATTRIB);
     }
 
     #[test]
@@ -233,10 +218,7 @@ mod tests {
         let f = class_set_to_fflags(all, ResourceKind::File);
         // File gets CONTENT (W|E) + METADATA (A|L); STRUCTURE is no-op. NOTE_LINK lands once via
         // METADATA — same result.
-        assert_eq!(
-            f,
-            IDENTITY_FLOOR | NOTE_WRITE | NOTE_EXTEND | NOTE_ATTRIB | NOTE_LINK
-        );
+        assert_eq!(f, IDENTITY_FLOOR | NOTE_WRITE | NOTE_EXTEND | NOTE_ATTRIB | NOTE_LINK);
     }
 
     /// Re-translation determinism: the function is pure, so the same inputs always yield the same

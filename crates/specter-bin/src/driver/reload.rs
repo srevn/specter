@@ -124,9 +124,7 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// loader matches the engine on the way out, and the driver is about to shut down anyway —
     /// keeping the rotation in front of the return is the clearer invariant.
     pub(crate) fn dispatch_reload(
-        &mut self,
-        trigger: ReloadTrigger,
-        now: Instant,
+        &mut self, trigger: ReloadTrigger, now: Instant,
     ) -> ControlFlow<()> {
         // A manual reload (SIGHUP / IPC) supersedes any pending auto-reload settle deadline: the
         // operator's explicit pulse pre-empts the debounced pulse, and a deadline left armed would
@@ -354,10 +352,8 @@ impl<W: FsWatcher> EngineDriver<W> {
         let mut diff = specter_config::diff(self.loader.current_config(), new_config);
         let disabled = &self.disabled_runtime;
         diff.added.retain(|r| !disabled.contains(r.name.as_str()));
-        diff.modified_identity
-            .retain(|r| !disabled.contains(r.name.as_str()));
-        diff.modified_params
-            .retain(|r| !disabled.contains(r.name.as_str()));
+        diff.modified_identity.retain(|r| !disabled.contains(r.name.as_str()));
+        diff.modified_params.retain(|r| !disabled.contains(r.name.as_str()));
         diff.removed.retain(|n| !disabled.contains(n.as_str()));
         diff
     }
@@ -379,11 +375,7 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// full reload pipeline.
     pub(super) fn prune_disabled_runtime_against_current_config(&mut self) {
         self.disabled_runtime.retain(|name| {
-            self.loader
-                .current_config()
-                .watches
-                .iter()
-                .any(|s| s.name.as_str() == name.as_str())
+            self.loader.current_config().watches.iter().any(|s| s.name.as_str() == name.as_str())
         });
     }
 }

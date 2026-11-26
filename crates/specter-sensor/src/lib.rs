@@ -82,9 +82,7 @@ impl ProbeFailureExt for ProbeFailure {
             Some(
                 n @ (libc::EMFILE | libc::ENFILE | libc::ENOSPC | libc::ENOMEM | libc::EAGAIN),
             ) => Self::Transient { errno: n },
-            other => Self::Denied {
-                errno: other.unwrap_or(libc::EIO),
-            },
+            other => Self::Denied { errno: other.unwrap_or(libc::EIO) },
         }
     }
 }
@@ -105,13 +103,8 @@ impl ProbeFailureExt for ProbeFailure {
 /// Profile.
 #[derive(Debug, Clone)]
 pub enum WatcherEvent {
-    Fs {
-        resource: ResourceId,
-        event: FsEvent,
-    },
-    Overflow {
-        scope: OverflowScope,
-    },
+    Fs { resource: ResourceId, event: FsEvent },
+    Overflow { scope: OverflowScope },
 }
 
 /// Single-owner filesystem watcher.
@@ -193,11 +186,7 @@ pub trait FsWatcher: Send + AsFd {
     /// mask and re-registers iff different; `ClassSet::EMPTY` degrades to identity-floor-only
     /// delivery.
     fn watch(
-        &mut self,
-        r: ResourceId,
-        path: &Path,
-        kind: ResourceKind,
-        events: ClassSet,
+        &mut self, r: ResourceId, path: &Path, kind: ResourceKind, events: ClassSet,
     ) -> Result<(), WatchFailure>;
 
     /// Remove a watch. Idempotent on stale ids. The sensor releases its kernel-level registration
@@ -449,25 +438,11 @@ mod tests {
     #[test]
     fn probe_classifier_tells_want_of_a_resource_from_a_refusal() {
         let class = |errno| ProbeFailure::from_io(&io::Error::from_raw_os_error(errno));
-        for errno in [
-            libc::EMFILE,
-            libc::ENFILE,
-            libc::ENOSPC,
-            libc::ENOMEM,
-            libc::EAGAIN,
-        ] {
-            assert_eq!(
-                class(errno),
-                ProbeFailure::Transient { errno },
-                "errno {errno}"
-            );
+        for errno in [libc::EMFILE, libc::ENFILE, libc::ENOSPC, libc::ENOMEM, libc::EAGAIN] {
+            assert_eq!(class(errno), ProbeFailure::Transient { errno }, "errno {errno}");
         }
         for errno in [libc::EACCES, libc::EIO, libc::ELOOP, libc::ENOTDIR] {
-            assert_eq!(
-                class(errno),
-                ProbeFailure::Denied { errno },
-                "errno {errno}"
-            );
+            assert_eq!(class(errno), ProbeFailure::Denied { errno }, "errno {errno}");
         }
     }
 
@@ -477,9 +452,7 @@ mod tests {
     fn watch_classifier_labels_want_of_kernel_memory_as_pressure() {
         assert_eq!(
             WatchFailure::from_io(&io::Error::from_raw_os_error(libc::ENOMEM)),
-            WatchFailure::Pressure {
-                errno: libc::ENOMEM
-            },
+            WatchFailure::Pressure { errno: libc::ENOMEM },
         );
     }
 }

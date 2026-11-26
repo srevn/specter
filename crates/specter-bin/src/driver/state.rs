@@ -89,10 +89,7 @@ impl DriverState {
     /// never reaches the record — the discipline lives at the call site, not as a branch here.
     pub(crate) fn record_reload(&mut self, trigger: ReloadTrigger) {
         self.reload_count = self.reload_count.saturating_add(1);
-        self.last_reload = Some(LastReload {
-            at: SystemTime::now(),
-            via: trigger,
-        });
+        self.last_reload = Some(LastReload { at: SystemTime::now(), via: trigger });
     }
 }
 
@@ -115,10 +112,7 @@ pub(crate) struct LastReload {
 /// struct's declaration site.
 impl From<LastReload> for WireLastReload {
     fn from(lr: LastReload) -> Self {
-        Self {
-            at: WireTime::from(lr.at),
-            via: WireReloadTrigger::from(lr.via),
-        }
+        Self { at: WireTime::from(lr.at), via: WireReloadTrigger::from(lr.via) }
     }
 }
 

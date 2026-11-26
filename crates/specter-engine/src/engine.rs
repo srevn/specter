@@ -236,19 +236,9 @@ impl Engine {
     ///    ([`Self::enter_pending_descent`]), whose terminus runs the same tail when the anchor
     ///    appears.
     pub(crate) fn attach_sub_inner(
-        &mut self,
-        req: SubAttachRequest,
-        now: Instant,
-        out: &mut StepOutput,
+        &mut self, req: SubAttachRequest, now: Instant, out: &mut StepOutput,
     ) {
-        let SubAttachRequest {
-            name,
-            target,
-            scan,
-            max_settle,
-            events,
-            params,
-        } = req;
+        let SubAttachRequest { name, target, scan, max_settle, events, params } = req;
         let Some(resolved) = self.resolve_attach_target(&target, out) else {
             return;
         };
@@ -283,9 +273,7 @@ impl Engine {
                 MaterializeResult::Materialized(_) => {
                     self.seed_at_anchor(profile_id, SeedWitness::Cold, now, out);
                 }
-                MaterializeResult::Pending {
-                    prefix, remaining, ..
-                } => {
+                MaterializeResult::Pending { prefix, remaining, .. } => {
                     // A terminus whose segments were all present on first observation pins silently
                     // (attach-over-existing must not fire), while an appearance after the attach is
                     // witnessed by the probes themselves — an absence, then a presence.
@@ -316,13 +304,8 @@ impl Engine {
     ///
     /// Narrates [`Diagnostic::DiscoveryMinted`] last, after the Sub's own `SubAttached`.
     pub(crate) fn mint_sub(
-        &mut self,
-        template: SubId,
-        terminus: ResourceId,
-        kind: ResourceKind,
-        entry: MintEntry,
-        now: Instant,
-        out: &mut StepOutput,
+        &mut self, template: SubId, terminus: ResourceId, kind: ResourceKind, entry: MintEntry,
+        now: Instant, out: &mut StepOutput,
     ) {
         let path = self.anchor_path(terminus);
         // `<template>@<path>`: config validation reserves `@`, so no operator name collides with a
@@ -368,12 +351,7 @@ impl Engine {
                 }
             }
         }
-        out.diagnostics.push(Diagnostic::DiscoveryMinted {
-            template,
-            path,
-            kind,
-            entry,
-        });
+        out.diagnostics.push(Diagnostic::DiscoveryMinted { template, path, kind, entry });
     }
 
     /// The one fallible boundary of an attach: what `target` names, admitted, or refused with its
@@ -385,17 +363,14 @@ impl Engine {
     /// for nothing. The attach asks again after: that detach can reap the very slot a request names,
     /// so nothing admitted is carried across it.
     pub(crate) fn admit_attach_target(
-        &self,
-        target: &SubAttachTarget,
-        out: &mut StepOutput,
+        &self, target: &SubAttachTarget, out: &mut StepOutput,
     ) -> Option<AttachSite> {
         match target {
             SubAttachTarget::At(SubAttachAnchor::Resource(slot)) => {
                 if self.tree.get(*slot).is_some() {
                     Some(AttachSite::Slot(*slot))
                 } else {
-                    out.diagnostics
-                        .push(Diagnostic::AttachResourceStale { resource: *slot });
+                    out.diagnostics.push(Diagnostic::AttachResourceStale { resource: *slot });
                     None
                 }
             }
@@ -407,9 +382,7 @@ impl Engine {
     /// The anchor an attach stands on: its target admitted ([`Self::admit_attach_target`]), then a
     /// held slot as it stands, and a path materialised or left pending its descent.
     fn resolve_attach_target(
-        &mut self,
-        target: &SubAttachTarget,
-        out: &mut StepOutput,
+        &mut self, target: &SubAttachTarget, out: &mut StepOutput,
     ) -> Option<MaterializeResult> {
         Some(match self.admit_attach_target(target, out)? {
             AttachSite::Slot(slot) => MaterializeResult::Materialized(slot),
@@ -424,11 +397,7 @@ impl Engine {
         let name = sub.name.clone();
         let minted_by = sub.minted_by();
         let sub = self.subs.insert(sub);
-        out.diagnostics.push(Diagnostic::SubAttached {
-            sub,
-            name,
-            minted_by,
-        });
+        out.diagnostics.push(Diagnostic::SubAttached { sub, name, minted_by });
     }
 
     /// A Sub joins a Profile that already stood ([`Join`]): it may lower the settle floor; a zombie's
@@ -446,11 +415,7 @@ impl Engine {
     /// revived burst runs its pass. The Idle test is this arm's own: `start_seed_burst`'s guard
     /// narrates a contract violation.
     fn join_profile(
-        &mut self,
-        profile_id: ProfileId,
-        join: Join,
-        now: Instant,
-        out: &mut StepOutput,
+        &mut self, profile_id: ProfileId, join: Join, now: Instant, out: &mut StepOutput,
     ) {
         recompute_profile_settle(&self.subs, &mut self.profiles, profile_id);
         match join {
@@ -472,18 +437,14 @@ impl Engine {
     /// `debug_assert!` pins against a routing breach), narrating
     /// [`Diagnostic::ReapPendingCancelled`]. A second join in the same step finds it live.
     fn revive_zombie(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
-        let cleared = self
-            .profiles
-            .get_mut(profile_id)
-            .is_some_and(specter_core::Profile::clear_active_reap);
+        let cleared =
+            self.profiles.get_mut(profile_id).is_some_and(specter_core::Profile::clear_active_reap);
         debug_assert!(
             cleared,
             "revive_zombie: Join::Zombie must clear an active Reap directive \
              (profile = {profile_id:?})",
         );
-        out.diagnostics.push(Diagnostic::ReapPendingCancelled {
-            profile: profile_id,
-        });
+        out.diagnostics.push(Diagnostic::ReapPendingCancelled { profile: profile_id });
     }
 
     /// The anchor is live: install its claim and its parent's, then start the Seed — the one tail
@@ -509,17 +470,12 @@ impl Engine {
     /// Touches no descent state: the descent terminus finishes its own — the flip, its prefix claim
     /// — around this call.
     pub(crate) fn seed_at_anchor(
-        &mut self,
-        profile_id: ProfileId,
-        witness: SeedWitness,
-        now: Instant,
-        out: &mut StepOutput,
+        &mut self, profile_id: ProfileId, witness: SeedWitness, now: Instant, out: &mut StepOutput,
     ) {
         let Some(anchor) = self.profiles.get(profile_id).map(Profile::resource) else {
             return;
         };
-        self.tree
-            .promote_scaffold(anchor, specter_core::ResourceRole::User);
+        self.tree.promote_scaffold(anchor, specter_core::ResourceRole::User);
         self.install_anchor_claim(profile_id, out);
         self.install_watch_root_parent_claim(profile_id, out);
         let trigger = match witness {
@@ -541,10 +497,7 @@ impl Engine {
     /// activity).
     pub(crate) fn anchor_path(&self, anchor: ResourceId) -> Arc<Path> {
         self.tree.path_of(anchor).unwrap_or_else(|| {
-            debug_assert!(
-                false,
-                "a held anchor slot resolves a path (resource = {anchor:?})",
-            );
+            debug_assert!(false, "a held anchor slot resolves a path (resource = {anchor:?})");
             empty_path()
         })
     }
@@ -561,10 +514,7 @@ impl Engine {
     /// config removal, identity change): [`SubRegistry::remove`] hands back what it minted and
     /// [`Self::reap_orphans`] detaches each.
     pub(crate) fn detach_sub_inner(
-        &mut self,
-        sub: SubId,
-        reason: DetachReason,
-        out: &mut StepOutput,
+        &mut self, sub: SubId, reason: DetachReason, out: &mut StepOutput,
     ) {
         let Some(removed) = self.subs.remove(sub) else {
             out.diagnostics.push(Diagnostic::DetachUnknownSub { sub });
@@ -599,10 +549,7 @@ impl Engine {
             return;
         }
 
-        let lifecycle = self
-            .profiles
-            .get(profile_id)
-            .map(|p| p.state().detach_lifecycle());
+        let lifecycle = self.profiles.get(profile_id).map(|p| p.state().detach_lifecycle());
         match lifecycle {
             Some(DetachLifecycle::ReapNow) => {
                 self.reap_profile(profile_id, ReapTrigger::Immediate, out);
@@ -756,10 +703,7 @@ impl Engine {
     /// Immediate`) and `finish_burst_to_idle` (deferred reap when [`BurstFinish::Reap`] was set
     /// mid-burst; `via = DeferredFromBurst`).
     pub(crate) fn reap_profile(
-        &mut self,
-        profile_id: ProfileId,
-        via: ReapTrigger,
-        out: &mut StepOutput,
+        &mut self, profile_id: ProfileId, via: ReapTrigger, out: &mut StepOutput,
     ) {
         let Some(p) = self.profiles.get(profile_id) else {
             return;
@@ -769,10 +713,7 @@ impl Engine {
         // Trichotomy invariant: Pending and AnchorClaim::Held are mutually exclusive. The descent's
         // terminus flips Pending → Idle before the tail installs the claim, in the same step.
         debug_assert!(
-            !matches!(
-                (p.state(), p.anchor_claim()),
-                (ProfileState::Pending(_), AnchorClaim::Held),
-            ),
+            !matches!((p.state(), p.anchor_claim()), (ProfileState::Pending(_), AnchorClaim::Held)),
             "reap_profile: Pending + AnchorClaim::Held must be mutually exclusive",
         );
 
@@ -820,10 +761,7 @@ impl Engine {
         // is emitted before the slot leaves the Tree.
         self.tree.try_reap(anchor, out);
 
-        out.diagnostics.push(Diagnostic::ProfileReaped {
-            profile: profile_id,
-            via,
-        });
+        out.diagnostics.push(Diagnostic::ProfileReaped { profile: profile_id, via });
     }
 
     /// Read-only view of the Engine's `Tree`.
@@ -916,15 +854,9 @@ impl Engine {
 /// [`ProfileMap`] and doesn't reach into the engine's other fields, so a free function keeps the
 /// call-site shape (`is_timer_referenced(&self.profiles, …)`) honest about the dependency.
 pub(crate) fn is_timer_referenced(
-    profiles: &ProfileMap,
-    profile: ProfileId,
-    kind: TimerKind,
-    id: TimerId,
+    profiles: &ProfileMap, profile: ProfileId, kind: TimerKind, id: TimerId,
 ) -> bool {
-    profiles
-        .get(profile)
-        .and_then(|p| p.state().timer_token(kind))
-        .is_some_and(|live| live == id)
+    profiles.get(profile).and_then(|p| p.state().timer_token(kind)).is_some_and(|live| live == id)
 }
 
 /// The gate's one parse ([`Engine::admit_attach_target`]): `path` as a site the Tree can hold, or
@@ -933,10 +865,8 @@ fn admit_path(path: &Path, out: &mut StepOutput) -> Option<AttachSite> {
     match Tree::parse_attach_path(path) {
         Ok(parsed) => Some(AttachSite::Path(parsed)),
         Err(err) => {
-            out.diagnostics.push(Diagnostic::AttachPathInvalid {
-                path: Arc::from(path),
-                hint: err.hint(),
-            });
+            out.diagnostics
+                .push(Diagnostic::AttachPathInvalid { path: Arc::from(path), hint: err.hint() });
             None
         }
     }
@@ -953,10 +883,7 @@ fn admit_path(path: &Path, out: &mut StepOutput) -> Option<AttachSite> {
 /// only Profile-side indices on the slot, never its `kind`, so the read before construction is the
 /// read after.
 fn find_or_create_profile(
-    profiles: &mut ProfileMap,
-    tree: &mut Tree,
-    anchor: ResourceId,
-    identity: &ProfileIdentity,
+    profiles: &mut ProfileMap, tree: &mut Tree, anchor: ResourceId, identity: &ProfileIdentity,
     settle: Duration,
 ) -> (ProfileId, ProfileOrigin) {
     if let Some(pid) = profiles.find(anchor, identity.config_hash()) {
@@ -1070,10 +997,7 @@ mod tests {
     fn step_fs_event_for_unwatched_resource_diagnoses() {
         let mut e = Engine::new();
         let out = e.step(
-            Input::FsEvent {
-                resource: ResourceId::default(),
-                event: FsEvent::ContentChanged,
-            },
+            Input::FsEvent { resource: ResourceId::default(), event: FsEvent::ContentChanged },
             Instant::now(),
         );
         let has_diag = out
@@ -1131,12 +1055,10 @@ mod tests {
             }),
             Instant::now(),
         );
-        let has_diag = out.diagnostics.iter().any(|d| {
-            matches!(
-                d,
-                specter_core::Diagnostic::EffectCompleteForUnknownSub { .. }
-            )
-        });
+        let has_diag = out
+            .diagnostics
+            .iter()
+            .any(|d| matches!(d, specter_core::Diagnostic::EffectCompleteForUnknownSub { .. }));
         assert!(has_diag);
     }
 
@@ -1169,10 +1091,7 @@ mod tests {
     #[test]
     fn step_config_diff_with_empty_diff_is_noop() {
         let mut e = Engine::new();
-        let out = e.step(
-            Input::ConfigDiff(SubRegistryDiff::default()),
-            Instant::now(),
-        );
+        let out = e.step(Input::ConfigDiff(SubRegistryDiff::default()), Instant::now());
         assert!(out.watch_ops.is_empty());
         assert!(out.probe_ops().is_empty());
         assert!(out.effects().is_empty());
@@ -1190,9 +1109,7 @@ mod tests {
         let mut e = Engine::new();
         let now = Instant::now();
         let when = now + Duration::from_millis(100);
-        let _ = e
-            .timers
-            .schedule(when, ProfileId::default(), TimerKind::Settle);
+        let _ = e.timers.schedule(when, ProfileId::default(), TimerKind::Settle);
         assert_eq!(e.next_deadline(), Some(when));
     }
 
@@ -1201,9 +1118,7 @@ mod tests {
         let mut e = Engine::new();
         let now = Instant::now();
         let when = now + Duration::from_secs(10);
-        let _ = e
-            .timers
-            .schedule(when, ProfileId::default(), TimerKind::Settle);
+        let _ = e.timers.schedule(when, ProfileId::default(), TimerKind::Settle);
         assert_eq!(e.pop_expired(now), None);
         assert_eq!(e.timers.len(), 1, "future-dated entries are not drained");
     }
@@ -1217,15 +1132,9 @@ mod tests {
         let past = now
             .checked_sub(Duration::from_millis(1))
             .expect("test clock has room for sub-millisecond rewind");
-        let _ = e
-            .timers
-            .schedule(past, ProfileId::default(), TimerKind::Settle);
-        let _ = e
-            .timers
-            .schedule(past, ProfileId::default(), TimerKind::Settle);
-        let _ = e
-            .timers
-            .schedule(past, ProfileId::default(), TimerKind::Settle);
+        let _ = e.timers.schedule(past, ProfileId::default(), TimerKind::Settle);
+        let _ = e.timers.schedule(past, ProfileId::default(), TimerKind::Settle);
+        let _ = e.timers.schedule(past, ProfileId::default(), TimerKind::Settle);
 
         assert_eq!(e.pop_expired(now), None);
         assert_eq!(e.timers.len(), 0, "stale heads were drained");
@@ -1236,10 +1145,7 @@ mod tests {
     /// (per-Profile orphan count is small); this test pins the regression sensor by deliberately
     /// exceeding the bound.
     #[test]
-    #[cfg_attr(
-        not(debug_assertions),
-        ignore = "debug_assert! is compiled out in release"
-    )]
+    #[cfg_attr(not(debug_assertions), ignore = "debug_assert! is compiled out in release")]
     #[should_panic(expected = "stale timers in a single call")]
     fn pop_expired_panics_on_excessive_stale_drain_in_debug() {
         let mut e = Engine::new();
@@ -1250,9 +1156,7 @@ mod tests {
         // Schedule one beyond the bound. All stale (default ProfileId has no Active state), so the
         // drain runs through them all.
         for _ in 0..=STALE_DRAIN_BOUND {
-            let _ = e
-                .timers
-                .schedule(past, ProfileId::default(), TimerKind::Settle);
+            let _ = e.timers.schedule(past, ProfileId::default(), TimerKind::Settle);
         }
         let _ = e.pop_expired(now);
     }
@@ -1266,9 +1170,7 @@ mod tests {
         let past = now
             .checked_sub(Duration::from_millis(1))
             .expect("test clock has room for sub-millisecond rewind");
-        let _ = e
-            .timers
-            .schedule(past, ProfileId::default(), TimerKind::Settle);
+        let _ = e.timers.schedule(past, ProfileId::default(), TimerKind::Settle);
         let _ = e.timers.schedule(
             now + Duration::from_secs(10),
             ProfileId::default(),
@@ -1505,17 +1407,12 @@ mod tests {
                 specter_core::Diagnostic::DetachUnknownSub { sub } if *sub == bogus,
             )
         });
-        let saw_wrong = out.diagnostics.iter().any(|d| {
-            matches!(
-                d,
-                specter_core::Diagnostic::EffectCompleteForUnknownSub { .. },
-            )
-        });
+        let saw_wrong = out
+            .diagnostics
+            .iter()
+            .any(|d| matches!(d, specter_core::Diagnostic::EffectCompleteForUnknownSub { .. }));
         assert!(saw_dedicated, "detach miss must emit DetachUnknownSub");
-        assert!(
-            !saw_wrong,
-            "detach miss must NOT emit EffectCompleteForUnknownSub",
-        );
+        assert!(!saw_wrong, "detach miss must NOT emit EffectCompleteForUnknownSub");
     }
 
     // ===== Zombie revival =====
@@ -1551,16 +1448,12 @@ mod tests {
         // A revived Profile's freshly-attached Subs start unfired structurally — there is no
         // per-Profile fire container to purge.)
         let mut e = Engine::new();
-        let r = e
-            .tree
-            .ensure_root("anchor", specter_core::ResourceRole::User);
+        let r = e.tree.ensure_root("anchor", specter_core::ResourceRole::User);
         e.tree.set_kind(r, specter_core::ResourceKind::Dir);
         let now = Instant::now();
 
-        let attach_out = e.step(
-            Input::AttachSub(revival_attach_req(r, "A", Duration::from_millis(50))),
-            now,
-        );
+        let attach_out =
+            e.step(Input::AttachSub(revival_attach_req(r, "A", Duration::from_millis(50))), now);
         let sid_a =
             specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
         let pid = e.subs().get(sid_a).unwrap().profile();
@@ -1578,10 +1471,8 @@ mod tests {
 
         // Revive with B (settle=200ms; deliberately larger than A's stale 50ms so the min-update
         // would be visibly wrong).
-        let attach_out = e.step(
-            Input::AttachSub(revival_attach_req(r, "B", Duration::from_millis(200))),
-            now,
-        );
+        let attach_out =
+            e.step(Input::AttachSub(revival_attach_req(r, "B", Duration::from_millis(200))), now);
         let sid_b =
             specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
         let pid_b = e.subs().get(sid_b).unwrap().profile();
@@ -1597,11 +1488,7 @@ mod tests {
             !matches!(p.state().burst_finish(), Some(BurstFinish::Reap)),
             "BurstFinish flipped back to ReturnToIdle",
         );
-        assert_eq!(
-            p.anchor_claim(),
-            AnchorClaim::Held,
-            "anchor_claim stays Held"
-        );
+        assert_eq!(p.anchor_claim(), AnchorClaim::Held, "anchor_claim stays Held");
         assert_eq!(
             p.settle,
             Duration::from_millis(200),
@@ -1632,16 +1519,12 @@ mod tests {
         // probe responds and the burst ends, `finish_burst_to_idle` must NOT call `reap_profile`
         // (the revival cleared `reap_pending`).
         let mut e = Engine::new();
-        let r = e
-            .tree
-            .ensure_root("anchor", specter_core::ResourceRole::User);
+        let r = e.tree.ensure_root("anchor", specter_core::ResourceRole::User);
         e.tree.set_kind(r, specter_core::ResourceKind::Dir);
         let now = Instant::now();
 
-        let attach_out = e.step(
-            Input::AttachSub(revival_attach_req(r, "A", Duration::from_millis(50))),
-            now,
-        );
+        let attach_out =
+            e.step(Input::AttachSub(revival_attach_req(r, "A", Duration::from_millis(50))), now);
         let sid_a =
             specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
         let pid = e.subs().get(sid_a).unwrap().profile();
@@ -1650,23 +1533,16 @@ mod tests {
         let t_settle = now + Duration::from_millis(50);
         while let Some(entry) = e.pop_expired(t_settle) {
             e.step(
-                Input::TimerExpired {
-                    profile: entry.profile,
-                    kind: entry.kind,
-                    id: entry.id,
-                },
+                Input::TimerExpired { profile: entry.profile, kind: entry.kind, id: entry.id },
                 t_settle,
             );
         }
-        let seed_corr = e
-            .pending_probe_for(pid)
-            .expect("Seed verify probe in flight after settle expiry");
+        let seed_corr =
+            e.pending_probe_for(pid).expect("Seed verify probe in flight after settle expiry");
 
         let _ = e.step(Input::DetachSub(sid_a), Instant::now());
-        let attach_out = e.step(
-            Input::AttachSub(revival_attach_req(r, "B", Duration::from_millis(50))),
-            now,
-        );
+        let attach_out =
+            e.step(Input::AttachSub(revival_attach_req(r, "B", Duration::from_millis(50))), now);
         let sid_b =
             specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
 
@@ -1683,10 +1559,7 @@ mod tests {
             now,
         );
 
-        assert!(
-            e.profiles().get(pid).is_some(),
-            "Profile alive (revival pre-empted reap)",
-        );
+        assert!(e.profiles().get(pid).is_some(), "Profile alive (revival pre-empted reap)");
         assert!(e.subs().get(sid_b).is_some(), "B still attached");
         assert!(
             !out.diagnostics.iter().any(|d| matches!(
@@ -1734,10 +1607,8 @@ mod tests {
 
         let mut e = Engine::new();
         let parent = e.tree.ensure_root("parent", ResourceRole::User);
-        let anchor = e
-            .tree
-            .ensure_child(parent, "anchor", ResourceRole::User)
-            .expect("test live parent");
+        let anchor =
+            e.tree.ensure_child(parent, "anchor", ResourceRole::User).expect("test live parent");
         e.tree.set_kind(parent, ResourceKind::Dir);
         e.tree.set_kind(anchor, ResourceKind::Dir);
 
@@ -1759,10 +1630,8 @@ mod tests {
         // Install a Dir snapshot on Profile.current so the descendant release has a snapshot to take.
         // Mirrors what `dispatch_quiescence_ok` would write at probe completion. One child leaf gives
         // `release_descendant_claim` a non-trivial diff to apply.
-        let child_id = e
-            .tree
-            .ensure_child(anchor, "child", ResourceRole::User)
-            .expect("test live parent");
+        let child_id =
+            e.tree.ensure_child(anchor, "child", ResourceRole::User).expect("test live parent");
         e.tree.set_kind(child_id, ResourceKind::File);
         let mut entries: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
         entries.insert(
@@ -1779,10 +1648,7 @@ mod tests {
             0,
             entries,
         );
-        e.profiles
-            .get_mut(pid)
-            .expect("Profile alive")
-            .install_dir_current(Arc::new(dir));
+        e.profiles.get_mut(pid).expect("Profile alive").install_dir_current(Arc::new(dir));
 
         // Drop the auto-emitted Watch operations from attach — the permutation test only cares about
         // deltas across release calls.
@@ -1817,14 +1683,8 @@ mod tests {
                 .get(pid)
                 .and_then(specter_core::Profile::watch_root_parent),
             current_is_none: e.profiles.get(pid).is_none_or(|p| p.current().is_none()),
-            anchor_watch_demand: e
-                .tree
-                .get(anchor)
-                .map_or(0, specter_core::Resource::watch_demand),
-            parent_watch_demand: e
-                .tree
-                .get(parent)
-                .map_or(0, specter_core::Resource::watch_demand),
+            anchor_watch_demand: e.tree.get(anchor).map_or(0, specter_core::Resource::watch_demand),
+            parent_watch_demand: e.tree.get(parent).map_or(0, specter_core::Resource::watch_demand),
         };
         // The attach-time Seed-Verifying probe is still armed; the release quartet never consumes
         // it. Drain before `e` drops.

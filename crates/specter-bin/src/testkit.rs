@@ -73,11 +73,8 @@ pub(crate) fn mint<const N: usize>(engine: &mut Engine, matches: [&str; N]) -> [
     let now = Instant::now();
     pre_place_dir(engine, &["srv"]);
     let (_, discovery) = attach_discovery(engine, "disc", "/srv/*", now);
-    let listing: Vec<_> = matches
-        .iter()
-        .zip(1..)
-        .map(|(&name, inode)| (name, EntryKind::Dir, inode))
-        .collect();
+    let listing: Vec<_> =
+        matches.iter().zip(1..).map(|(&name, inode)| (name, EntryKind::Dir, inode)).collect();
     let _ = seed_to_idle(engine, discovery, &dir_snap(&listing), now);
     matches.map(|name| {
         engine

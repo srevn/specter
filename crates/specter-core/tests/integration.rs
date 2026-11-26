@@ -50,12 +50,7 @@ fn shared_profile_via_config_hash() {
     let pid_a = profiles.find(r, hash).unwrap_or_else(|| {
         profiles.attach(
             &mut tree,
-            Profile::new(
-                r,
-                ProfileIdentity::new(cfg.clone(), MAX_SETTLE, NO_EVENTS),
-                SETTLE,
-                None,
-            ),
+            Profile::new(r, ProfileIdentity::new(cfg.clone(), MAX_SETTLE, NO_EVENTS), SETTLE, None),
         )
     });
     let _sid_a = subs.insert(Sub::declared(
@@ -68,9 +63,7 @@ fn shared_profile_via_config_hash() {
     ));
 
     // Sub B: same (resource, hash); reuses the Profile.
-    let pid_b = profiles
-        .find(r, hash)
-        .expect("Profile exists from Sub A's attach");
+    let pid_b = profiles.find(r, hash).expect("Profile exists from Sub A's attach");
     assert_eq!(pid_a, pid_b, "shared Profile across matching configs");
 
     assert_eq!(profiles.len(), 1);
@@ -126,21 +119,11 @@ fn distinct_profile_for_distinct_pattern() {
 
     let pid_rs = profiles.attach(
         &mut tree,
-        Profile::new(
-            r,
-            ProfileIdentity::new(cfg_rs, MAX_SETTLE, NO_EVENTS),
-            SETTLE,
-            None,
-        ),
+        Profile::new(r, ProfileIdentity::new(cfg_rs, MAX_SETTLE, NO_EVENTS), SETTLE, None),
     );
     let pid_txt = profiles.attach(
         &mut tree,
-        Profile::new(
-            r,
-            ProfileIdentity::new(cfg_txt, MAX_SETTLE, NO_EVENTS),
-            SETTLE,
-            None,
-        ),
+        Profile::new(r, ProfileIdentity::new(cfg_txt, MAX_SETTLE, NO_EVENTS), SETTLE, None),
     );
 
     assert_ne!(pid_rs, pid_txt);
@@ -154,12 +137,7 @@ fn detach_clears_back_references_on_both_sides() {
     let r = tree.ensure_root("/anchor", ResourceRole::User);
     let pid = profiles.attach(
         &mut tree,
-        Profile::new(
-            r,
-            ProfileIdentity::new(bare_cfg(), MAX_SETTLE, NO_EVENTS),
-            SETTLE,
-            None,
-        ),
+        Profile::new(r, ProfileIdentity::new(bare_cfg(), MAX_SETTLE, NO_EVENTS), SETTLE, None),
     );
 
     profiles.detach(&mut tree, pid);
@@ -167,10 +145,7 @@ fn detach_clears_back_references_on_both_sides() {
     assert!(profiles.get(pid).is_none());
     assert!(
         profiles
-            .find(
-                r,
-                ProfileIdentity::new(bare_cfg(), MAX_SETTLE, NO_EVENTS).config_hash()
-            )
+            .find(r, ProfileIdentity::new(bare_cfg(), MAX_SETTLE, NO_EVENTS).config_hash())
             .is_none()
     );
     assert_eq!(tree.get(r).unwrap().profiles(), []);
@@ -186,36 +161,22 @@ fn rename_after_detach_yields_fresh_id() {
     let mut profiles = ProfileMap::new();
     let parent = tree.ensure_root("/dir", ResourceRole::User);
 
-    let id_old = tree
-        .ensure_child(parent, "foo.c", ResourceRole::User)
-        .expect("test live parent");
+    let id_old = tree.ensure_child(parent, "foo.c", ResourceRole::User).expect("test live parent");
     let pid = profiles.attach(
         &mut tree,
-        Profile::new(
-            id_old,
-            ProfileIdentity::new(bare_cfg(), MAX_SETTLE, NO_EVENTS),
-            SETTLE,
-            None,
-        ),
+        Profile::new(id_old, ProfileIdentity::new(bare_cfg(), MAX_SETTLE, NO_EVENTS), SETTLE, None),
     );
 
     // Rename: engine detaches the Profile, then try_reaps the slot.
     profiles.detach(&mut tree, pid);
-    assert!(
-        tree.try_reap(id_old, &mut StepOutput::default()),
-        "post-detach reap must succeed",
-    );
-    assert!(
-        tree.get(parent).is_none(),
-        "cascade reaped the now-orphaned parent",
-    );
+    assert!(tree.try_reap(id_old, &mut StepOutput::default()), "post-detach reap must succeed");
+    assert!(tree.get(parent).is_none(), "cascade reaped the now-orphaned parent");
 
     // Re-ensure the path (the engine's own re-attach flow). The fresh `/dir` slot gets a new id;
     // the renamed `bar.c` under it likewise.
     let parent_fresh = tree.ensure_root("/dir", ResourceRole::User);
-    let id_new = tree
-        .ensure_child(parent_fresh, "bar.c", ResourceRole::User)
-        .expect("test live parent");
+    let id_new =
+        tree.ensure_child(parent_fresh, "bar.c", ResourceRole::User).expect("test live parent");
     assert_ne!(parent, parent_fresh, "parent slot was reaped and re-minted");
     assert_ne!(id_old, id_new, "renamed slot yields fresh id");
 }
@@ -226,28 +187,17 @@ fn recreate_at_anchored_slot_keeps_id() {
     let mut tree = Tree::new();
     let mut profiles = ProfileMap::new();
     let parent = tree.ensure_root("/dir", ResourceRole::User);
-    let id = tree
-        .ensure_child(parent, "foo.c", ResourceRole::User)
-        .expect("test live parent");
+    let id = tree.ensure_child(parent, "foo.c", ResourceRole::User).expect("test live parent");
     let _pid = profiles.attach(
         &mut tree,
-        Profile::new(
-            id,
-            ProfileIdentity::new(bare_cfg(), MAX_SETTLE, NO_EVENTS),
-            SETTLE,
-            None,
-        ),
+        Profile::new(id, ProfileIdentity::new(bare_cfg(), MAX_SETTLE, NO_EVENTS), SETTLE, None),
     );
 
     // try_reap without detach: slot is anchored by Profile, refused.
-    assert!(
-        !tree.try_reap(id, &mut StepOutput::default()),
-        "Profile-anchored slot must not reap",
-    );
+    assert!(!tree.try_reap(id, &mut StepOutput::default()), "Profile-anchored slot must not reap");
 
     // Same (parent, segment) returns the same id.
-    let id_again = tree
-        .ensure_child(parent, "foo.c", ResourceRole::User)
-        .expect("test live parent");
+    let id_again =
+        tree.ensure_child(parent, "foo.c", ResourceRole::User).expect("test live parent");
     assert_eq!(id, id_again, "anchored slot reused on re-ensure");
 }

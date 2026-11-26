@@ -42,11 +42,7 @@ impl fmt::Display for PathError {
                 write!(f, "`{}` is inaccessible: {source}", at.display())
             }
             Self::NonUtf8 { resolved } => {
-                write!(
-                    f,
-                    "canonical path `{}` is not valid UTF-8",
-                    resolved.display()
-                )
+                write!(f, "canonical path `{}` is not valid UTF-8", resolved.display())
             }
         }
     }
@@ -54,11 +50,7 @@ impl fmt::Display for PathError {
 
 impl std::error::Error for PathError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        if let Self::Inaccessible { source, .. } = self {
-            Some(source)
-        } else {
-            None
-        }
+        if let Self::Inaccessible { source, .. } = self { Some(source) } else { None }
     }
 }
 
@@ -163,11 +155,7 @@ fn resolve_filesystem(input: &Path) -> Result<PathBuf, PathError> {
 /// contract ("ok ⇒ engine accepts the path") holds. Original TOML input is UTF-8 by construction,
 /// so the only way this fails is through symlink resolution.
 fn enforce_utf8(p: PathBuf) -> Result<PathBuf, PathError> {
-    if p.to_str().is_some() {
-        Ok(p)
-    } else {
-        Err(PathError::NonUtf8 { resolved: p })
-    }
+    if p.to_str().is_some() { Ok(p) } else { Err(PathError::NonUtf8 { resolved: p }) }
 }
 
 #[cfg(test)]
@@ -298,11 +286,7 @@ mod tests {
         // Walk-up pops past the dangling symlink (which fails NotFound because its target doesn't
         // exist) and reattaches the literal tail under the existing ancestor.
         let result = canonicalize_lenient(&pending).unwrap();
-        assert!(
-            result.ends_with(Path::new("dangling/leaf")),
-            "got {}",
-            result.display(),
-        );
+        assert!(result.ends_with(Path::new("dangling/leaf")), "got {}", result.display());
         assert!(result.is_absolute(), "got {}", result.display());
     }
 

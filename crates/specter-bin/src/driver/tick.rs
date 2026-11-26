@@ -163,11 +163,7 @@ impl<W: FsWatcher> EngineDriver<W> {
         //    routes directly without re-deriving owner/role.
         while let Some(entry) = self.engine.pop_expired(now) {
             let out = self.engine.step(
-                Input::TimerExpired {
-                    profile: entry.profile,
-                    kind: entry.kind,
-                    id: entry.id,
-                },
+                Input::TimerExpired { profile: entry.profile, kind: entry.kind, id: entry.id },
                 now,
             );
             if self.forward(out).is_break() {
@@ -316,9 +312,7 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// idempotent dispatch guard or elided only re-work the next probe re-establishes regardless —
     /// it can never change a fire/no-fire verdict, probe target, timer deadline, or baseline.
     fn drain_sensor_inputs(
-        &mut self,
-        drained: &mut super::reactor::DrainedTick,
-        now: Instant,
+        &mut self, drained: &mut super::reactor::DrainedTick, now: Instant,
     ) -> ControlFlow<()> {
         let mut seen: BTreeSet<(ResourceId, FsEvent)> = BTreeSet::new();
         for (resource, event) in drained.fs_events.drain(..) {

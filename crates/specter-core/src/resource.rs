@@ -201,10 +201,7 @@ pub enum ResourceRole {
 
 impl Resource {
     pub(crate) fn new(
-        parent: Option<ResourceId>,
-        segment: CompactString,
-        role: ResourceRole,
-        path: Arc<Path>,
+        parent: Option<ResourceId>, segment: CompactString, role: ResourceRole, path: Arc<Path>,
     ) -> Self {
         Self {
             parent,
@@ -294,10 +291,7 @@ impl Resource {
     /// (single-digit).
     #[must_use]
     pub fn events_union(&self) -> ClassSet {
-        self.contributions
-            .values()
-            .copied()
-            .fold(ClassSet::EMPTY, |a, b| a | b)
+        self.contributions.values().copied().fold(ClassSet::EMPTY, |a, b| a | b)
     }
 
     #[must_use]
@@ -336,11 +330,7 @@ impl Resource {
     /// gained its first Profile anchor), matching the contribution mutators' edge-reporting
     /// convention.
     pub fn insert_profile_anchor(&mut self, config_hash: u64, pid: ProfileId) -> bool {
-        if self
-            .profiles
-            .iter()
-            .any(|(h, p)| *h == config_hash && *p == pid)
-        {
+        if self.profiles.iter().any(|(h, p)| *h == config_hash && *p == pid) {
             return false;
         }
         let was_empty = self.profiles.is_empty();
@@ -360,8 +350,7 @@ impl Resource {
         if self.profiles.is_empty() {
             return false;
         }
-        self.profiles
-            .retain(|(h, p)| !(*p == pid && *h == config_hash));
+        self.profiles.retain(|(h, p)| !(*p == pid && *h == config_hash));
         self.profiles.is_empty()
     }
 
@@ -459,11 +448,9 @@ mod tests {
     /// anchors regardless of its role tag.
     #[test]
     fn fresh_resource_has_no_anchors_regardless_of_role() {
-        for role in [
-            ResourceRole::User,
-            ResourceRole::WatchRootParent,
-            ResourceRole::DescentScaffold,
-        ] {
+        for role in
+            [ResourceRole::User, ResourceRole::WatchRootParent, ResourceRole::DescentScaffold]
+        {
             let r = Resource::new(None, dummy_segment(), role, dummy_path());
             assert!(
                 !r.has_anchors(),
@@ -478,10 +465,7 @@ mod tests {
     #[test]
     fn anchored_when_contribution_present() {
         let mut r = Resource::new(None, dummy_segment(), ResourceRole::User, dummy_path());
-        r.insert_contribution(
-            ContribKey::ProfileAnchor(ProfileId::default()),
-            ClassSet::STRUCTURE,
-        );
+        r.insert_contribution(ContribKey::ProfileAnchor(ProfileId::default()), ClassSet::STRUCTURE);
         assert!(r.has_anchors());
     }
 
@@ -510,23 +494,13 @@ mod tests {
     fn is_disk_observed_reads_kind_or_watch_not_bare_existence() {
         // Never-observed scaffold: Unknown kind, no contribution. The bug F-MED-3 closed treated
         // this as pre-existing.
-        let mut r = Resource::new(
-            None,
-            dummy_segment(),
-            ResourceRole::DescentScaffold,
-            dummy_path(),
-        );
-        assert!(
-            !r.is_disk_observed(),
-            "Unknown + unwatched ⇒ not disk-observed"
-        );
+        let mut r =
+            Resource::new(None, dummy_segment(), ResourceRole::DescentScaffold, dummy_path());
+        assert!(!r.is_disk_observed(), "Unknown + unwatched ⇒ not disk-observed");
 
         // A profile back-ref (the parked anchor's retention) is not a disk signal on its own.
         r.insert_profile_anchor(7, ProfileId::default());
-        assert!(
-            !r.is_disk_observed(),
-            "a profile back-ref is retention, not a disk observation",
-        );
+        assert!(!r.is_disk_observed(), "a profile back-ref is retention, not a disk observation");
 
         // The watch disjunct: a contribution (e.g. a descent-prefix watch) marks the slot observed
         // even while its kind is still Unknown — the load-bearing FS-root-as-prefix case.
@@ -534,19 +508,13 @@ mod tests {
             ContribKey::ProfileDescent(ProfileId::default()),
             ClassSet::STRUCTURE,
         );
-        assert!(
-            r.is_disk_observed(),
-            "a live watch ⇒ disk-observed even at Unknown kind"
-        );
+        assert!(r.is_disk_observed(), "a live watch ⇒ disk-observed even at Unknown kind");
 
         // The kind disjunct, in isolation: a classified slot with no watch is observed.
         let mut k = Resource::new(None, dummy_segment(), ResourceRole::User, dummy_path());
         k.kind = ResourceKind::Dir;
         assert!(!k.is_watched());
-        assert!(
-            r.is_disk_observed() && k.is_disk_observed(),
-            "classified kind ⇒ disk-observed"
-        );
+        assert!(r.is_disk_observed() && k.is_disk_observed(), "classified kind ⇒ disk-observed");
     }
 
     #[test]
@@ -608,17 +576,11 @@ mod tests {
     #[test]
     fn contributions_map_yields_count_and_union() {
         let mut r = Resource::new(None, dummy_segment(), ResourceRole::User, dummy_path());
-        r.insert_contribution(
-            ContribKey::ProfileAnchor(ProfileId::default()),
-            ClassSet::CONTENT,
-        );
+        r.insert_contribution(ContribKey::ProfileAnchor(ProfileId::default()), ClassSet::CONTENT);
         // A second `ProfileAnchor` from a different Profile would normally collide on the slotmap
         // key; use a distinct [`ContribKey`] variant to keep the test free of slotmap setup
         // boilerplate.
-        r.insert_contribution(
-            ContribKey::ProfileParent(ProfileId::default()),
-            ClassSet::STRUCTURE,
-        );
+        r.insert_contribution(ContribKey::ProfileParent(ProfileId::default()), ClassSet::STRUCTURE);
         assert_eq!(r.watch_demand(), 2);
         assert_eq!(r.events_union(), ClassSet::CONTENT | ClassSet::STRUCTURE);
         assert!(r.is_watched());
@@ -633,11 +595,7 @@ mod tests {
         let prior = r.insert_contribution(key, ClassSet::CONTENT);
         assert!(prior.is_none(), "fresh key: no prior mask");
         let overwritten = r.insert_contribution(key, ClassSet::CONTENT | ClassSet::METADATA);
-        assert_eq!(
-            overwritten,
-            Some(ClassSet::CONTENT),
-            "re-insert returns the prior mask",
-        );
+        assert_eq!(overwritten, Some(ClassSet::CONTENT), "re-insert returns the prior mask");
         assert_eq!(r.watch_demand(), 1);
         assert_eq!(r.events_union(), ClassSet::CONTENT | ClassSet::METADATA);
     }
@@ -649,10 +607,7 @@ mod tests {
     fn remove_contribution_returns_prior_mask_or_none() {
         let mut r = Resource::new(None, dummy_segment(), ResourceRole::User, dummy_path());
         let key = ContribKey::ProfileAnchor(ProfileId::default());
-        assert!(
-            r.remove_contribution(key).is_none(),
-            "absent key: idempotent no-op",
-        );
+        assert!(r.remove_contribution(key).is_none(), "absent key: idempotent no-op");
         r.insert_contribution(key, ClassSet::CONTENT);
         assert_eq!(r.remove_contribution(key), Some(ClassSet::CONTENT));
         assert!(r.contributions().is_empty());
@@ -664,14 +619,8 @@ mod tests {
     fn clear_contributions_returns_prior_count() {
         let mut r = Resource::new(None, dummy_segment(), ResourceRole::User, dummy_path());
         assert_eq!(r.clear_contributions(), 0, "empty: no-op");
-        r.insert_contribution(
-            ContribKey::ProfileAnchor(ProfileId::default()),
-            ClassSet::CONTENT,
-        );
-        r.insert_contribution(
-            ContribKey::ProfileParent(ProfileId::default()),
-            ClassSet::STRUCTURE,
-        );
+        r.insert_contribution(ContribKey::ProfileAnchor(ProfileId::default()), ClassSet::CONTENT);
+        r.insert_contribution(ContribKey::ProfileParent(ProfileId::default()), ClassSet::STRUCTURE);
         assert_eq!(r.clear_contributions(), 2);
         assert!(r.contributions().is_empty());
     }

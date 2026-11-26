@@ -51,9 +51,7 @@ fn poll_for(w: &KqueueWatcher) -> Poll {
 /// drops at the kernel level); the helper `panic!`s if it sees one so a future regression here
 /// surfaces as a loud test failure rather than silent event loss.
 fn drain_until<F: Fn(&(ResourceId, FsEvent)) -> bool>(
-    w: &mut KqueueWatcher,
-    pred: F,
-    overall: Duration,
+    w: &mut KqueueWatcher, pred: F, overall: Duration,
 ) -> Vec<(ResourceId, FsEvent)> {
     let deadline = Instant::now() + overall;
     let mut poll = poll_for(w);
@@ -114,8 +112,7 @@ fn watch_dir_observes_structure_changed_on_create() {
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r_dir = fresh_id(&mut sm);
 
-    w.watch(r_dir, tmp.path(), ResourceKind::Dir, ClassSet::STRUCTURE)
-        .expect("watch dir ok");
+    w.watch(r_dir, tmp.path(), ResourceKind::Dir, ClassSet::STRUCTURE).expect("watch dir ok");
 
     std::fs::write(tmp.path().join("foo.c"), "x").unwrap();
 
@@ -125,8 +122,7 @@ fn watch_dir_observes_structure_changed_on_create() {
         Duration::from_secs(2),
     );
     assert!(
-        out.iter()
-            .any(|(r, e)| *r == r_dir && *e == FsEvent::StructureChanged),
+        out.iter().any(|(r, e)| *r == r_dir && *e == FsEvent::StructureChanged),
         "expected StructureChanged on dir, got {out:?}"
     );
 
@@ -142,8 +138,7 @@ fn watch_file_observes_content_changed_on_write() {
     let mut w = KqueueWatcher::new().unwrap();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r_file = fresh_id(&mut sm);
-    w.watch(r_file, &path, ResourceKind::File, ClassSet::CONTENT)
-        .expect("watch file ok");
+    w.watch(r_file, &path, ResourceKind::File, ClassSet::CONTENT).expect("watch file ok");
 
     std::fs::write(&path, "updated more bytes here").unwrap();
 
@@ -153,8 +148,7 @@ fn watch_file_observes_content_changed_on_write() {
         Duration::from_secs(2),
     );
     assert!(
-        out.iter()
-            .any(|(r, e)| *r == r_file && *e == FsEvent::ContentChanged),
+        out.iter().any(|(r, e)| *r == r_file && *e == FsEvent::ContentChanged),
         "expected ContentChanged on file, got {out:?}"
     );
 
@@ -171,8 +165,7 @@ fn watch_file_observes_removed_on_unlink() {
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r_file = fresh_id(&mut sm);
     // EMPTY events suffice: NOTE_DELETE is in the identity floor.
-    w.watch(r_file, &path, ResourceKind::File, ClassSet::EMPTY)
-        .expect("watch file ok");
+    w.watch(r_file, &path, ResourceKind::File, ClassSet::EMPTY).expect("watch file ok");
 
     std::fs::remove_file(&path).unwrap();
 
@@ -182,8 +175,7 @@ fn watch_file_observes_removed_on_unlink() {
         Duration::from_secs(2),
     );
     assert!(
-        out.iter()
-            .any(|(r, e)| *r == r_file && *e == FsEvent::Removed),
+        out.iter().any(|(r, e)| *r == r_file && *e == FsEvent::Removed),
         "expected Removed on file, got {out:?}"
     );
 
@@ -201,8 +193,7 @@ fn watch_file_observes_renamed_on_rename() {
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r_file = fresh_id(&mut sm);
     // EMPTY events suffice: NOTE_RENAME is in the identity floor.
-    w.watch(r_file, &src, ResourceKind::File, ClassSet::EMPTY)
-        .unwrap();
+    w.watch(r_file, &src, ResourceKind::File, ClassSet::EMPTY).unwrap();
 
     std::fs::rename(&src, &dst).unwrap();
 
@@ -212,8 +203,7 @@ fn watch_file_observes_renamed_on_rename() {
         Duration::from_secs(2),
     );
     assert!(
-        out.iter()
-            .any(|(r, e)| *r == r_file && *e == FsEvent::Renamed),
+        out.iter().any(|(r, e)| *r == r_file && *e == FsEvent::Renamed),
         "expected Renamed on file, got {out:?}"
     );
 
@@ -229,8 +219,7 @@ fn watch_file_observes_metadata_changed_on_chmod() {
     let mut w = KqueueWatcher::new().unwrap();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r_file = fresh_id(&mut sm);
-    w.watch(r_file, &path, ResourceKind::File, ClassSet::METADATA)
-        .unwrap();
+    w.watch(r_file, &path, ResourceKind::File, ClassSet::METADATA).unwrap();
 
     let mut perms = std::fs::metadata(&path).unwrap().permissions();
     perms.set_mode(0o600);
@@ -242,8 +231,7 @@ fn watch_file_observes_metadata_changed_on_chmod() {
         Duration::from_secs(2),
     );
     assert!(
-        out.iter()
-            .any(|(r, e)| *r == r_file && *e == FsEvent::MetadataChanged),
+        out.iter().any(|(r, e)| *r == r_file && *e == FsEvent::MetadataChanged),
         "expected MetadataChanged on file, got {out:?}"
     );
 
@@ -277,12 +265,7 @@ fn watch_nonexistent_path_returns_enoent() {
         ResourceKind::Unknown,
         ClassSet::EMPTY,
     );
-    assert_eq!(
-        res,
-        Err(specter_sensor::WatchFailure::Resource {
-            errno: libc::ENOENT,
-        }),
-    );
+    assert_eq!(res, Err(specter_sensor::WatchFailure::Resource { errno: libc::ENOENT }));
 }
 
 #[test]
@@ -296,8 +279,7 @@ fn unwatch_after_event_does_not_panic_on_subsequent_poll() {
     let r_file = fresh_id(&mut sm);
     // CONTENT so the kernel actually queues an event for the write below — exercising the
     // late-event-drain path the test's contract covers.
-    w.watch(r_file, &path, ResourceKind::File, ClassSet::CONTENT)
-        .unwrap();
+    w.watch(r_file, &path, ResourceKind::File, ClassSet::CONTENT).unwrap();
 
     std::fs::write(&path, "changed").unwrap();
     w.unwatch(r_file);

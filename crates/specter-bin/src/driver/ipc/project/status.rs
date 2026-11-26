@@ -17,10 +17,7 @@ use std::path::Path;
 /// An operator wanting "only declared, only attached" derives it from `list`. The minimal `status`
 /// shape avoids carrying multiple counts that would skew interpretation at a glance.
 pub(crate) fn status(
-    engine: &Engine,
-    ds: &DriverState,
-    disabled_runtime: &BTreeSet<CompactString>,
-    config: &Config,
+    engine: &Engine, ds: &DriverState, disabled_runtime: &BTreeSet<CompactString>, config: &Config,
     config_path: &Path,
 ) -> StatusResponse {
     StatusResponse {
@@ -35,11 +32,7 @@ pub(crate) fn status(
         sub_disabled_toml: config.watches.iter().filter(|s| !s.enabled).count(),
         sub_disabled_runtime: disabled_runtime.len(),
         profile_active: engine.profiles().active_count(),
-        discovery_active: engine
-            .subs()
-            .iter()
-            .filter(|(_, s)| s.is_template())
-            .count(),
+        discovery_active: engine.subs().iter().filter(|(_, s)| s.is_template()).count(),
         config_path: WirePath::from(config_path),
         socket_path: WirePath::from(&ds.socket_path),
     }
@@ -66,32 +59,17 @@ mod tests {
         let disabled = BTreeSet::<CompactString>::new();
         let config = Config::from_str("").expect("empty config parses");
 
-        let r = status(
-            &engine,
-            &ds,
-            &disabled,
-            &config,
-            &PathBuf::from("/etc/specter.toml"),
-        );
+        let r = status(&engine, &ds, &disabled, &config, &PathBuf::from("/etc/specter.toml"));
 
         assert_eq!(r.reload_count, 0);
-        assert!(
-            r.last_reload.is_none(),
-            "fresh state has never reloaded ⇒ paired field absent",
-        );
+        assert!(r.last_reload.is_none(), "fresh state has never reloaded ⇒ paired field absent");
         assert_eq!(r.sub_total, 0);
         assert_eq!(r.sub_disabled_toml, 0);
         assert_eq!(r.sub_disabled_runtime, 0);
         assert_eq!(r.profile_active, 0);
         assert_eq!(r.discovery_active, 0);
-        assert_eq!(
-            r.config_path,
-            WirePath::from(Path::new("/etc/specter.toml"))
-        );
-        assert_eq!(
-            r.socket_path,
-            WirePath::from(Path::new("/tmp/specter-test.sock")),
-        );
+        assert_eq!(r.config_path, WirePath::from(Path::new("/etc/specter.toml")));
+        assert_eq!(r.socket_path, WirePath::from(Path::new("/tmp/specter-test.sock")));
     }
 
     #[test]
@@ -106,13 +84,7 @@ mod tests {
         // `start_instant.elapsed().as_secs()`?", not "is the clock moving?". A boolean witness keeps
         // the test deterministic.
         sleep(Duration::from_millis(5));
-        let r = status(
-            &engine,
-            &ds,
-            &disabled,
-            &config,
-            &PathBuf::from("/etc/specter.toml"),
-        );
+        let r = status(&engine, &ds, &disabled, &config, &PathBuf::from("/etc/specter.toml"));
         // u64 is unsigned; the constraint reduces to "this read didn't panic and we got a number".
         // A regression that swapped `start_instant.elapsed()` for, say, `start_wall.elapsed()` would
         // fail at compile time (different methods).
@@ -127,13 +99,7 @@ mod tests {
         let disabled = BTreeSet::<CompactString>::new();
         let config = Config::from_str("").expect("empty config parses");
 
-        let r = status(
-            &engine,
-            &ds,
-            &disabled,
-            &config,
-            &PathBuf::from("/etc/specter.toml"),
-        );
+        let r = status(&engine, &ds, &disabled, &config, &PathBuf::from("/etc/specter.toml"));
 
         assert_eq!(r.reload_count, 1);
         // `WireReloadTrigger::from(ReloadTrigger::Sighup) == Sighup` — the projection is the
@@ -151,13 +117,7 @@ mod tests {
         let disabled = BTreeSet::<CompactString>::new();
         let config = Config::from_str("").expect("empty config parses");
 
-        let r = status(
-            &engine,
-            &ds,
-            &disabled,
-            &config,
-            &PathBuf::from("/etc/specter.toml"),
-        );
+        let r = status(&engine, &ds, &disabled, &config, &PathBuf::from("/etc/specter.toml"));
         let lr = r.last_reload.expect("record_reload populated the pair");
         assert_eq!(lr.via, crate::ipc::wire::WireReloadTrigger::Ipc);
     }
@@ -171,13 +131,7 @@ mod tests {
         disabled.insert(CompactString::const_new("bar"));
         let config = Config::from_str("").expect("empty config parses");
 
-        let r = status(
-            &engine,
-            &ds,
-            &disabled,
-            &config,
-            &PathBuf::from("/etc/specter.toml"),
-        );
+        let r = status(&engine, &ds, &disabled, &config, &PathBuf::from("/etc/specter.toml"));
         assert_eq!(r.sub_disabled_runtime, 2);
     }
 
@@ -188,13 +142,7 @@ mod tests {
         let disabled = BTreeSet::<CompactString>::new();
         let config = config_from_watches(&[("off_one", "/tmp", false), ("on_one", "/tmp", true)]);
 
-        let r = status(
-            &engine,
-            &ds,
-            &disabled,
-            &config,
-            &PathBuf::from("/etc/specter.toml"),
-        );
+        let r = status(&engine, &ds, &disabled, &config, &PathBuf::from("/etc/specter.toml"));
         assert_eq!(r.sub_disabled_toml, 1, "one TOML-disabled watch");
     }
 
@@ -228,16 +176,7 @@ mod tests {
         let disabled = BTreeSet::<CompactString>::new();
         let config = Config::from_str("").expect("empty config parses");
 
-        let r = status(
-            &engine,
-            &ds,
-            &disabled,
-            &config,
-            &PathBuf::from("/etc/specter.toml"),
-        );
-        assert_eq!(
-            r.socket_path,
-            WirePath::from(Path::new("/run/user/1000/custom.sock")),
-        );
+        let r = status(&engine, &ds, &disabled, &config, &PathBuf::from("/etc/specter.toml"));
+        assert_eq!(r.socket_path, WirePath::from(Path::new("/run/user/1000/custom.sock")));
     }
 }

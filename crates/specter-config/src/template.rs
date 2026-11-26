@@ -156,9 +156,7 @@ pub fn parse_arg(s: &str) -> Result<ArgTemplate, TemplateError> {
         // Recognised namespace opener?
         if let Some((kind, body_start)) = try_open_namespace(s, i) {
             let Some(rel_end) = s[body_start..].find('}') else {
-                return Err(TemplateError::UnterminatedPlaceholder {
-                    partial: s[i..].to_owned(),
-                });
+                return Err(TemplateError::UnterminatedPlaceholder { partial: s[i..].to_owned() });
             };
             let body = &s[body_start..body_start + rel_end];
             let part = dispatch_namespace(kind, body)?;
@@ -221,15 +219,10 @@ fn parse_specter_name(name: &str) -> Result<Placeholder, TemplateError> {
     for ch in name.chars() {
         let ok = ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_';
         if !ok {
-            return Err(TemplateError::InvalidPlaceholderChar {
-                name: name.to_owned(),
-                ch,
-            });
+            return Err(TemplateError::InvalidPlaceholderChar { name: name.to_owned(), ch });
         }
     }
-    catalog_lookup(name).ok_or_else(|| TemplateError::UnknownPlaceholder {
-        name: name.to_owned(),
-    })
+    catalog_lookup(name).ok_or_else(|| TemplateError::UnknownPlaceholder { name: name.to_owned() })
 }
 
 /// Parse an `${env.…}` body: split on `:-` to separate `<NAME>` from an optional literal default,
@@ -250,10 +243,7 @@ fn parse_env_body(body: &str) -> Result<ArgPart, TemplateError> {
     if let Some(d) = default {
         validate_env_default(d)?;
     }
-    Ok(ArgPart::EnvVar {
-        name: name.into(),
-        default: default.map(CompactString::from),
-    })
+    Ok(ArgPart::EnvVar { name: name.into(), default: default.map(CompactString::from) })
 }
 
 /// `[A-Za-z_][A-Za-z0-9_]*` — POSIX env-var identifier grammar.
@@ -266,17 +256,11 @@ fn validate_env_name(name: &str) -> Result<(), TemplateError> {
         .next()
         .expect("non-empty checked immediately above; iterator yields at least one char");
     if !(first.is_ascii_alphabetic() || first == '_') {
-        return Err(TemplateError::InvalidEnvName {
-            name: name.to_owned(),
-            ch: first,
-        });
+        return Err(TemplateError::InvalidEnvName { name: name.to_owned(), ch: first });
     }
     for ch in chars {
         if !(ch.is_ascii_alphanumeric() || ch == '_') {
-            return Err(TemplateError::InvalidEnvName {
-                name: name.to_owned(),
-                ch,
-            });
+            return Err(TemplateError::InvalidEnvName { name: name.to_owned(), ch });
         }
     }
     Ok(())
@@ -298,15 +282,10 @@ fn validate_env_name(name: &str) -> Result<(), TemplateError> {
 /// first one — this branch never sees it.
 fn validate_env_default(d: &str) -> Result<(), TemplateError> {
     if d.contains(ENV_DEFAULT_SEP) {
-        return Err(TemplateError::EnvDefaultContainsSeparator {
-            default: d.to_owned(),
-        });
+        return Err(TemplateError::EnvDefaultContainsSeparator { default: d.to_owned() });
     }
     if let Some(ch) = d.chars().find(|c| matches!(c, '$' | '{') || c.is_control()) {
-        return Err(TemplateError::InvalidEnvDefault {
-            default: d.to_owned(),
-            ch,
-        });
+        return Err(TemplateError::InvalidEnvDefault { default: d.to_owned(), ch });
     }
     Ok(())
 }
@@ -399,12 +378,7 @@ mod tests {
     #[test]
     fn unknown_placeholder_inside_namespace() {
         let err = parse_arg("${specter.unknown}").unwrap_err();
-        assert_eq!(
-            err,
-            TemplateError::UnknownPlaceholder {
-                name: "unknown".to_owned()
-            }
-        );
+        assert_eq!(err, TemplateError::UnknownPlaceholder { name: "unknown".to_owned() });
     }
 
     // === Literal pass-through (the strict break) ===
@@ -425,10 +399,7 @@ mod tests {
         // lexer never touches it.
         assert_eq!(parts(&parse_arg("$path").unwrap()), vec![lit("$path")]);
         assert_eq!(parts(&parse_arg("$watch").unwrap()), vec![lit("$watch")]);
-        assert_eq!(
-            parts(&parse_arg("$created").unwrap()),
-            vec![lit("$created")]
-        );
+        assert_eq!(parts(&parse_arg("$created").unwrap()), vec![lit("$created")]);
         assert_eq!(parts(&parse_arg("$HOME").unwrap()), vec![lit("$HOME")]);
         assert_eq!(parts(&parse_arg("$Path").unwrap()), vec![lit("$Path")]);
         assert_eq!(parts(&parse_arg("$_x").unwrap()), vec![lit("$_x")]);
@@ -447,30 +418,21 @@ mod tests {
     #[test]
     fn brace_namespace_no_dot_is_literal() {
         // `${specter}` (no dot) is NOT the namespace opener. The dot is load-bearing.
-        assert_eq!(
-            parts(&parse_arg("${specter}").unwrap()),
-            vec![lit("${specter}")]
-        );
+        assert_eq!(parts(&parse_arg("${specter}").unwrap()), vec![lit("${specter}")]);
     }
 
     #[test]
     fn uppercase_namespace_is_literal() {
         // `${SPECTER.path}` is uppercase; the namespace prefix is lowercase only. Falls through as
         // literal.
-        assert_eq!(
-            parts(&parse_arg("${SPECTER.path}").unwrap()),
-            vec![lit("${SPECTER.path}")]
-        );
+        assert_eq!(parts(&parse_arg("${SPECTER.path}").unwrap()), vec![lit("${SPECTER.path}")]);
     }
 
     #[test]
     fn space_after_dollar_is_literal() {
         // `$ {specter.path}` — must be `${` adjacent. The space breaks the prefix; lone `$` becomes
         // literal.
-        assert_eq!(
-            parts(&parse_arg("$ {specter.path}").unwrap()),
-            vec![lit("$ {specter.path}")]
-        );
+        assert_eq!(parts(&parse_arg("$ {specter.path}").unwrap()), vec![lit("$ {specter.path}")]);
     }
 
     // === Escape rules ===
@@ -485,10 +447,7 @@ mod tests {
     fn double_dollar_then_namespace_escapes_namespace() {
         // `$${specter.path}` — `$$` consumes the leading `$`, leaving a literal `$` followed by
         // `{specter.path}` plain bytes.
-        assert_eq!(
-            parts(&parse_arg("$${specter.path}").unwrap()),
-            vec![lit("${specter.path}")]
-        );
+        assert_eq!(parts(&parse_arg("$${specter.path}").unwrap()), vec![lit("${specter.path}")]);
     }
 
     #[test]
@@ -557,9 +516,7 @@ mod tests {
         let err = parse_arg("${specter.path").unwrap_err();
         assert_eq!(
             err,
-            TemplateError::UnterminatedPlaceholder {
-                partial: "${specter.path".to_owned(),
-            }
+            TemplateError::UnterminatedPlaceholder { partial: "${specter.path".to_owned() }
         );
     }
 
@@ -572,13 +529,7 @@ mod tests {
     #[test]
     fn invalid_placeholder_char_uppercase() {
         let err = parse_arg("${specter.PATH}").unwrap_err();
-        assert_eq!(
-            err,
-            TemplateError::InvalidPlaceholderChar {
-                name: "PATH".to_owned(),
-                ch: 'P',
-            }
-        );
+        assert_eq!(err, TemplateError::InvalidPlaceholderChar { name: "PATH".to_owned(), ch: 'P' });
     }
 
     #[test]
@@ -588,10 +539,7 @@ mod tests {
         let err = parse_arg("${specter.renamed.from}").unwrap_err();
         assert_eq!(
             err,
-            TemplateError::InvalidPlaceholderChar {
-                name: "renamed.from".to_owned(),
-                ch: '.',
-            }
+            TemplateError::InvalidPlaceholderChar { name: "renamed.from".to_owned(), ch: '.' }
         );
     }
 
@@ -601,10 +549,7 @@ mod tests {
         let err = parse_arg("${specter.${specter.foo}}").unwrap_err();
         assert_eq!(
             err,
-            TemplateError::InvalidPlaceholderChar {
-                name: "${specter.foo".to_owned(),
-                ch: '$',
-            }
+            TemplateError::InvalidPlaceholderChar { name: "${specter.foo".to_owned(), ch: '$' }
         );
     }
 
@@ -613,10 +558,7 @@ mod tests {
     #[test]
     fn template_error_display_renders_specter_namespace() {
         assert_eq!(
-            TemplateError::UnknownPlaceholder {
-                name: "Foo".to_owned()
-            }
-            .to_string(),
+            TemplateError::UnknownPlaceholder { name: "Foo".to_owned() }.to_string(),
             "unknown placeholder `${specter.Foo}`"
         );
         assert_eq!(
@@ -624,11 +566,7 @@ mod tests {
             "empty placeholder name (expected `${specter.<name>}` or `${env.<name>}`)"
         );
         assert_eq!(
-            TemplateError::InvalidEnvName {
-                name: "1HOME".to_owned(),
-                ch: '1',
-            }
-            .to_string(),
+            TemplateError::InvalidEnvName { name: "1HOME".to_owned(), ch: '1' }.to_string(),
             "invalid character `1` in `${env.1HOME}` (expected `[A-Za-z_][A-Za-z0-9_]*`)"
         );
     }
@@ -636,18 +574,12 @@ mod tests {
     // === `${env.<NAME>}` namespace ===
 
     fn env(name: &str, default: Option<&str>) -> ArgPart {
-        ArgPart::EnvVar {
-            name: name.into(),
-            default: default.map(CompactString::from),
-        }
+        ArgPart::EnvVar { name: name.into(), default: default.map(CompactString::from) }
     }
 
     #[test]
     fn env_var_simple_no_default() {
-        assert_eq!(
-            parts(&parse_arg("${env.HOME}").unwrap()),
-            vec![env("HOME", None)]
-        );
+        assert_eq!(parts(&parse_arg("${env.HOME}").unwrap()), vec![env("HOME", None)]);
     }
 
     #[test]
@@ -662,18 +594,12 @@ mod tests {
     /// empty when HOME is unset rather than failing the plan.
     #[test]
     fn env_var_empty_default_is_explicit_lenient_opt_in() {
-        assert_eq!(
-            parts(&parse_arg("${env.HOME:-}").unwrap()),
-            vec![env("HOME", Some(""))]
-        );
+        assert_eq!(parts(&parse_arg("${env.HOME:-}").unwrap()), vec![env("HOME", Some(""))]);
     }
 
     #[test]
     fn env_var_underscore_name_allowed() {
-        assert_eq!(
-            parts(&parse_arg("${env._PRIVATE_X}").unwrap()),
-            vec![env("_PRIVATE_X", None)]
-        );
+        assert_eq!(parts(&parse_arg("${env._PRIVATE_X}").unwrap()), vec![env("_PRIVATE_X", None)]);
     }
 
     #[test]
@@ -704,25 +630,13 @@ mod tests {
     #[test]
     fn env_var_name_must_not_start_with_digit() {
         let err = parse_arg("${env.1HOME}").unwrap_err();
-        assert_eq!(
-            err,
-            TemplateError::InvalidEnvName {
-                name: "1HOME".to_owned(),
-                ch: '1',
-            }
-        );
+        assert_eq!(err, TemplateError::InvalidEnvName { name: "1HOME".to_owned(), ch: '1' });
     }
 
     #[test]
     fn env_var_name_rejects_dash() {
         let err = parse_arg("${env.MY-VAR}").unwrap_err();
-        assert_eq!(
-            err,
-            TemplateError::InvalidEnvName {
-                name: "MY-VAR".to_owned(),
-                ch: '-',
-            }
-        );
+        assert_eq!(err, TemplateError::InvalidEnvName { name: "MY-VAR".to_owned(), ch: '-' });
     }
 
     #[test]
@@ -730,9 +644,7 @@ mod tests {
         let err = parse_arg("${env.HOME").unwrap_err();
         assert_eq!(
             err,
-            TemplateError::UnterminatedPlaceholder {
-                partial: "${env.HOME".to_owned(),
-            }
+            TemplateError::UnterminatedPlaceholder { partial: "${env.HOME".to_owned() }
         );
     }
 
@@ -744,10 +656,7 @@ mod tests {
         let err = parse_arg("${env.HOME:-${env.USER}}").unwrap_err();
         assert_eq!(
             err,
-            TemplateError::InvalidEnvDefault {
-                default: "${env.USER".to_owned(),
-                ch: '$',
-            }
+            TemplateError::InvalidEnvDefault { default: "${env.USER".to_owned(), ch: '$' }
         );
     }
 
@@ -756,13 +665,7 @@ mod tests {
         // Lone `{` is also reserved — even without a leading `$`, it's a signal that the operator
         // might be confused about the literal-only contract.
         let err = parse_arg("${env.HOME:-{foo}").unwrap_err();
-        assert_eq!(
-            err,
-            TemplateError::InvalidEnvDefault {
-                default: "{foo".to_owned(),
-                ch: '{',
-            }
-        );
+        assert_eq!(err, TemplateError::InvalidEnvDefault { default: "{foo".to_owned(), ch: '{' });
     }
 
     /// `${env.X:-a:-b}` — the first `:-` consumed as the name/default split leaves `default =
@@ -771,12 +674,7 @@ mod tests {
     #[test]
     fn env_var_default_rejects_separator_substring() {
         let err = parse_arg("${env.X:-a:-b}").unwrap_err();
-        assert_eq!(
-            err,
-            TemplateError::EnvDefaultContainsSeparator {
-                default: "a:-b".to_owned(),
-            }
-        );
+        assert_eq!(err, TemplateError::EnvDefaultContainsSeparator { default: "a:-b".to_owned() });
     }
 
     /// Control characters in defaults would silently end up in argv and (worse) corrupt log lines
@@ -791,10 +689,9 @@ mod tests {
         ] {
             let err = parse_arg(input).unwrap_err();
             match err {
-                TemplateError::InvalidEnvDefault { ch, .. } => assert_eq!(
-                    ch, expected_ch,
-                    "input `{input}` should reject `{expected_ch:?}`"
-                ),
+                TemplateError::InvalidEnvDefault { ch, .. } => {
+                    assert_eq!(ch, expected_ch, "input `{input}` should reject `{expected_ch:?}`");
+                }
                 other => panic!("input `{input}`: expected InvalidEnvDefault, got {other:?}"),
             }
         }
@@ -805,19 +702,10 @@ mod tests {
     /// line-oriented parsing.
     #[test]
     fn invalid_env_default_display_escapes_control_chars() {
-        let msg = TemplateError::InvalidEnvDefault {
-            default: "x\ny".to_owned(),
-            ch: '\n',
-        }
-        .to_string();
-        assert!(
-            msg.contains(r"\n"),
-            "Display should escape `\\n` literally, got `{msg}`"
-        );
-        assert!(
-            !msg.contains('\n'),
-            "Display message must not contain a raw newline, got `{msg}`"
-        );
+        let msg =
+            TemplateError::InvalidEnvDefault { default: "x\ny".to_owned(), ch: '\n' }.to_string();
+        assert!(msg.contains(r"\n"), "Display should escape `\\n` literally, got `{msg}`");
+        assert!(!msg.contains('\n'), "Display message must not contain a raw newline, got `{msg}`");
     }
 
     #[test]
@@ -834,11 +722,9 @@ mod tests {
             let parsed = parse_arg(input).unwrap();
             let env_part = parsed.parts().iter().next().expect("at least one part");
             match env_part {
-                ArgPart::EnvVar { default, .. } => assert_eq!(
-                    default.as_deref(),
-                    Some(expected_default),
-                    "input `{input}`"
-                ),
+                ArgPart::EnvVar { default, .. } => {
+                    assert_eq!(default.as_deref(), Some(expected_default), "input `{input}`");
+                }
                 other => panic!("input `{input}`: expected EnvVar, got {other:?}"),
             }
         }
@@ -886,10 +772,7 @@ mod tests {
     /// `{env.HOME}` as plain bytes. Matches the existing `$${specter.path}` escape contract.
     #[test]
     fn double_dollar_then_env_namespace_escapes_namespace() {
-        assert_eq!(
-            parts(&parse_arg("$${env.HOME}").unwrap()),
-            vec![lit("${env.HOME}")]
-        );
+        assert_eq!(parts(&parse_arg("$${env.HOME}").unwrap()), vec![lit("${env.HOME}")]);
     }
 
     // === Property tests ===

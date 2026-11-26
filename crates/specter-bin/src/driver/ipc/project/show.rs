@@ -36,12 +36,8 @@ use super::{program, project_wall, settle_ms};
 /// 3. `config.watches[*].name == name && !enabled` → `Disabled { Toml }`
 /// 4. otherwise → `Unknown`
 pub(crate) fn show(
-    engine: &Engine,
-    ds: &DriverState,
-    disabled_runtime: &BTreeSet<CompactString>,
-    config: &Config,
-    name: &str,
-    now: Instant,
+    engine: &Engine, ds: &DriverState, disabled_runtime: &BTreeSet<CompactString>, config: &Config,
+    name: &str, now: Instant,
 ) -> ShowResponse {
     if let Some(sid) = engine.subs().find_by_name(name) {
         let sub = engine
@@ -51,28 +47,18 @@ pub(crate) fn show(
         if sub.minted_by().is_none() {
             return ShowResponse::Active(project_details(sid, sub, engine, ds, now));
         }
-        return ShowResponse::Unknown {
-            name: name.to_string(),
-        };
+        return ShowResponse::Unknown { name: name.to_string() };
     }
 
     if disabled_runtime.contains(name) {
-        return ShowResponse::Disabled {
-            name: name.to_string(),
-            source: DisabledSource::Runtime,
-        };
+        return ShowResponse::Disabled { name: name.to_string(), source: DisabledSource::Runtime };
     }
 
     if config.watches.iter().any(|s| s.name == name && !s.enabled) {
-        return ShowResponse::Disabled {
-            name: name.to_string(),
-            source: DisabledSource::Toml,
-        };
+        return ShowResponse::Disabled { name: name.to_string(), source: DisabledSource::Toml };
     }
 
-    ShowResponse::Unknown {
-        name: name.to_string(),
-    }
+    ShowResponse::Unknown { name: name.to_string() }
 }
 
 /// Project a registry-attached `(SubId, &Sub)` into a [`SubDetails`].
@@ -88,31 +74,20 @@ pub(crate) fn show(
 /// in flight, an Unwatch event that hasn't reconciled). The shape mirrors
 /// [`crate::ipc::protocol::ListRow::anchor`].
 fn project_details(
-    sid: SubId,
-    sub: &Sub,
-    engine: &Engine,
-    ds: &DriverState,
-    now: Instant,
+    sid: SubId, sub: &Sub, engine: &Engine, ds: &DriverState, now: Instant,
 ) -> SubDetails {
     let profile = engine.profiles().get(sub.profile());
     let state = profile.map(|p| WireStateLabel::from(p.state().label()));
-    let anchor = profile
-        .and_then(|p| engine.tree().path_of(p.resource()))
-        .map(|arc| WirePath::from(&arc));
+    let anchor =
+        profile.and_then(|p| engine.tree().path_of(p.resource())).map(|arc| WirePath::from(&arc));
     let reaction = match sub.reaction() {
-        Reaction::Spawn {
-            params: SubParams { spawn, .. },
-            history,
-            ..
-        } => WireReaction::Spawn {
+        Reaction::Spawn { params: SubParams { spawn, .. }, history, .. } => WireReaction::Spawn {
             scope: WireEffectScope::from(spawn.scope()),
             program: program::render(spawn.program()),
             last_fired_at: history.last_fired_at.map(|t| project_wall(ds, t)),
             fire_count: history.fire_count,
             dedup_suppressed_count: history.dedup_suppressed_count,
-            absorb: profile
-                .and_then(|p| p.absorb_window_if_live(now))
-                .map(|w| wire_window(ds, w)),
+            absorb: profile.and_then(|p| p.absorb_window_if_live(now)).map(|w| wire_window(ds, w)),
             absorb_count: profile.map_or(0, Profile::absorb_count),
         },
         Reaction::Mint { spec, .. } => WireReaction::Mint {
@@ -139,10 +114,7 @@ fn project_details(
 /// ([`specter_core::SubRegistry::firing_profiles`]), and the window that lapses last; `None` while
 /// none does.
 fn minted_absorbing(
-    engine: &Engine,
-    template: SubId,
-    ds: &DriverState,
-    now: Instant,
+    engine: &Engine, template: SubId, ds: &DriverState, now: Instant,
 ) -> Option<WireMintedAbsorbing> {
     let live = || {
         engine
@@ -151,10 +123,7 @@ fn minted_absorbing(
             .filter_map(|p| engine.profiles().get(p)?.absorb_window_if_live(now))
     };
     let last = live().max_by_key(|w| w.expiry)?;
-    Some(WireMintedAbsorbing {
-        armed: live().count(),
-        last: wire_window(ds, last),
-    })
+    Some(WireMintedAbsorbing { armed: live().count(), last: wire_window(ds, last) })
 }
 
 fn wire_window(ds: &DriverState, window: &AbsorbWindow) -> WireAbsorbWindow {
@@ -197,19 +166,11 @@ mod tests {
         match r {
             ShowResponse::Active(d) => {
                 assert_eq!(d.name, "watched");
-                assert!(
-                    d.state.is_some(),
-                    "attached Sub's Profile lookup populates state",
-                );
+                assert!(d.state.is_some(), "attached Sub's Profile lookup populates state");
                 assert!(d.anchor.is_some(), "attached Sub has resolved anchor path");
                 assert!(d.minted_by.is_none(), "static Sub has no minted_by");
                 match d.reaction {
-                    WireReaction::Spawn {
-                        program,
-                        last_fired_at,
-                        fire_count,
-                        ..
-                    } => {
+                    WireReaction::Spawn { program, last_fired_at, fire_count, .. } => {
                         assert_eq!(fire_count, 0, "never fired");
                         assert!(last_fired_at.is_none(), "never fired ⇒ None");
                         assert!(!program.is_empty(), "program renders ≥1 line");
@@ -303,14 +264,7 @@ mod tests {
         // the engine's detach.
         disabled.insert(CompactString::const_new("engaged"));
 
-        let r = show(
-            guard.engine(),
-            &fresh_state(),
-            &disabled,
-            &config,
-            "engaged",
-            Instant::now(),
-        );
+        let r = show(guard.engine(), &fresh_state(), &disabled, &config, "engaged", Instant::now());
         assert!(
             matches!(r, ShowResponse::Active(_)),
             "engine row wins precedence over the runtime-disabled set",
@@ -327,20 +281,11 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let config = config_from_watches(&[("watched", tmp.path().to_str().unwrap(), true)]);
         let mut engine = engine_with(&config);
-        let sid = engine
-            .subs()
-            .find_by_name("watched")
-            .expect("watched attached");
+        let sid = engine.subs().find_by_name("watched").expect("watched attached");
 
         let arm_now = Instant::now();
         let window = Duration::from_mins(1);
-        let _ = engine.step(
-            Input::ArmAbsorb {
-                sub: sid,
-                duration: Some(window),
-            },
-            arm_now,
-        );
+        let _ = engine.step(Input::ArmAbsorb { sub: sid, duration: Some(window) }, arm_now);
 
         let guard = EngineGuard::wrap(engine);
         let spawn_absorb = |now| match show(
@@ -352,12 +297,7 @@ mod tests {
             now,
         ) {
             ShowResponse::Active(SubDetails {
-                reaction:
-                    WireReaction::Spawn {
-                        absorb,
-                        absorb_count,
-                        ..
-                    },
+                reaction: WireReaction::Spawn { absorb, absorb_count, .. },
                 ..
             }) => (absorb, absorb_count),
             other => panic!("expected a spawn row, got {other:?}"),
@@ -374,10 +314,7 @@ mod tests {
 
         // Past expiry ⇒ None (the projection drops the inert window).
         let (inert, _) = spawn_absorb(arm_now + window + Duration::from_secs(1));
-        assert!(
-            inert.is_none(),
-            "inert window (expiry <= now) projects None: {inert:?}"
-        );
+        assert!(inert.is_none(), "inert window (expiry <= now) projects None: {inert:?}");
     }
 
     /// A template's row sums up the live windows across its matches: of three windows, one past its
@@ -388,18 +325,10 @@ mod tests {
         let mut engine = Engine::new();
         let [a, b, c] = mint(&mut engine, ["a", "b", "c"]);
         let armed_at = Instant::now();
-        for (sub, window) in [
-            (a, Duration::from_mins(1)),
-            (b, Duration::from_mins(2)),
-            (c, Duration::from_secs(1)),
-        ] {
-            let _ = engine.step(
-                Input::ArmAbsorb {
-                    sub,
-                    duration: Some(window),
-                },
-                armed_at,
-            );
+        for (sub, window) in
+            [(a, Duration::from_mins(1)), (b, Duration::from_mins(2)), (c, Duration::from_secs(1))]
+        {
+            let _ = engine.step(Input::ArmAbsorb { sub, duration: Some(window) }, armed_at);
         }
         let guard = EngineGuard::wrap(engine);
         let ds = fresh_state();
@@ -407,10 +336,7 @@ mod tests {
         let minted_absorbing =
             |now| match show(guard.engine(), &ds, &BTreeSet::new(), &empty, "disc", now) {
                 ShowResponse::Active(SubDetails {
-                    reaction:
-                        WireReaction::Mint {
-                            minted_absorbing, ..
-                        },
+                    reaction: WireReaction::Mint { minted_absorbing, .. },
                     ..
                 }) => minted_absorbing,
                 other => panic!("expected a mint row, got {other:?}"),
@@ -465,42 +391,20 @@ mod tests {
         let pattern = format!("{}/{{a,b}}/access.log", tmp.path().display());
         let config = config_from_watches(&[("disc", &pattern, true)]);
         let guard = EngineGuard::wrap(engine_with(&config));
-        let sid = guard
-            .engine()
-            .subs()
-            .find_by_name("disc")
-            .expect("template attached");
+        let sid = guard.engine().subs().find_by_name("disc").expect("template attached");
         assert!(
-            guard
-                .engine()
-                .subs()
-                .get(sid)
-                .expect("live sub")
-                .is_template(),
+            guard.engine().subs().get(sid).expect("live sub").is_template(),
             "fixture lowered to a template (load-bearing precondition)",
         );
 
-        let r = show(
-            guard.engine(),
-            &fresh_state(),
-            &BTreeSet::new(),
-            &config,
-            "disc",
-            Instant::now(),
-        );
+        let r =
+            show(guard.engine(), &fresh_state(), &BTreeSet::new(), &config, "disc", Instant::now());
         match r {
             ShowResponse::Active(d) => {
                 assert_eq!(d.name, "disc");
-                assert!(
-                    d.minted_by.is_none(),
-                    "a template is operator-declared, not minted",
-                );
+                assert!(d.minted_by.is_none(), "a template is operator-declared, not minted");
                 match d.reaction {
-                    WireReaction::Mint {
-                        minted_live,
-                        minted_program,
-                        ..
-                    } => {
+                    WireReaction::Mint { minted_live, minted_program, .. } => {
                         assert_eq!(minted_live, 0, "nothing minted yet");
                         assert!(
                             !minted_program.is_empty(),

@@ -4,18 +4,9 @@ use std::path::{Path, PathBuf};
 #[non_exhaustive]
 #[derive(Debug)]
 pub enum ConfigError {
-    Io {
-        path: PathBuf,
-        source: std::io::Error,
-    },
-    Parse {
-        path: Option<PathBuf>,
-        message: String,
-    },
-    Validate {
-        path: Option<PathBuf>,
-        errors: Vec<ValidationIssue>,
-    },
+    Io { path: PathBuf, source: std::io::Error },
+    Parse { path: Option<PathBuf>, message: String },
+    Validate { path: Option<PathBuf>, errors: Vec<ValidationIssue> },
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -139,10 +130,7 @@ pub enum IssueKind {
 
 impl ConfigError {
     pub(crate) fn parse(path: Option<&Path>, e: &toml::de::Error) -> Self {
-        Self::Parse {
-            path: path.map(Path::to_owned),
-            message: e.to_string(),
-        }
+        Self::Parse { path: path.map(Path::to_owned), message: e.to_string() }
     }
 }
 
@@ -184,47 +172,25 @@ impl fmt::Display for ConfigError {
 
 impl std::error::Error for ConfigError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        if let Self::Io { source, .. } = self {
-            Some(source)
-        } else {
-            None
-        }
+        if let Self::Io { source, .. } = self { Some(source) } else { None }
     }
 }
 
 impl ValidationIssue {
     pub(crate) const fn new(
-        watch_index: Option<usize>,
-        field: &'static str,
-        kind: IssueKind,
-        detail: String,
+        watch_index: Option<usize>, field: &'static str, kind: IssueKind, detail: String,
     ) -> Self {
-        Self {
-            watch_index,
-            field,
-            kind,
-            detail,
-        }
+        Self { watch_index, field, kind, detail }
     }
 }
 
 impl fmt::Display for ValidationIssue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.watch_index {
-            Some(i) => write!(
-                f,
-                "watch[{i}].{}: {} ({})",
-                self.field,
-                self.detail,
-                kind_label(self.kind)
-            ),
-            None => write!(
-                f,
-                "{}: {} ({})",
-                self.field,
-                self.detail,
-                kind_label(self.kind)
-            ),
+            Some(i) => {
+                write!(f, "watch[{i}].{}: {} ({})", self.field, self.detail, kind_label(self.kind))
+            }
+            None => write!(f, "{}: {} ({})", self.field, self.detail, kind_label(self.kind)),
         }
     }
 }
@@ -274,9 +240,7 @@ impl ValidationIssue {
     /// case is not representable on the source error (the builder panics on emit as a precondition
     /// failure — physically impossible to load).
     pub(crate) fn from_program_error(
-        e: &specter_core::program::ProgramError,
-        watch_index: Option<usize>,
-        field: &'static str,
+        e: &specter_core::program::ProgramError, watch_index: Option<usize>, field: &'static str,
     ) -> Self {
         Self::new(
             watch_index,

@@ -133,11 +133,7 @@ impl Styler {
         // already elides both the (empty) intro and the reset for an empty style, so the `else`
         // delegate below owns Plain-path byte-equality on its own.
         let active = matches!(self, Self::Active) && style != Style::new();
-        Painted {
-            style,
-            body,
-            active,
-        }
+        Painted { style, body, active }
     }
 }
 
@@ -152,13 +148,7 @@ pub(crate) struct Painted<D> {
 impl<D: Display> Display for Painted<D> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         if self.active {
-            write!(
-                f,
-                "{}{}{}",
-                self.style.render(),
-                self.body,
-                self.style.render_reset(),
-            )
+            write!(f, "{}{}{}", self.style.render(), self.body, self.style.render_reset())
         } else {
             // Zero-alloc passthrough — `tail` keeps its amortized buffer.
             self.body.fmt(f)
@@ -196,16 +186,7 @@ macro_rules! leaf {
 // (`&str` literals + keys), `String` (`show`'s unknown-name `&String`), and `WireTime` (an `at_field`
 // borrow). The rest are painted by value (`fmt::Arguments` from the stderr helpers, `PadRight` /
 // `Rule` from the layout primitives, the two wire enums painted directly).
-leaf!(
-    str,
-    String,
-    fmt::Arguments<'_>,
-    PadRight<'_>,
-    Rule,
-    WireStateLabel,
-    WireTime,
-    WireErrorCode,
-);
+leaf!(str, String, fmt::Arguments<'_>, PadRight<'_>, Rule, WireStateLabel, WireTime, WireErrorCode);
 
 // --- Paintable layout primitives. ------------------------------------
 
@@ -285,10 +266,7 @@ fn auto(is_tty: bool) -> bool {
 /// default. Pure over its four inputs (the env signals + TTY state), so the ordering is a unit test
 /// rather than an end-to-end smoke run; [`auto`] supplies the live env reads.
 const fn auto_precedence(
-    no_color: bool,
-    clicolor_force: bool,
-    clicolor: Option<bool>,
-    is_tty: bool,
+    no_color: bool, clicolor_force: bool, clicolor: Option<bool>, is_tty: bool,
 ) -> bool {
     if no_color {
         return false;
@@ -365,15 +343,9 @@ mod tests {
     /// alone, leaving plain output unchanged across every renderer.
     #[test]
     fn plain_paint_is_passthrough() {
-        assert_eq!(
-            Styler::Plain.paint(super::LABEL, "label").to_string(),
-            "label"
-        );
+        assert_eq!(Styler::Plain.paint(super::LABEL, "label").to_string(), "label");
         assert_eq!(Styler::Plain.paint(super::ERR, "boom").to_string(), "boom");
-        assert_eq!(
-            Styler::Plain.paint(super::DELIM, Rule(3)).to_string(),
-            "───"
-        );
+        assert_eq!(Styler::Plain.paint(super::DELIM, Rule(3)).to_string(), "───");
     }
 
     /// `Styler::Active` brackets a non-empty style with SGR codes; stripping them recovers the body
@@ -381,10 +353,7 @@ mod tests {
     #[test]
     fn active_paint_brackets_and_strips_back() {
         let painted = Styler::Active.paint(super::ERR, "boom").to_string();
-        assert!(
-            painted.contains('\x1b'),
-            "active paint emits SGR: {painted:?}"
-        );
+        assert!(painted.contains('\x1b'), "active paint emits SGR: {painted:?}");
         assert!(painted.starts_with('\x1b'), "intro leads: {painted:?}");
         assert!(painted.ends_with('m'), "reset trails: {painted:?}");
         assert_eq!(strip_ansi(&painted), "boom", "stripping recovers the body");
@@ -395,21 +364,14 @@ mod tests {
     /// escape bytes.
     #[test]
     fn active_paint_empty_style_is_passthrough() {
-        assert_eq!(
-            Styler::Active.paint(Style::new(), "value").to_string(),
-            "value",
-        );
+        assert_eq!(Styler::Active.paint(Style::new(), "value").to_string(), "value");
     }
 
     /// [`PadRight`] reproduces `{:<width$}`; [`Rule`] repeats the dash.
     #[test]
     fn primitives_match_their_format_shapes() {
         assert_eq!(PadRight("ab", 5).to_string(), "ab   ");
-        assert_eq!(
-            PadRight("toolong", 3).to_string(),
-            "toolong",
-            "no truncation"
-        );
+        assert_eq!(PadRight("toolong", 3).to_string(), "toolong", "no truncation");
         assert_eq!(Rule(0).to_string(), "");
         assert_eq!(Rule(4).to_string(), "────");
     }

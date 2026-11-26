@@ -130,8 +130,7 @@ mod tests {
                 [ArgTemplate::new([ArgPart::literal("/bin/false")])],
                 None,
             )));
-            b.patch_on_ok(h0, BranchTarget::Continue(BranchIndex::new(1)))
-                .unwrap();
+            b.patch_on_ok(h0, BranchTarget::Continue(BranchIndex::new(1))).unwrap();
             b.patch_on_failed(h0, BranchTarget::Terminate).unwrap();
             b.patch_on_ok(h1, BranchTarget::Escape).unwrap();
             b.patch_on_failed(h1, BranchTarget::Terminate).unwrap();

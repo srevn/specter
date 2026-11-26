@@ -65,8 +65,7 @@ impl<W: FsWatcher> EngineDriver<W> {
         // `engine.step` on the next tick's `replay_deferred_inputs` pass, so the engine's claim-purge
         // dispatch fires within one tick of the failure.
         for (resource, failure) in self.reactor.apply_watch_ops(&watch_ops) {
-            self.deferred_inputs
-                .push_back(Input::WatchOpRejected { resource, failure });
+            self.deferred_inputs.push_back(Input::WatchOpRejected { resource, failure });
         }
 
         for op in probe_ops.into_values() {
@@ -85,11 +84,7 @@ impl<W: FsWatcher> EngineDriver<W> {
         // causal order between same-profile cancel and a later submit (in a later step) is preserved
         // automatically.
         for profile in cancel_effects {
-            match self
-                .actuator_io
-                .effects_tx
-                .try_send(EffectOp::Cancel { profile })
-            {
+            match self.actuator_io.effects_tx.try_send(EffectOp::Cancel { profile }) {
                 Ok(()) => {}
                 Err(TrySendError::Full(_)) => {
                     tracing::warn!(
@@ -163,8 +158,7 @@ impl<W: FsWatcher> EngineDriver<W> {
         let wire_at = WireTime::from(wall_now);
         for diag in diagnostics {
             log_diagnostic(diag);
-            self.ipc
-                .dispatch_to_subscribers(diag, wall_now, &wire_at, diag_sub(diag));
+            self.ipc.dispatch_to_subscribers(diag, wall_now, &wire_at, diag_sub(diag));
         }
     }
 }
@@ -186,17 +180,11 @@ impl<W: FsWatcher> EngineDriver<W> {
 /// moving it in both places.
 pub(super) fn log_diagnostic(d: &Diagnostic) {
     match d {
-        Diagnostic::StaleProbeResponse { owner, correlation } => tracing::debug!(
-            ?owner,
-            ?correlation,
-            "stale probe response (state mismatch)"
-        ),
+        Diagnostic::StaleProbeResponse { owner, correlation } => {
+            tracing::debug!(?owner, ?correlation, "stale probe response (state mismatch)");
+        }
         Diagnostic::StaleTimer { id } => tracing::warn!(?id, "stale timer expiration"),
-        Diagnostic::EffectCompleteOutsideAwaiting {
-            sub,
-            profile,
-            minted_by,
-        } => tracing::warn!(
+        Diagnostic::EffectCompleteOutsideAwaiting { sub, profile, minted_by } => tracing::warn!(
             ?sub,
             ?profile,
             ?minted_by,
@@ -206,10 +194,9 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
             ?sub,
             "effect_complete for unknown Sub (hot-reload race or engine bug; dropped)",
         ),
-        Diagnostic::DetachUnknownSub { sub } => tracing::warn!(
-            ?sub,
-            "detach for unknown Sub (hot-reload race or stale id; dropped)",
-        ),
+        Diagnostic::DetachUnknownSub { sub } => {
+            tracing::warn!(?sub, "detach for unknown Sub (hot-reload race or stale id; dropped)");
+        }
         Diagnostic::ConfigDiffUnknownSub { name } => tracing::info!(
             %name,
             "config reload removed a watch the engine never attached \
@@ -223,32 +210,16 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
         Diagnostic::ProbeVanished { profile, intent } => {
             tracing::warn!(?profile, ?intent, "probe returned Vanished");
         }
-        Diagnostic::ProbeFailed {
-            profile,
-            intent,
-            failure,
-        } => tracing::warn!(
-            ?profile,
-            ?intent,
-            ?failure,
-            errno = failure.errno(),
-            "probe failed",
-        ),
-        Diagnostic::EventClassDropped {
-            resource,
-            event,
-            profile,
-        } => tracing::trace!(
+        Diagnostic::ProbeFailed { profile, intent, failure } => {
+            tracing::warn!(?profile, ?intent, ?failure, errno = failure.errno(), "probe failed");
+        }
+        Diagnostic::EventClassDropped { resource, event, profile } => tracing::trace!(
             ?resource,
             ?event,
             ?profile,
             "fs event dropped (class not in profile.events)",
         ),
-        Diagnostic::EventOutsideProofObject {
-            resource,
-            event,
-            profile,
-        } => tracing::trace!(
+        Diagnostic::EventOutsideProofObject { resource, event, profile } => tracing::trace!(
             ?resource,
             ?event,
             ?profile,
@@ -276,40 +247,29 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
         Diagnostic::PendingPathProbeVanished { profile, prefix } => {
             tracing::warn!(?profile, ?prefix, "pending-path descent probe Vanished");
         }
-        Diagnostic::PendingPathProbeFailed {
-            profile,
-            prefix,
-            failure,
-        } => tracing::warn!(
+        Diagnostic::PendingPathProbeFailed { profile, prefix, failure } => tracing::warn!(
             ?profile,
             ?prefix,
             ?failure,
             errno = failure.errno(),
             "pending-path descent probe Failed",
         ),
-        Diagnostic::PendingPathAwaitingSegment {
-            profile,
-            prefix,
-            segment,
-        } => tracing::debug!(
+        Diagnostic::PendingPathAwaitingSegment { profile, prefix, segment } => tracing::debug!(
             ?profile,
             ?prefix,
             %segment,
             "recovery descent parked: awaiting segment under prefix",
         ),
-        Diagnostic::PendingPathRetriesExhausted {
-            profile,
-            prefix,
-            retries,
-            errno,
-        } => tracing::warn!(
-            ?profile,
-            ?prefix,
-            retries,
-            errno,
-            "pending-path descent gave up retrying a signal-bearing probe; \
-             awaiting a future prefix event or overflow",
-        ),
+        Diagnostic::PendingPathRetriesExhausted { profile, prefix, retries, errno } => {
+            tracing::warn!(
+                ?profile,
+                ?prefix,
+                retries,
+                errno,
+                "pending-path descent gave up retrying a signal-bearing probe; \
+                 awaiting a future prefix event or overflow",
+            );
+        }
         Diagnostic::PendingPathMaterialized { profile, anchor } => tracing::info!(
             ?profile,
             ?anchor,
@@ -327,12 +287,7 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
             ?recovery,
             "Profile parked (anchorless; recovery via parent/anchor event, overflow, or re-attach)",
         ),
-        Diagnostic::ProfileClaimPurged {
-            profile,
-            claim,
-            resource,
-            failure,
-        } => tracing::warn!(
+        Diagnostic::ProfileClaimPurged { profile, claim, resource, failure } => tracing::warn!(
             ?profile,
             ?claim,
             ?resource,
@@ -348,72 +303,49 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
             );
         }
         Diagnostic::AttachResourceStale { resource } => {
-            tracing::warn!(
-                ?resource,
-                "attach resource stale (no live Tree slot); request dropped",
-            );
+            tracing::warn!(?resource, "attach resource stale (no live Tree slot); request dropped");
         }
-        Diagnostic::SpliceCrossedUncovered {
-            profile,
-            target,
-            cause,
-        } => tracing::warn!(
+        Diagnostic::SpliceCrossedUncovered { profile, target, cause } => tracing::warn!(
             ?profile,
             ?target,
             ?cause,
             "splice crossed uncovered subtree (graft contract violation; \
              prior view kept, response dropped)",
         ),
-        Diagnostic::AnchorKindMismatch {
-            profile,
-            prior_kind,
-            response_kind,
-        } => tracing::error!(
+        Diagnostic::AnchorKindMismatch { profile, prior_kind, response_kind } => tracing::error!(
             ?profile,
             ?prior_kind,
             ?response_kind,
             "probe response shape disagrees with cached Profile.kind \
              (walker contract violation; routing through anchor-loss recovery)",
         ),
-        Diagnostic::EventAbsorbedByFireTail {
-            profile,
-            resource,
-            event,
-        } => tracing::trace!(
+        Diagnostic::EventAbsorbedByFireTail { profile, resource, event } => tracing::trace!(
             ?profile,
             ?resource,
             ?event,
             "fs event absorbed by fire-tail (Awaiting/Rebasing); folded into post-fire rebase",
         ),
-        Diagnostic::AwaitGateDeadlineForceRebasing {
-            profile,
-            outstanding,
-        } => tracing::warn!(
+        Diagnostic::AwaitGateDeadlineForceRebasing { profile, outstanding } => tracing::warn!(
             ?profile,
             outstanding,
             "await-gate deadline elapsed; force-transitioning to Rebasing (actuator likely hung)",
         ),
-        Diagnostic::AwaitGateDeadlineReap {
-            profile,
-            outstanding,
-        } => tracing::warn!(
+        Diagnostic::AwaitGateDeadlineReap { profile, outstanding } => tracing::warn!(
             ?profile,
             outstanding,
             "await-gate deadline elapsed on zombie burst; \
              skipping rebase and reaping profile (actuator likely hung, sole sub detached)",
         ),
-        Diagnostic::QuiescenceCeilingUnreadable {
-            profile,
-            first_unread,
-            intent,
-        } => tracing::warn!(
-            ?profile,
-            ?intent,
-            ?first_unread,
-            "quiescence ceiling unreadable (the walk could not read first_unread, a directory it \
-             had cause to read); refused to fire/pin, burst finished to Idle (self-recovers once \
-             readable, or excluded)",
-        ),
+        Diagnostic::QuiescenceCeilingUnreadable { profile, first_unread, intent } => {
+            tracing::warn!(
+                ?profile,
+                ?intent,
+                ?first_unread,
+                "quiescence ceiling unreadable (the walk could not read first_unread, a directory \
+                 it had cause to read); refused to fire/pin, burst finished to Idle (self-recovers \
+                 once readable, or excluded)",
+            );
+        }
         Diagnostic::QuiescenceCeilingForcedDespiteChange { profile, intent } => tracing::warn!(
             ?profile,
             ?intent,
@@ -421,11 +353,7 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
              change (prior ≠ response) at the last sample; fired against the freshest \
              observation anyway (tree visibly moving when the deadline expired)",
         ),
-        Diagnostic::RebaseCeilingForced {
-            profile,
-            intent,
-            observed_change,
-        } => {
+        Diagnostic::RebaseCeilingForced { profile, intent, observed_change } => {
             if *observed_change {
                 tracing::warn!(
                     ?profile,
@@ -446,11 +374,7 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
                 );
             }
         }
-        Diagnostic::RebaseCeilingUnreadable {
-            profile,
-            first_unread,
-            intent,
-        } => tracing::warn!(
+        Diagnostic::RebaseCeilingUnreadable { profile, first_unread, intent } => tracing::warn!(
             ?profile,
             ?intent,
             ?first_unread,
@@ -458,11 +382,7 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
              first_unread, a directory it had cause to read); refused to rebase blind, prior \
              baseline kept, burst finished to Idle (self-recovers once readable, or excluded)",
         ),
-        Diagnostic::ChangeOutsideEventMask {
-            profile,
-            intent,
-            retries,
-        } => tracing::warn!(
+        Diagnostic::ChangeOutsideEventMask { profile, intent, retries } => tracing::warn!(
             ?profile,
             ?intent,
             retries,
@@ -485,11 +405,7 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
             "per-file Sub skipped on first-ever fire (fresh Profile has no baseline diff); \
              per-file reactions begin from the post-command baseline",
         ),
-        Diagnostic::SubAttached {
-            sub,
-            name,
-            minted_by,
-        } => match minted_by {
+        Diagnostic::SubAttached { sub, name, minted_by } => match minted_by {
             // Operator-declared attach: high signal, low rate (one per `[[watch]]` block per reload).
             // INFO is the operator-facing default per the catalog severity table.
             None => tracing::info!(?sub, %name, "sub attached"),
@@ -497,12 +413,7 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
             // uncluttered; `DiscoveryMinted` carries the path at the same severity.
             Some(template) => tracing::debug!(?sub, %name, ?template, "minted sub attached"),
         },
-        Diagnostic::SubFired {
-            sub,
-            profile,
-            count,
-            minted_by,
-        } => tracing::info!(
+        Diagnostic::SubFired { sub, profile, count, minted_by } => tracing::info!(
             ?sub,
             ?profile,
             count,
@@ -520,38 +431,25 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
             ?mode,
             "absorb window armed (next fireable burst folds instead of firing)",
         ),
-        Diagnostic::SubDetached {
-            sub,
-            profile,
-            reason,
-            minted_by,
-        } => tracing::info!(?sub, ?profile, ?reason, ?minted_by, "sub detached"),
+        Diagnostic::SubDetached { sub, profile, reason, minted_by } => {
+            tracing::info!(?sub, ?profile, ?reason, ?minted_by, "sub detached");
+        }
         Diagnostic::SubRebound { sub, minted_by } => tracing::info!(
             ?sub,
             ?minted_by,
             "sub rebound (per-Sub fields updated in place; baseline preserved)",
         ),
-        Diagnostic::RebindUnknownSub { sub } => tracing::warn!(
-            ?sub,
-            "rebind targeted an unknown Sub (dispatcher routing breach)",
-        ),
-        Diagnostic::DiscoveryMinted {
-            template,
-            path,
-            kind,
-            entry,
-        } => tracing::debug!(
+        Diagnostic::RebindUnknownSub { sub } => {
+            tracing::warn!(?sub, "rebind targeted an unknown Sub (dispatcher routing breach)");
+        }
+        Diagnostic::DiscoveryMinted { template, path, kind, entry } => tracing::debug!(
             ?template,
             path = %path.display(),
             ?kind,
             ?entry,
             "discovery minted a sub for a match",
         ),
-        Diagnostic::DiscoveryUnsupportedAnchorKind {
-            template,
-            path,
-            kind,
-        } => tracing::warn!(
+        Diagnostic::DiscoveryUnsupportedAnchorKind { template, path, kind } => tracing::warn!(
             ?template,
             path = %path.display(),
             ?kind,
@@ -564,11 +462,7 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
             count,
             "discovery fanout exceeded warning threshold (consider tightening pattern)",
         ),
-        Diagnostic::DiscoverySubReaped {
-            template,
-            sub,
-            path,
-        } => tracing::debug!(
+        Diagnostic::DiscoverySubReaped { template, sub, path } => tracing::debug!(
             ?template,
             ?sub,
             path = %path.display(),
@@ -580,11 +474,7 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
             "discovery went on without a directory it may not read; its matches there are unknown \
              until it can be read",
         ),
-        Diagnostic::InvalidBurstTransition {
-            profile,
-            helper,
-            observed,
-        } => tracing::warn!(
+        Diagnostic::InvalidBurstTransition { profile, helper, observed } => tracing::warn!(
             ?profile,
             ?helper,
             ?observed,
@@ -615,33 +505,25 @@ pub(super) const fn diag_sub(d: &Diagnostic) -> Option<DiagSub> {
         | D::SubFired { sub, minted_by, .. }
         | D::SubDetached { sub, minted_by, .. }
         | D::SubRebound { sub, minted_by }
-        | D::EffectCompleteOutsideAwaiting { sub, minted_by, .. } => Some(DiagSub {
-            sub: *sub,
-            minted_by: *minted_by,
-        }),
+        | D::EffectCompleteOutsideAwaiting { sub, minted_by, .. } => {
+            Some(DiagSub { sub: *sub, minted_by: *minted_by })
+        }
 
         // A Sub the engine no longer holds names no template.
         D::DetachUnknownSub { sub }
         | D::RebindUnknownSub { sub }
-        | D::EffectCompleteForUnknownSub { sub } => Some(DiagSub {
-            sub: *sub,
-            minted_by: None,
-        }),
+        | D::EffectCompleteForUnknownSub { sub } => Some(DiagSub { sub: *sub, minted_by: None }),
 
         // A reap is about the match, and so the template that minted it.
-        D::DiscoverySubReaped { template, sub, .. } => Some(DiagSub {
-            sub: *sub,
-            minted_by: Some(*template),
-        }),
+        D::DiscoverySubReaped { template, sub, .. } => {
+            Some(DiagSub { sub: *sub, minted_by: Some(*template) })
+        }
 
         // A pass's lines are about the template that runs it.
         D::DiscoveryMinted { template, .. }
         | D::DiscoveryUnsupportedAnchorKind { template, .. }
         | D::DiscoveryFanoutThreshold { template, .. }
-        | D::DiscoveryDenied { template, .. } => Some(DiagSub {
-            sub: *template,
-            minted_by: None,
-        }),
+        | D::DiscoveryDenied { template, .. } => Some(DiagSub { sub: *template, minted_by: None }),
 
         D::StaleProbeResponse { .. }
         | D::StaleTimer { .. }
@@ -721,12 +603,7 @@ mod tests {
             about(s, Some(t)),
         );
         assert_eq!(
-            diag_sub(&Diagnostic::SubFired {
-                sub: s,
-                profile: p,
-                count: 1,
-                minted_by: Some(t),
-            }),
+            diag_sub(&Diagnostic::SubFired { sub: s, profile: p, count: 1, minted_by: Some(t) }),
             about(s, Some(t)),
         );
         assert_eq!(
@@ -739,10 +616,7 @@ mod tests {
             about(s, Some(t)),
         );
         assert_eq!(
-            diag_sub(&Diagnostic::SubRebound {
-                sub: s,
-                minted_by: Some(t),
-            }),
+            diag_sub(&Diagnostic::SubRebound { sub: s, minted_by: Some(t) }),
             about(s, Some(t)),
         );
         assert_eq!(
@@ -770,10 +644,7 @@ mod tests {
             }),
             about(s, Some(t)),
         );
-        assert_eq!(
-            diag_sub(&Diagnostic::DiscoveryDenied { template: t, path }),
-            about(t, None),
-        );
+        assert_eq!(diag_sub(&Diagnostic::DiscoveryDenied { template: t, path }), about(t, None));
     }
 
     /// Profile-keyed and metadata-only variants project to `None` — they reach unfiltered
@@ -789,15 +660,9 @@ mod tests {
             }),
             None
         );
+        assert_eq!(diag_sub(&Diagnostic::ReapPendingCancelled { profile: p }), None);
         assert_eq!(
-            diag_sub(&Diagnostic::ReapPendingCancelled { profile: p }),
-            None
-        );
-        assert_eq!(
-            diag_sub(&Diagnostic::ProbeVanished {
-                profile: p,
-                intent: BurstIntent::Standard,
-            }),
+            diag_sub(&Diagnostic::ProbeVanished { profile: p, intent: BurstIntent::Standard }),
             None
         );
         assert_eq!(

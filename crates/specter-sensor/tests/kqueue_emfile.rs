@@ -37,12 +37,7 @@ fn watch_eventually_returns_emfile_under_low_rlimit() {
         let r = sm.insert(());
         if let Err(failure) = w.watch(r, p, ResourceKind::File, ClassSet::EMPTY) {
             assert!(
-                matches!(
-                    failure,
-                    WatchFailure::Pressure {
-                        errno: libc::EMFILE | libc::ENFILE,
-                    }
-                ),
+                matches!(failure, WatchFailure::Pressure { errno: libc::EMFILE | libc::ENFILE }),
                 "expected Pressure(EMFILE|ENFILE), got {failure:?}",
             );
             emfile_seen = true;

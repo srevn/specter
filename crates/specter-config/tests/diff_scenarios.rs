@@ -5,9 +5,7 @@ use specter_config::{Config, diff};
 use std::path::{Path, PathBuf};
 
 fn fixtures_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("fixtures")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures")
 }
 
 fn load(name: &str) -> Config {
@@ -51,23 +49,12 @@ fn reorder_only_yields_no_diff() {
     let a = load("three-watches.toml");
     let mut b_watches = a.watches.clone();
     b_watches.reverse();
-    let b = Config {
-        log: a.log.clone(),
-        watches: b_watches,
-    };
+    let b = Config { log: a.log.clone(), watches: b_watches };
     let d = diff(&a, &b);
     assert!(d.added.is_empty(), "added: {:?}", d.added);
     assert!(d.removed.is_empty(), "removed: {:?}", d.removed);
-    assert!(
-        d.modified_identity.is_empty(),
-        "modified_identity: {:?}",
-        d.modified_identity,
-    );
-    assert!(
-        d.modified_params.is_empty(),
-        "modified_params: {:?}",
-        d.modified_params,
-    );
+    assert!(d.modified_identity.is_empty(), "modified_identity: {:?}", d.modified_identity);
+    assert!(d.modified_params.is_empty(), "modified_params: {:?}", d.modified_params);
 }
 
 #[test]

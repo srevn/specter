@@ -215,8 +215,6 @@ impl serde::de::Visitor<'_> for DurationTokenVisitor {
     }
 
     fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<DurationToken, E> {
-        crate::duration::parse(v)
-            .map(DurationToken)
-            .map_err(E::custom)
+        crate::duration::parse(v).map(DurationToken).map_err(E::custom)
     }
 }

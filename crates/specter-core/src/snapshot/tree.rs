@@ -171,13 +171,7 @@ impl LeafEntry {
     /// compute_leaf_hash(fields)` has exactly one production enforcement point. Private — callers
     /// reach it via `from_metadata` / `synthetic`.
     fn from_parts(kind: EntryKind, size: u64, mtime: SystemTime, fs_id: FsIdentity) -> Self {
-        Self {
-            kind,
-            size,
-            mtime,
-            fs_id,
-            leaf_hash: compute_leaf_hash(kind, size, mtime, fs_id),
-        }
+        Self { kind, size, mtime, fs_id, leaf_hash: compute_leaf_hash(kind, size, mtime, fs_id) }
     }
 
     /// Construct from a single freshly-`lstat`ed `Metadata`, computing `leaf_hash` eagerly. `kind`
@@ -219,13 +213,7 @@ impl LeafEntry {
             && b.mtime == mtime
             && b.fs_id == fs_id
         {
-            return Self {
-                kind,
-                size,
-                mtime,
-                fs_id,
-                leaf_hash: b.leaf_hash,
-            };
+            return Self { kind, size, mtime, fs_id, leaf_hash: b.leaf_hash };
         }
         Self::from_parts(kind, size, mtime, fs_id)
     }
@@ -293,11 +281,7 @@ fn entry_kind_from_file_type(ft: std::fs::FileType) -> EntryKind {
 /// precondition, so its classification must cover every kind.
 impl From<std::fs::FileType> for EntryKind {
     fn from(ft: std::fs::FileType) -> Self {
-        if ft.is_dir() {
-            Self::Dir
-        } else {
-            entry_kind_from_flags(ft.is_file(), ft.is_symlink())
-        }
+        if ft.is_dir() { Self::Dir } else { entry_kind_from_flags(ft.is_file(), ft.is_symlink()) }
     }
 }
 
@@ -497,17 +481,10 @@ impl DirSnapshot {
     /// is a pure read.
     #[must_use]
     pub fn new(
-        root_meta: DirMeta,
-        captured_with: u64,
-        entries: BTreeMap<CompactString, ChildEntry>,
+        root_meta: DirMeta, captured_with: u64, entries: BTreeMap<CompactString, ChildEntry>,
     ) -> Self {
         let dir_hash = compute_dir_hash(&root_meta, captured_with, &entries);
-        Self {
-            root_meta,
-            captured_with,
-            entries,
-            dir_hash,
-        }
+        Self { root_meta, captured_with, entries, dir_hash }
     }
 
     /// The directory's atomic `lstat` pair ([`DirMeta`]) at capture time. `DirMeta` is `Copy`; the
@@ -625,10 +602,7 @@ impl TreeSnapshot {
     /// `DirSnapshot` carries no engine identity of its own.
     #[must_use]
     pub fn subtree_at(
-        &self,
-        anchor: ResourceId,
-        target: ResourceId,
-        tree: &Tree,
+        &self, anchor: ResourceId, target: ResourceId, tree: &Tree,
     ) -> Option<Arc<DirSnapshot>> {
         match self {
             Self::Dir(root) => subtree_at_dir(root, anchor, target, tree),
@@ -669,9 +643,7 @@ fn compute_leaf_hash(kind: EntryKind, size: u64, mtime: SystemTime, fs_id: FsIde
 }
 
 fn compute_dir_hash(
-    root_meta: &DirMeta,
-    captured_with: u64,
-    entries: &BTreeMap<CompactString, ChildEntry>,
+    root_meta: &DirMeta, captured_with: u64, entries: &BTreeMap<CompactString, ChildEntry>,
 ) -> u128 {
     let mut h = hasher_128();
 
@@ -754,10 +726,7 @@ fn compute_dir_hash(
 /// - Any segment fails to resolve via [`Tree::name`] (slot reaped).
 #[must_use]
 pub fn subtree_at_dir(
-    root: &Arc<DirSnapshot>,
-    anchor: ResourceId,
-    target: ResourceId,
-    tree: &Tree,
+    root: &Arc<DirSnapshot>, anchor: ResourceId, target: ResourceId, tree: &Tree,
 ) -> Option<Arc<DirSnapshot>> {
     let chain = ancestor_chain(target, anchor, tree)?;
 
@@ -786,9 +755,7 @@ pub fn subtree_at_dir(
 /// The loop is intentionally not depth-bounded here — the bound is a property of [`Tree`]
 /// construction, not a guard this hot path re-checks.
 fn ancestor_chain(
-    target: ResourceId,
-    anchor: ResourceId,
-    tree: &Tree,
+    target: ResourceId, anchor: ResourceId, tree: &Tree,
 ) -> Option<SmallVec<[ResourceId; 8]>> {
     let mut chain: SmallVec<[ResourceId; 8]> = SmallVec::new();
     let mut cur = target;
@@ -876,11 +843,8 @@ pub enum SpliceResult {
 /// observable.
 #[must_use]
 pub fn splice(
-    prior: Option<Arc<DirSnapshot>>,
-    anchor: ResourceId,
-    target: ResourceId,
-    replacement: Arc<DirSnapshot>,
-    tree: &Tree,
+    prior: Option<Arc<DirSnapshot>>, anchor: ResourceId, target: ResourceId,
+    replacement: Arc<DirSnapshot>, tree: &Tree,
 ) -> SpliceResult {
     match prior {
         None => SpliceResult::Spliced(TreeSnapshot::Dir(replacement)),
@@ -891,10 +855,7 @@ pub fn splice(
 /// Dir-prior splice path. Extracted so [`splice`]'s top-level match reads as one branch per `prior`
 /// shape rather than mixing Dir-only flow into the dispatcher.
 fn splice_dir_prior(
-    root: Arc<DirSnapshot>,
-    anchor: ResourceId,
-    target: ResourceId,
-    replacement: Arc<DirSnapshot>,
+    root: Arc<DirSnapshot>, anchor: ResourceId, target: ResourceId, replacement: Arc<DirSnapshot>,
     tree: &Tree,
 ) -> SpliceResult {
     if target == anchor {
@@ -943,10 +904,7 @@ fn splice_dir_prior(
 /// ancestors above the deepest observable change, so the realistic cost is over the *changed* prefix
 /// of the spine, not the full path.
 fn splice_dir(
-    prior: &Arc<DirSnapshot>,
-    rest: &[ResourceId],
-    replacement: Arc<DirSnapshot>,
-    tree: &Tree,
+    prior: &Arc<DirSnapshot>, rest: &[ResourceId], replacement: Arc<DirSnapshot>, tree: &Tree,
 ) -> Result<Arc<DirSnapshot>, SpliceFailureCause> {
     let Some((&next_id, deeper)) = rest.split_first() else {
         // We're at target. G7-leaf: hash-equal ⇒ keep prior Arc; the splice is a no-op
@@ -958,17 +916,13 @@ fn splice_dir(
     };
     // Slot reaped mid-graft. Engine contract says this can't happen for an observed subtree; surface
     // as SlotReapedMidGraft so operators can demux it from IntermediateUncovered.
-    let name = tree
-        .name(next_id)
-        .ok_or(SpliceFailureCause::SlotReapedMidGraft)?;
+    let name = tree.name(next_id).ok_or(SpliceFailureCause::SlotReapedMidGraft)?;
     // Path crossed a directory the snapshot holds no listing of, a missing entry, or a Leaf at this
     // interior segment. We don't synthesise empty intermediates — that would lie to `dir_hash`.
     // Surface as IntermediateUncovered; the engine keeps its prior view and converges on the next
     // probe.
     let pc: Arc<DirSnapshot> = Arc::clone(
-        prior
-            .lookup_covered_dir(name)
-            .ok_or(SpliceFailureCause::IntermediateUncovered)?,
+        prior.lookup_covered_dir(name).ok_or(SpliceFailureCause::IntermediateUncovered)?,
     );
     let new_child = splice_dir(&pc, deeper, replacement, tree)?;
 
@@ -989,11 +943,7 @@ fn splice_dir(
     // Preserve prior's `captured_with` on the rebuilt parent: it is conceptually "still the same
     // observation as prior, with one child subtree spliced in", and `captured_with` is constant
     // within a Profile by construction.
-    Ok(Arc::new(DirSnapshot::new(
-        prior.root_meta,
-        prior.captured_with,
-        new_entries,
-    )))
+    Ok(Arc::new(DirSnapshot::new(prior.root_meta, prior.captured_with, new_entries)))
 }
 
 // ---------------------------------------------------------------------------
@@ -1085,21 +1035,13 @@ struct StagedEntry {
 
 impl StagedEntry {
     fn new(rel: CompactString, entry: &ChildEntry, pair_eligible: bool) -> Self {
-        Self {
-            rel,
-            kind: entry.kind(),
-            fs_id: entry.fs_id(),
-            pair_eligible,
-        }
+        Self { rel, kind: entry.kind(), fs_id: entry.fs_id(), pair_eligible }
     }
 }
 
 fn collect_dir_pair(
-    prior: &DirSnapshot,
-    new: &DirSnapshot,
-    rel_prefix: &str,
-    modified: &mut SmallVec<[EntryRef; 4]>,
-    staged_created: &mut Vec<StagedEntry>,
+    prior: &DirSnapshot, new: &DirSnapshot, rel_prefix: &str,
+    modified: &mut SmallVec<[EntryRef; 4]>, staged_created: &mut Vec<StagedEntry>,
     staged_deleted: &mut Vec<StagedEntry>,
 ) {
     if prior.dir_hash() == new.dir_hash() {
@@ -1147,12 +1089,8 @@ fn collect_dir_pair(
 }
 
 fn diff_same_name(
-    name: &CompactString,
-    pc: &ChildEntry,
-    nc: &ChildEntry,
-    rel_prefix: &str,
-    modified: &mut SmallVec<[EntryRef; 4]>,
-    staged_created: &mut Vec<StagedEntry>,
+    name: &CompactString, pc: &ChildEntry, nc: &ChildEntry, rel_prefix: &str,
+    modified: &mut SmallVec<[EntryRef; 4]>, staged_created: &mut Vec<StagedEntry>,
     staged_deleted: &mut Vec<StagedEntry>,
 ) {
     let rel = compose_rel(rel_prefix, name);
@@ -1165,11 +1103,7 @@ fn diff_same_name(
                 stage(rel.clone(), pc, true, staged_deleted);
                 stage(rel, nc, true, staged_created);
             } else if p.leaf_hash() != n.leaf_hash() {
-                modified.push(EntryRef {
-                    segment: rel,
-                    kind: n.kind,
-                    fs_id: n.fs_id,
-                });
+                modified.push(EntryRef { segment: rel, kind: n.kind, fs_id: n.fs_id });
             }
         }
         (ChildEntry::Dir(p), ChildEntry::Dir(n)) if p.fs_id() == n.fs_id() => match (p, n) {
@@ -1219,11 +1153,8 @@ fn diff_same_name(
 /// reused the inode across the change — and its descendants stage eligible, so a genuine move into
 /// or out of the slot still pairs as a cross-level Rename against the rest of the walk.
 fn stage_replaced(
-    rel: CompactString,
-    prior: &ChildEntry,
-    new: &ChildEntry,
-    staged_created: &mut Vec<StagedEntry>,
-    staged_deleted: &mut Vec<StagedEntry>,
+    rel: CompactString, prior: &ChildEntry, new: &ChildEntry,
+    staged_created: &mut Vec<StagedEntry>, staged_deleted: &mut Vec<StagedEntry>,
 ) {
     stage(rel.clone(), prior, false, staged_deleted);
     stage(rel, new, false, staged_created);
@@ -1235,10 +1166,7 @@ fn stage_replaced(
 /// is lex-ordered by its `BTreeMap`. The output is a flat Diff for the Effect API, which does not
 /// care about reap order.
 fn stage(
-    rel: CompactString,
-    entry: &ChildEntry,
-    pair_eligible: bool,
-    staged: &mut Vec<StagedEntry>,
+    rel: CompactString, entry: &ChildEntry, pair_eligible: bool, staged: &mut Vec<StagedEntry>,
 ) {
     match entry {
         ChildEntry::Dir(DirChild::Covered(sub)) => {
@@ -1301,11 +1229,7 @@ impl Diff {
         let mut out = Self::default();
         out.created.reserve(staged.len());
         for s in staged {
-            out.created.push(EntryRef {
-                segment: s.rel,
-                kind: s.kind,
-                fs_id: s.fs_id,
-            });
+            out.created.push(EntryRef { segment: s.rel, kind: s.kind, fs_id: s.fs_id });
         }
         out
     }
@@ -1324,11 +1248,7 @@ impl Diff {
         let mut out = Self::default();
         out.deleted.reserve(staged.len());
         for s in staged {
-            out.deleted.push(EntryRef {
-                segment: s.rel,
-                kind: s.kind,
-                fs_id: s.fs_id,
-            });
+            out.deleted.push(EntryRef { segment: s.rel, kind: s.kind, fs_id: s.fs_id });
         }
         out
     }
@@ -1356,9 +1276,7 @@ impl Diff {
 /// by declaration order) supersedes the pre-migration `(device, inode)` tuple ord with no observable
 /// effect.
 fn pair_renames(
-    staged_created: Vec<StagedEntry>,
-    staged_deleted: Vec<StagedEntry>,
-    out: &mut Diff,
+    staged_created: Vec<StagedEntry>, staged_deleted: Vec<StagedEntry>, out: &mut Diff,
 ) {
     let mut by_key: BTreeMap<FsIdentity, usize> = BTreeMap::new();
     for (i, c) in staged_created.iter().enumerate() {
@@ -1392,16 +1310,8 @@ fn pair_renames(
                     continue;
                 }
                 out.renamed.push(Rename {
-                    from: EntryRef {
-                        segment: d.rel,
-                        kind: d.kind,
-                        fs_id: d.fs_id,
-                    },
-                    to: EntryRef {
-                        segment: c.rel.clone(),
-                        kind: c.kind,
-                        fs_id: c.fs_id,
-                    },
+                    from: EntryRef { segment: d.rel, kind: d.kind, fs_id: d.fs_id },
+                    to: EntryRef { segment: c.rel.clone(), kind: c.kind, fs_id: c.fs_id },
                 });
                 paired.insert(ci);
             }
@@ -1411,19 +1321,11 @@ fn pair_renames(
 
     for (i, c) in staged_created.into_iter().enumerate() {
         if !paired.contains(&i) {
-            out.created.push(EntryRef {
-                segment: c.rel,
-                kind: c.kind,
-                fs_id: c.fs_id,
-            });
+            out.created.push(EntryRef { segment: c.rel, kind: c.kind, fs_id: c.fs_id });
         }
     }
     for d in leftover_deleted {
-        out.deleted.push(EntryRef {
-            segment: d.rel,
-            kind: d.kind,
-            fs_id: d.fs_id,
-        });
+        out.deleted.push(EntryRef { segment: d.rel, kind: d.kind, fs_id: d.fs_id });
     }
 }
 

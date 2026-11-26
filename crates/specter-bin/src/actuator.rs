@@ -87,12 +87,7 @@ impl ActuatorIO {
                 hard_shutdown_actuator_tx,
                 hard_shutdown_done_rx,
             },
-            RunWiring {
-                effects_rx,
-                shutdown_rx,
-                hard_shutdown_rx,
-                hard_shutdown_done_tx,
-            },
+            RunWiring { effects_rx, shutdown_rx, hard_shutdown_rx, hard_shutdown_done_tx },
         )
     }
 }
@@ -111,20 +106,15 @@ mod tests {
         // Saturate via `try_send`s and assert the 1025th rejects.
         for _ in 0..1024 {
             io.effects_tx
-                .try_send(EffectOp::Cancel {
-                    profile: specter_core::ProfileId::default(),
-                })
+                .try_send(EffectOp::Cancel { profile: specter_core::ProfileId::default() })
                 .expect("first 1024 fit");
         }
-        let next = io.effects_tx.try_send(EffectOp::Cancel {
-            profile: specter_core::ProfileId::default(),
-        });
+        let next = io
+            .effects_tx
+            .try_send(EffectOp::Cancel { profile: specter_core::ProfileId::default() });
         assert!(matches!(next, Err(TrySendError::Full(_))));
         // Sender → Receiver carries the EffectOp verbatim across the bundle seam.
-        assert!(matches!(
-            wiring.effects_rx.try_recv(),
-            Ok(EffectOp::Cancel { .. })
-        ));
+        assert!(matches!(wiring.effects_rx.try_recv(), Ok(EffectOp::Cancel { .. })));
     }
 
     /// All three shutdown legs are `bounded(1)` — redundant pulses coalesce at the channel layer. A
@@ -132,21 +122,11 @@ mod tests {
     #[test]
     fn pair_creates_bounded_shutdown_legs_at_1() {
         let (io, _wiring) = ActuatorIO::pair();
-        io.shutdown_actuator_tx
-            .try_send(())
-            .expect("first slot fits");
-        assert!(matches!(
-            io.shutdown_actuator_tx.try_send(()),
-            Err(TrySendError::Full(()))
-        ));
+        io.shutdown_actuator_tx.try_send(()).expect("first slot fits");
+        assert!(matches!(io.shutdown_actuator_tx.try_send(()), Err(TrySendError::Full(()))));
 
-        io.hard_shutdown_actuator_tx
-            .try_send(())
-            .expect("first slot fits");
-        assert!(matches!(
-            io.hard_shutdown_actuator_tx.try_send(()),
-            Err(TrySendError::Full(()))
-        ));
+        io.hard_shutdown_actuator_tx.try_send(()).expect("first slot fits");
+        assert!(matches!(io.hard_shutdown_actuator_tx.try_send(()), Err(TrySendError::Full(()))));
     }
 
     /// The actuator-side `hard_shutdown_done_tx` pulse reaches the driver-side
@@ -154,10 +134,7 @@ mod tests {
     #[test]
     fn pair_routes_hard_shutdown_confirmation() {
         let (io, wiring) = ActuatorIO::pair();
-        wiring
-            .hard_shutdown_done_tx
-            .try_send(())
-            .expect("actuator can pulse the confirm leg");
+        wiring.hard_shutdown_done_tx.try_send(()).expect("actuator can pulse the confirm leg");
         assert!(io.hard_shutdown_done_rx.try_recv().is_ok());
     }
 }

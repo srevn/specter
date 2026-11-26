@@ -20,9 +20,7 @@ pub(crate) fn run(args: &AbsorbArgs) -> ExitCode {
         // Saturate the u128 → u64 millisecond projection rather than truncate with `as`: an absurd
         // `--for` (centuries) pins to `u64::MAX` ms, which the driver then clamps to its window
         // ceiling. The wire stays a scalar; no silent wrap reaches it.
-        duration_ms: args
-            .for_
-            .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
+        duration_ms: args.for_.map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
     };
     connect::one_shot_unit(&args.client, "absorb", &req)
 }

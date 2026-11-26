@@ -71,9 +71,7 @@ pub(crate) fn bind_socket_atomic(path: &Path) -> io::Result<(UnixListener, Unlin
 /// uniform staging-file cleanup via [`Result::map_err`] without duplicating the cleanup at each `?`
 /// site.
 fn finalize_atomic_rename(
-    listener: UnixListener,
-    tmp: &Path,
-    path: &Path,
+    listener: UnixListener, tmp: &Path, path: &Path,
 ) -> io::Result<(UnixListener, UnlinkGuard)> {
     let mut perms = fs::metadata(tmp)?.permissions();
     perms.set_mode(SOCKET_MODE);
@@ -328,10 +326,7 @@ mod tests {
     /// A `--socket`-sourced candidate at `path`. `SocketSource::Cli` exists on every platform (the
     /// convention sources are cfg-gated), so the parent-classification tests stay platform-agnostic.
     fn cli_candidate(path: PathBuf) -> SocketCandidate {
-        SocketCandidate {
-            source: SocketSource::Cli,
-            path,
-        }
+        SocketCandidate { source: SocketSource::Cli, path }
     }
 
     /// `bind_socket_atomic` sets exactly `0o600` on the bound file (atomic-rename + chmod ordering
@@ -345,9 +340,7 @@ mod tests {
 
         let (_listener, guard) =
             bind_socket_atomic(&path).expect("bind_socket_atomic on a fresh path");
-        let perms = fs::metadata(&path)
-            .expect("bound socket exists")
-            .permissions();
+        let perms = fs::metadata(&path).expect("bound socket exists").permissions();
         assert_eq!(
             perms.mode() & 0o777,
             SOCKET_MODE,
@@ -355,10 +348,7 @@ mod tests {
         );
 
         drop(guard);
-        assert!(
-            !path.exists(),
-            "armed UnlinkGuard drop must remove the socket",
-        );
+        assert!(!path.exists(), "armed UnlinkGuard drop must remove the socket");
     }
 
     /// `UnlinkGuard::unlink_now` is the graceful-shutdown unlink site — it removes the socket
@@ -371,10 +361,7 @@ mod tests {
 
         let (_listener, guard) = bind_socket_atomic(&path).expect("bind on fresh path");
         guard.unlink_now();
-        assert!(
-            !path.exists(),
-            "consumed guard must remove the socket synchronously",
-        );
+        assert!(!path.exists(), "consumed guard must remove the socket synchronously");
     }
 
     /// `check_stale_or_remove` removes an orphan file at the socket path (the easier-to-construct
@@ -402,14 +389,9 @@ mod tests {
     fn temp_sibling_appends_pid_suffix_to_full_basename() {
         let path = PathBuf::from("/run/user/1000/specter.sock");
         let tmp = temp_sibling(&path);
-        let basename = tmp
-            .file_name()
-            .and_then(|s| s.to_str())
-            .expect("staging path has a UTF-8 basename");
-        assert!(
-            basename.starts_with("specter.sock.tmp."),
-            "got {basename:?}",
-        );
+        let basename =
+            tmp.file_name().and_then(|s| s.to_str()).expect("staging path has a UTF-8 basename");
+        assert!(basename.starts_with("specter.sock.tmp."), "got {basename:?}");
     }
 
     /// `precheck_bind_parent` accepts an existing-directory parent, rejects a missing parent with a

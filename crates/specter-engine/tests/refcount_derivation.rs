@@ -39,41 +39,21 @@ fn subs_at_len_is_the_sole_derived_count_across_attach_detach() {
 
     let s2 = attach(&mut e, "B");
     let s3 = attach(&mut e, "C");
-    assert_eq!(
-        e.subs().get(s2).unwrap().profile(),
-        pid,
-        "B shares the Profile (same config_hash)",
-    );
-    assert_eq!(
-        e.subs().get(s3).unwrap().profile(),
-        pid,
-        "C shares the Profile"
-    );
+    assert_eq!(e.subs().get(s2).unwrap().profile(), pid, "B shares the Profile (same config_hash)");
+    assert_eq!(e.subs().get(s3).unwrap().profile(), pid, "C shares the Profile");
     assert_eq!(e.subs().at(pid).len(), 3, "count tracks three live Subs");
 
     // Detach the middle Sub: derived count drops to 2, A and C survive.
     e.step(Input::DetachSub(s2), now);
-    assert_eq!(
-        e.subs().at(pid).len(),
-        2,
-        "count derives the live set, not a mirror"
-    );
+    assert_eq!(e.subs().at(pid).len(), 2, "count derives the live set, not a mirror");
     assert!(e.subs().get(s2).is_none(), "B gone from the registry");
     for s in [s1, s3] {
-        assert_eq!(
-            e.subs().get(s).unwrap().profile(),
-            pid,
-            "survivors still share the Profile",
-        );
+        assert_eq!(e.subs().get(s).unwrap().profile(), pid, "survivors still share the Profile");
     }
 
     // Re-attach pushes the derived count back up — symmetric.
     let s4 = attach(&mut e, "D");
-    assert_eq!(
-        e.subs().get(s4).unwrap().profile(),
-        pid,
-        "D shares the Profile"
-    );
+    assert_eq!(e.subs().get(s4).unwrap().profile(), pid, "D shares the Profile");
     assert_eq!(e.subs().at(pid).len(), 3, "count climbs back to three");
 
     // Drain to empty. Each detach derives the next count from the registry alone; the last one leaves

@@ -39,9 +39,7 @@ fn watch_with_stale_dir_kind_after_swap_to_file_returns_resource() {
     let res = w.watch(r, &anchor, ResourceKind::Dir, ClassSet::STRUCTURE);
     assert_eq!(
         res,
-        Err(WatchFailure::Resource {
-            errno: libc::ENOTDIR,
-        }),
+        Err(WatchFailure::Resource { errno: libc::ENOTDIR }),
         "expected Resource(ENOTDIR) on Dir → File swap; got {res:?}"
     );
 
@@ -65,9 +63,7 @@ fn watch_with_stale_file_kind_after_swap_to_dir_returns_resource() {
     let res = w.watch(r, &anchor, ResourceKind::File, ClassSet::CONTENT);
     assert_eq!(
         res,
-        Err(WatchFailure::Resource {
-            errno: libc::ENOTDIR,
-        }),
+        Err(WatchFailure::Resource { errno: libc::ENOTDIR }),
         "expected Resource(ENOTDIR) on File → Dir swap; got {res:?}"
     );
 

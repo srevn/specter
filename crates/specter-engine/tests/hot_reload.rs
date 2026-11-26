@@ -73,16 +73,9 @@ fn config_diff_add_sub_to_existing_profile() {
     let out = e.step(Input::ConfigDiff(diff), now);
 
     assert_eq!(e.subs().at(pid).len(), 2);
-    let new_watches = out
-        .watch_ops
-        .iter()
-        .filter(|op| matches!(op, WatchOp::Watch { .. }))
-        .count();
-    let new_probes = out
-        .probe_ops()
-        .iter()
-        .filter(|op| matches!(op, ProbeOp::Probe { .. }))
-        .count();
+    let new_watches = out.watch_ops.iter().filter(|op| matches!(op, WatchOp::Watch { .. })).count();
+    let new_probes =
+        out.probe_ops().iter().filter(|op| matches!(op, ProbeOp::Probe { .. })).count();
     assert_eq!(new_watches, 0, "no fresh Watch on existing Profile");
     assert_eq!(new_probes, 0, "no fresh Probe on existing Profile");
     let _ = e.cancel_all_in_flight_probes();
@@ -122,16 +115,9 @@ fn config_diff_remove_sole_sub_reaps_profile() {
     assert!(e.profiles().get(pid).is_none(), "Profile reaped");
     assert!(out.diagnostics.iter().any(|d| matches!(
         d,
-        Diagnostic::ProfileReaped {
-            via: specter_core::ReapTrigger::Immediate,
-            ..
-        }
+        Diagnostic::ProfileReaped { via: specter_core::ReapTrigger::Immediate, .. }
     )));
-    let unwatches = out
-        .watch_ops
-        .iter()
-        .filter(|op| matches!(op, WatchOp::Unwatch { .. }))
-        .count();
+    let unwatches = out.watch_ops.iter().filter(|op| matches!(op, WatchOp::Unwatch { .. })).count();
     assert!(unwatches >= 1, "anchor unwatched");
 }
 
@@ -163,23 +149,14 @@ fn config_diff_mid_burst_remove_defers_reap() {
 
     // Drive a Standard burst (after the Seed's two settle windows).
     let t1 = seed_done + SETTLE;
-    e.step(
-        Input::FsEvent {
-            resource: r,
-            event: FsEvent::ContentChanged,
-        },
-        t1,
-    );
+    e.step(Input::FsEvent { resource: r, event: FsEvent::ContentChanged }, t1);
 
     // Mid-burst ConfigDiff: remove A (by operator watch name).
     let mut diff = SubRegistryDiff::default();
     diff.removed.push(CompactString::from("A"));
     let _ = e.step(Input::ConfigDiff(diff), t1);
     assert!(
-        matches!(
-            e.profiles().get(pid).unwrap().state().burst_finish(),
-            Some(BurstFinish::Reap)
-        ),
+        matches!(e.profiles().get(pid).unwrap().state().burst_finish(), Some(BurstFinish::Reap)),
         "reap deferred to burst end",
     );
 
@@ -192,10 +169,7 @@ fn config_diff_mid_burst_remove_defers_reap() {
     let v = verify(&mut e, pid, &dir_snap(&[]), t2);
     let out = v.out;
     assert!(out.effects().is_empty(), "reap_pending suppresses Effect");
-    assert!(
-        e.profiles().get(pid).is_none(),
-        "Profile reaped at burst end"
-    );
+    assert!(e.profiles().get(pid).is_none(), "Profile reaped at burst end");
 }
 
 /// Same identity (anchor + scan + max_settle + events), different per-Sub fields ⇒ `modified_params`.
@@ -231,13 +205,7 @@ fn config_diff_modified_params_mid_burst_rebinds_in_place() {
 
     // Drive a Standard burst (after the Seed's two settle windows).
     let t1 = seed_done + SETTLE;
-    e.step(
-        Input::FsEvent {
-            resource: r,
-            event: FsEvent::ContentChanged,
-        },
-        t1,
-    );
+    e.step(Input::FsEvent { resource: r, event: FsEvent::ContentChanged }, t1);
     let watch_demand_before = e.tree().get(r).unwrap().watch_demand();
 
     // Mid-burst ConfigDiff: rebind the watch "A" via `modified_params` (same identity; different
@@ -258,11 +226,7 @@ fn config_diff_modified_params_mid_burst_rebinds_in_place() {
     // Rebind preserves the SubId — `A` still resolves to `sid_a`.
     let sid_b = e.subs().find_by_name("A").expect("A still live");
     assert_eq!(sid_b, sid_a, "modified_params rebind preserves SubId");
-    assert_eq!(
-        e.subs().get(sid_a).unwrap().profile(),
-        pid,
-        "Sub stays on the same Profile",
-    );
+    assert_eq!(e.subs().get(sid_a).unwrap().profile(), pid, "Sub stays on the same Profile");
     assert_eq!(e.subs().at(pid).len(), 1, "exactly one live Sub (A)");
     assert_eq!(
         e.tree().get(r).unwrap().watch_demand(),
@@ -277,17 +241,12 @@ fn config_diff_modified_params_mid_burst_rebinds_in_place() {
         out.diagnostics,
     );
     assert!(
-        !out.diagnostics
-            .iter()
-            .any(|d| matches!(d, Diagnostic::ReapPendingCancelled { .. })),
+        !out.diagnostics.iter().any(|d| matches!(d, Diagnostic::ReapPendingCancelled { .. })),
         "modified_params does not go through detach+reap_pending+revival; \
          ReapPendingCancelled must not appear",
     );
-    let new_probes = out
-        .probe_ops()
-        .iter()
-        .filter(|op| matches!(op, ProbeOp::Probe { .. }))
-        .count();
+    let new_probes =
+        out.probe_ops().iter().filter(|op| matches!(op, ProbeOp::Probe { .. })).count();
     assert_eq!(
         new_probes, 0,
         "rebind doesn't emit probes — existing Standard burst's settle timer owns the lifecycle",
@@ -342,16 +301,8 @@ fn config_diff_modified_params_settle_change_recomputes_profile_settle() {
     let out = e.step(Input::ConfigDiff(diff), post_seed);
 
     let sub_after = e.subs().get(sid).expect("Sub preserved across rebind");
-    assert_eq!(
-        sub_after.profile(),
-        pid,
-        "rebind preserves the Sub's ProfileId",
-    );
-    assert_eq!(
-        sub_after.settle(),
-        new_settle,
-        "Sub.settle is the new value"
-    );
+    assert_eq!(sub_after.profile(), pid, "rebind preserves the Sub's ProfileId");
+    assert_eq!(sub_after.settle(), new_settle, "Sub.settle is the new value");
     assert_eq!(
         e.profiles().get(pid).unwrap().settle,
         new_settle,
@@ -362,16 +313,11 @@ fn config_diff_modified_params_settle_change_recomputes_profile_settle() {
         watch_demand_before,
         "rebind doesn't touch kernel watches",
     );
-    let new_probes = out
-        .probe_ops()
-        .iter()
-        .filter(|op| matches!(op, ProbeOp::Probe { .. }))
-        .count();
+    let new_probes =
+        out.probe_ops().iter().filter(|op| matches!(op, ProbeOp::Probe { .. })).count();
     assert_eq!(new_probes, 0, "rebind doesn't probe");
     assert!(
-        !out.watch_ops
-            .iter()
-            .any(|op| matches!(op, WatchOp::Unwatch { .. })),
+        !out.watch_ops.iter().any(|op| matches!(op, WatchOp::Unwatch { .. })),
         "rebind doesn't Unwatch the anchor (silent biggest win over identity arm)",
     );
     assert!(
@@ -390,10 +336,7 @@ fn config_diff_modified_params_settle_change_recomputes_profile_settle() {
 #[test]
 fn config_diff_modified_identity_validate_failure_leaves_old_sub_in_place() {
     let mut e = Engine::new();
-    let r = e
-        .tree_mut()
-        .ensure_path(&["/", "src"], ResourceRole::User)
-        .expect("non-empty fixture");
+    let r = e.tree_mut().ensure_path(&["/", "src"], ResourceRole::User).expect("non-empty fixture");
     e.tree_mut().set_kind(r, ResourceKind::Dir);
     let now = Instant::now();
     let attach_out = e.step(
@@ -430,9 +373,7 @@ fn config_diff_modified_identity_validate_failure_leaves_old_sub_in_place() {
     let out = e.step(Input::ConfigDiff(diff), post_seed);
 
     assert!(
-        out.diagnostics
-            .iter()
-            .any(|d| matches!(d, Diagnostic::AttachPathInvalid { .. })),
+        out.diagnostics.iter().any(|d| matches!(d, Diagnostic::AttachPathInvalid { .. })),
         "validate emits AttachPathInvalid on failure; got {:?}",
         out.diagnostics,
     );
@@ -441,15 +382,9 @@ fn config_diff_modified_identity_validate_failure_leaves_old_sub_in_place() {
         Some(sid),
         "old SubId survives validate failure — structural rollback",
     );
-    assert_eq!(
-        e.subs().get(sid).unwrap().profile(),
-        pid,
-        "old Profile unchanged",
-    );
+    assert_eq!(e.subs().get(sid).unwrap().profile(), pid, "old Profile unchanged");
     assert!(
-        !out.watch_ops
-            .iter()
-            .any(|op| matches!(op, WatchOp::Unwatch { .. })),
+        !out.watch_ops.iter().any(|op| matches!(op, WatchOp::Unwatch { .. })),
         "no Unwatch emitted — the detach didn't run",
     );
     let _ = e.cancel_all_in_flight_probes();
@@ -491,26 +426,18 @@ fn effect_complete_after_detach_drops_silently() {
     let out = e.step(
         Input::EffectComplete(EffectCompletion {
             sub: sid,
-            key: DedupKey::Subtree {
-                sub: sid,
-                profile: pid,
-            },
+            key: DedupKey::Subtree { sub: sid, profile: pid },
             outcome: EffectOutcome::Ok,
         }),
         post_seed,
     );
 
     assert!(
-        out.diagnostics
-            .iter()
-            .any(|d| matches!(d, Diagnostic::EffectCompleteForUnknownSub { .. }))
+        out.diagnostics.iter().any(|d| matches!(d, Diagnostic::EffectCompleteForUnknownSub { .. }))
     );
     // No Probe re-emitted (no reseed).
-    let new_probes = out
-        .probe_ops()
-        .iter()
-        .filter(|op| matches!(op, ProbeOp::Probe { .. }))
-        .count();
+    let new_probes =
+        out.probe_ops().iter().filter(|op| matches!(op, ProbeOp::Probe { .. })).count();
     assert_eq!(new_probes, 0);
 }
 
@@ -527,10 +454,7 @@ fn effect_complete_after_detach_drops_silently() {
 #[test]
 fn config_diff_modified_identity_same_path_rebinds_profile_safely() {
     let mut e = Engine::new();
-    let r = e
-        .tree_mut()
-        .ensure_path(&["/", "src"], ResourceRole::User)
-        .expect("non-empty fixture");
+    let r = e.tree_mut().ensure_path(&["/", "src"], ResourceRole::User).expect("non-empty fixture");
     e.tree_mut().set_kind(r, ResourceKind::Dir);
     let now = Instant::now();
     let attach_out = e.step(
@@ -624,10 +548,7 @@ fn config_diff_add_dynamic_with_missing_prefix_goes_pending() {
     let sid = specter_core::testkit::first_attached_sub(&out).expect("diff added the template");
     let pid = pid_of(&e, sid);
     assert!(
-        matches!(
-            e.profiles().get(pid).unwrap().state(),
-            ProfileState::Pending(_)
-        ),
+        matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Pending(_)),
         "absent literal prefix ⇒ Pending descent",
     );
     assert!(
@@ -653,23 +574,14 @@ fn config_diff_modify_template_cascades_and_remints() {
     let old_template =
         specter_core::testkit::first_attached_sub(&attach).expect("template attached");
     let old_profile = pid_of(&e, old_template);
-    let _ = respond(
-        &mut e,
-        old_profile,
-        &dir_snap(&[("x", EntryKind::Dir, 1)]),
-        now,
-    );
-    let old_minted = *minted_subs_of(&e, old_template)
-        .values()
-        .next()
-        .expect("minted");
+    let _ = respond(&mut e, old_profile, &dir_snap(&[("x", EntryKind::Dir, 1)]), now);
+    let old_minted = *minted_subs_of(&e, old_template).values().next().expect("minted");
 
     // The minted Profile's cold Seed probe is deliberately left in flight: the cascade owns its
     // cancellation.
     let t1 = now + SETTLE;
     let mut diff = SubRegistryDiff::default();
-    diff.modified_identity
-        .push(discovery_req("disc", "/data/*"));
+    diff.modified_identity.push(discovery_req("disc", "/data/*"));
     let out = e.step(Input::ConfigDiff(diff), t1);
 
     assert!(
@@ -692,26 +604,12 @@ fn config_diff_modify_template_cascades_and_remints() {
     assert!(e.subs().get(old_minted).is_none(), "old minted Sub removed");
     let new_template =
         specter_core::testkit::first_attached_sub(&out).expect("replacement attached");
-    assert_ne!(
-        new_template, old_template,
-        "wholesale replace mints a fresh template"
-    );
+    assert_ne!(new_template, old_template, "wholesale replace mints a fresh template");
 
     let new_profile = pid_of(&e, new_template);
-    let _ = respond(
-        &mut e,
-        new_profile,
-        &dir_snap(&[("x", EntryKind::Dir, 1)]),
-        t1,
-    );
-    let new_minted = *minted_subs_of(&e, new_template)
-        .values()
-        .next()
-        .expect("re-minted");
-    assert_ne!(
-        new_minted, old_minted,
-        "the re-mint is a fresh Sub, not a revival"
-    );
+    let _ = respond(&mut e, new_profile, &dir_snap(&[("x", EntryKind::Dir, 1)]), t1);
+    let new_minted = *minted_subs_of(&e, new_template).values().next().expect("re-minted");
+    assert_ne!(new_minted, old_minted, "the re-mint is a fresh Sub, not a revival");
     let _ = e.cancel_all_in_flight_probes();
 }
 
@@ -725,12 +623,8 @@ fn config_diff_remove_dynamic_cascades() {
     let attach = e.step(Input::AttachSub(discovery_req("disc", "/data/*")), now);
     let sid = specter_core::testkit::first_attached_sub(&attach).expect("template attached");
     let pid = pid_of(&e, sid);
-    let _ = respond(
-        &mut e,
-        pid,
-        &dir_snap(&[("x", EntryKind::Dir, 1), ("y", EntryKind::Dir, 2)]),
-        now,
-    );
+    let _ =
+        respond(&mut e, pid, &dir_snap(&[("x", EntryKind::Dir, 1), ("y", EntryKind::Dir, 2)]), now);
     let minted = minted_subs_of(&e, sid);
     assert_eq!(minted.len(), 2, "fixture minted per terminus");
     // Drive the minted cold Seeds to Idle so the cascade reaps synchronously — the mid-burst cascade
@@ -769,19 +663,12 @@ fn config_diff_remove_dynamic_cascades() {
     for &mid in minted.values() {
         assert!(e.subs().get(mid).is_none(), "minted Sub removed");
     }
-    assert_eq!(
-        e.profiles().iter().count(),
-        0,
-        "every minted Profile reaped with the family",
-    );
+    assert_eq!(e.profiles().iter().count(), 0, "every minted Profile reaped with the family");
 }
 
 /// A diff whose one entry is `req`, in the params bucket.
 fn params_edit(req: SubAttachRequest) -> Input {
-    Input::ConfigDiff(SubRegistryDiff {
-        modified_params: vec![req],
-        ..SubRegistryDiff::default()
-    })
+    Input::ConfigDiff(SubRegistryDiff { modified_params: vec![req], ..SubRegistryDiff::default() })
 }
 
 /// `modified_params` naming a template rebinds it and the set it minted in place: one `SubRebound`
@@ -812,27 +699,14 @@ fn config_diff_modified_params_rebinds_a_template_and_the_set_it_minted() {
     let out = e.step(params_edit(edit), t1);
     assert_eq!(
         out.diagnostics.as_slice(),
-        [Diagnostic::SubRebound {
-            sub: template,
-            minted_by: None,
-        }],
+        [Diagnostic::SubRebound { sub: template, minted_by: None }],
         "one line: nothing detached, reaped or attached",
     );
     assert!(out.watch_ops.is_empty(), "no watch op: {:?}", out.watch_ops);
-    assert_eq!(
-        minted_subs_of(&e, template),
-        minted,
-        "every minted Sub keeps its id"
-    );
+    assert_eq!(minted_subs_of(&e, template), minted, "every minted Sub keeps its id");
 
     let (&a, &a_sub) = minted.iter().next().expect("two matches");
-    let _ = e.step(
-        Input::FsEvent {
-            resource: a,
-            event: FsEvent::StructureChanged,
-        },
-        t1,
-    );
+    let _ = e.step(Input::FsEvent { resource: a, event: FsEvent::StructureChanged }, t1);
     let t2 = t1 + SETTLE * 2;
     drain_due(&mut e, t2);
     let a_pid = pid_of(&e, a_sub);
@@ -843,13 +717,7 @@ fn config_diff_modified_params_rebinds_a_template_and_the_set_it_minted() {
         fired.effects(),
     );
 
-    let _ = e.step(
-        Input::FsEvent {
-            resource: data,
-            event: FsEvent::StructureChanged,
-        },
-        t2,
-    );
+    let _ = e.step(Input::FsEvent { resource: data, event: FsEvent::StructureChanged }, t2);
     let t3 = t2 + SETTLE * 2;
     drain_due(&mut e, t3);
     let grown = [listing[0], listing[1], ("c", EntryKind::Dir, 4)];
@@ -877,12 +745,7 @@ fn config_diff_modified_params_of_a_template_refolds_each_minted_floor() {
     let now = Instant::now();
     let watch = discovery_req("disc", "/srv/*");
     let (template, discovery, _) = attach_request(&mut e, watch.clone(), now);
-    let _ = respond(
-        &mut e,
-        discovery,
-        &dir_snap(&[("x", EntryKind::Dir, 1)]),
-        now,
-    );
+    let _ = respond(&mut e, discovery, &dir_snap(&[("x", EntryKind::Dir, 1)]), now);
     let minted = e.subs().minted(template).next().expect("one match");
     let profile = pid_of(&e, minted);
     let x = e.tree().lookup(Some(srv), "x").expect("the match's slot");
@@ -897,36 +760,22 @@ fn config_diff_modified_params_of_a_template_refolds_each_minted_floor() {
         NO_EVENTS,
     );
     let (_, joined, _) = attach_request(&mut e, operator, now);
-    assert_eq!(
-        joined, profile,
-        "premise: the operator's Sub shares the minted Profile"
-    );
+    assert_eq!(joined, profile, "premise: the operator's Sub shares the minted Profile");
     let floor = |e: &Engine| e.profiles().get(profile).map(|p| p.settle);
 
     let mut slow = watch.clone();
     slow.params.settle = SETTLE * 5;
     let _ = e.step(params_edit(slow.clone()), now);
-    assert_eq!(
-        floor(&e),
-        Some(SETTLE * 3),
-        "folded over the operator's Sub"
-    );
+    assert_eq!(floor(&e), Some(SETTLE * 3), "folded over the operator's Sub");
 
     let mut apart = watch;
     apart.name = e.subs().get(minted).expect("live").name.clone();
     apart.params.settle = SETTLE / 2;
     let out = e.step(params_edit(apart), now);
-    assert_eq!(
-        floor(&e),
-        Some(SETTLE / 2),
-        "premise: the minted Sub runs apart"
-    );
+    assert_eq!(floor(&e), Some(SETTLE / 2), "premise: the minted Sub runs apart");
     assert_eq!(
         out.diagnostics.as_slice(),
-        [Diagnostic::SubRebound {
-            sub: minted,
-            minted_by: Some(template),
-        }],
+        [Diagnostic::SubRebound { sub: minted, minted_by: Some(template) }],
         "a match rebound by its own name names its template",
     );
 
@@ -941,10 +790,6 @@ fn config_diff_modified_params_of_a_template_refolds_each_minted_floor() {
         Some(SETTLE * 5),
         "the template's rebind restores the Sub it minted",
     );
-    assert_eq!(
-        floor(&e),
-        Some(SETTLE * 3),
-        "and refolds its floor, the template's settle unmoved",
-    );
+    assert_eq!(floor(&e), Some(SETTLE * 3), "and refolds its floor, the template's settle unmoved");
     let _ = e.cancel_all_in_flight_probes();
 }

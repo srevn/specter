@@ -77,8 +77,7 @@ fn rapid_unwatch_watch_cycle_attributes_to_new_resource() {
     // and assert correctness.
     for cycle in 0..100 {
         let r_old = sm.insert(());
-        w.watch(r_old, &path, ResourceKind::File, ClassSet::CONTENT)
-            .expect("initial watch");
+        w.watch(r_old, &path, ResourceKind::File, ClassSet::CONTENT).expect("initial watch");
         // Unwatch immediately — pre-rm events queued on r_old's wd are possible if a concurrent write
         // lands here, but with no intervening disk op, the kernel queue is empty by the time we hit
         // the rm.
@@ -101,8 +100,7 @@ fn rapid_unwatch_watch_cycle_attributes_to_new_resource() {
             );
         }
         assert!(
-            evs.iter()
-                .any(|(rid, e)| *rid == r_new && *e == FsEvent::ContentChanged),
+            evs.iter().any(|(rid, e)| *rid == r_new && *e == FsEvent::ContentChanged),
             "cycle {cycle}: post-rewatch write must deliver ContentChanged to r_new; got {evs:?}"
         );
 
@@ -130,8 +128,7 @@ fn pre_rm_event_on_old_wd_is_dropped_not_misattributed() {
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
 
     let r_old = sm.insert(());
-    w.watch(r_old, &path, ResourceKind::File, ClassSet::CONTENT)
-        .expect("initial watch");
+    w.watch(r_old, &path, ResourceKind::File, ClassSet::CONTENT).expect("initial watch");
 
     // Queue an event on r_old's wd. Don't drain it.
     std::fs::write(&path, "queued-event").unwrap();
@@ -142,8 +139,7 @@ fn pre_rm_event_on_old_wd_is_dropped_not_misattributed() {
 
     // Reattach a fresh ResourceId on the same path. The kernel may reuse r_old's wd here.
     let r_new = sm.insert(());
-    w.watch(r_new, &path, ResourceKind::File, ClassSet::CONTENT)
-        .expect("post-rm re-watch");
+    w.watch(r_new, &path, ResourceKind::File, ClassSet::CONTENT).expect("post-rm re-watch");
 
     // Drain pending events. The pre-rm queued event must NOT surface as `r_new`'s `ContentChanged`.
     // The `IN_IGNORED` for r_old's wd will also be in the queue — the watcher consumes it and clears
@@ -163,10 +159,7 @@ fn pre_rm_event_on_old_wd_is_dropped_not_misattributed() {
     let mut saw_new = false;
     while Instant::now() < deadline && !saw_new {
         let evs = drain_for(&mut w, Duration::from_millis(50));
-        if evs
-            .iter()
-            .any(|(rid, e)| *rid == r_new && *e == FsEvent::ContentChanged)
-        {
+        if evs.iter().any(|(rid, e)| *rid == r_new && *e == FsEvent::ContentChanged) {
             saw_new = true;
         }
         for (rid, _) in evs {

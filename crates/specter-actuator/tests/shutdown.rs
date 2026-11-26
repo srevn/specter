@@ -17,14 +17,7 @@ fn shutdown_sigkills_term_resistant_child() {
     let cwd = dir.path().to_path_buf();
     // Trap TERM (no-op) and loop. After SIGKILL it dies signal=9.
     let script = "trap '' TERM; while :; do sleep 0.05; done".to_string();
-    h.submit(perfile_effect(
-        1,
-        1,
-        1,
-        1,
-        vec!["/bin/sh".into(), "-c".into(), script],
-        cwd,
-    ));
+    h.submit(perfile_effect(1, 1, 1, 1, vec!["/bin/sh".into(), "-c".into(), script], cwd));
     std::thread::sleep(Duration::from_millis(100));
     let start = Instant::now();
     h.shutdown_tx.send(()).expect("shutdown");
@@ -37,11 +30,7 @@ fn shutdown_sigkills_term_resistant_child() {
     match &completions[0] {
         Input::EffectComplete(c) => match &c.outcome {
             EffectOutcome::Failed(
-                Termination::Signal(signal)
-                | Termination::PipeMixed {
-                    first_signal: signal,
-                    ..
-                },
+                Termination::Signal(signal) | Termination::PipeMixed { first_signal: signal, .. },
             ) => {
                 assert_eq!(*signal, 9, "SIGKILL delivered");
             }

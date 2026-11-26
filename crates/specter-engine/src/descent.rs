@@ -99,11 +99,7 @@ pub(crate) enum MaterializeResult {
     /// `remaining` is non-empty by [`DescentRemaining`]'s type invariant —
     /// `materialize_path_or_pending` reaches this variant only when `prefix_idx + 1 <
     /// components.len()`, guaranteeing `from_vec` succeeds.
-    Pending {
-        anchor: ResourceId,
-        prefix: ResourceId,
-        remaining: DescentRemaining,
-    },
+    Pending { anchor: ResourceId, prefix: ResourceId, remaining: DescentRemaining },
 }
 
 impl MaterializeResult {
@@ -154,8 +150,7 @@ impl crate::Engine {
         // response from a `/` probe is impossible, making cascading parent destruction (`rm -rf
         // /a/b/c/d`) recoverable: the descent stays Pending at `/` waiting for the cascade's bottom
         // segment to reappear.
-        self.tree
-            .ensure_root(FS_ROOT_SEGMENT, ResourceRole::DescentScaffold);
+        self.tree.ensure_root(FS_ROOT_SEGMENT, ResourceRole::DescentScaffold);
 
         // Snapshot which segments are *disk-observed* BEFORE the walk, so we can tell a slot that
         // exists on disk from a bare Tree slot — a never-observed scaffold left by `ensure_path`
@@ -223,11 +218,7 @@ impl crate::Engine {
                 "materialize_path_or_pending: Pending branch with empty remaining is \
                  structurally impossible (prefix_idx + 1 < components.len())",
             );
-            MaterializeResult::Pending {
-                anchor,
-                prefix,
-                remaining,
-            }
+            MaterializeResult::Pending { anchor, prefix, remaining }
         }
     }
 
@@ -277,12 +268,8 @@ impl crate::Engine {
     /// [`Self::install_watch_root_parent_claim`] is idempotent on the recovery path (it
     /// short-circuits when the cache already names the parent).
     pub(crate) fn enter_pending_descent(
-        &mut self,
-        profile_id: ProfileId,
-        prefix: ResourceId,
-        remaining: DescentRemaining,
-        witness: DescentWitness,
-        out: &mut StepOutput,
+        &mut self, profile_id: ProfileId, prefix: ResourceId, remaining: DescentRemaining,
+        witness: DescentWitness, out: &mut StepOutput,
     ) {
         debug_assert!(
             self.profiles
@@ -362,11 +349,7 @@ impl crate::Engine {
     /// construction — it is dispatched directly from `on_probe_response`, never through here, so a
     /// buggy walker is never auto-re-probed into a tight loop.
     pub(crate) fn dispatch_descent(
-        &mut self,
-        owner: ProfileId,
-        outcome: DescentOutcome,
-        now: Instant,
-        out: &mut StepOutput,
+        &mut self, owner: ProfileId, outcome: DescentOutcome, now: Instant, out: &mut StepOutput,
     ) {
         match outcome {
             DescentOutcome::SegmentObserved { kind } => {
@@ -380,10 +363,7 @@ impl crate::Engine {
         // the debt without a redundant probe); `try_emit_descent_probe` then emits only when no probe
         // is in flight, and never re-latches, so the repay converges in one probe per latched window.
         // A gone descent (terminal / abandoned) yields `None` here and owes nothing.
-        if self
-            .descent_state_mut(owner)
-            .is_some_and(DescentState::take_reprobe_owed)
-        {
+        if self.descent_state_mut(owner).is_some_and(DescentState::take_reprobe_owed) {
             self.try_emit_descent_probe(owner, out);
         }
     }
@@ -403,9 +383,7 @@ impl crate::Engine {
     /// descent). The probe slot was disarmed by `take_owner_probe` before dispatch and the descent
     /// state is unflipped at entry, so the release helper's preconditions hold.
     pub(crate) fn walker_contract_violated_descent(
-        &mut self,
-        owner: ProfileId,
-        out: &mut StepOutput,
+        &mut self, owner: ProfileId, out: &mut StepOutput,
     ) {
         debug_assert!(
             false,
@@ -413,8 +391,7 @@ impl crate::Engine {
              outcome (AnchorOk | SubtreeProven) — descent never queries an anchor \
              shape (owner = {owner:?})",
         );
-        out.diagnostics
-            .push(Diagnostic::WalkerContractViolated { owner });
+        out.diagnostics.push(Diagnostic::WalkerContractViolated { owner });
         self.release_descent_prefix_claim(owner, ParkNarration::Operational, out);
     }
 
@@ -433,10 +410,7 @@ impl crate::Engine {
     /// **Caller (`on_probe_response`).** The descent probe slot was disarmed (consume-once) before
     /// dispatch; the advance / rewind branches re-arm it with a freshly-minted correlation.
     pub(crate) fn dispatch_descent_ok(
-        &mut self,
-        owner: ProfileId,
-        observed: Option<EntryKind>,
-        now: Instant,
+        &mut self, owner: ProfileId, observed: Option<EntryKind>, now: Instant,
         out: &mut StepOutput,
     ) {
         // Sample the head segment + arity from descent state, then drop the borrow. We clone only
@@ -479,12 +453,11 @@ impl crate::Engine {
             };
             d.note_observed_absent();
             if d.witness() == DescentWitness::Appeared {
-                out.diagnostics
-                    .push(Diagnostic::PendingPathAwaitingSegment {
-                        profile: owner,
-                        prefix,
-                        segment: next_segment,
-                    });
+                out.diagnostics.push(Diagnostic::PendingPathAwaitingSegment {
+                    profile: owner,
+                    prefix,
+                    segment: next_segment,
+                });
             }
             return;
         };
@@ -539,10 +512,7 @@ impl crate::Engine {
     /// skip the call. (Role is metadata throughout — its tag stays `DescentScaffold` from the initial
     /// `ensure_child` but does not affect retention.)
     fn advance_descent(
-        &mut self,
-        owner: ProfileId,
-        old_prefix: ResourceId,
-        new_prefix: ResourceId,
+        &mut self, owner: ProfileId, old_prefix: ResourceId, new_prefix: ResourceId,
         out: &mut StepOutput,
     ) {
         let correlation = self.mint_probe_correlation();
@@ -596,13 +566,8 @@ impl crate::Engine {
     ///    The release reads no Profile state (a contribution is attributed by its explicit
     ///    [`ContribKey`]), so its place after the Seed has started is free.
     fn materialize_profile_anchor(
-        &mut self,
-        profile_id: ProfileId,
-        prefix: ResourceId,
-        new_resource: ResourceId,
-        entry_kind: EntryKind,
-        now: Instant,
-        out: &mut StepOutput,
+        &mut self, profile_id: ProfileId, prefix: ResourceId, new_resource: ResourceId,
+        entry_kind: EntryKind, now: Instant, out: &mut StepOutput,
     ) {
         // Loud read: `dispatch_descent_ok`'s found-segment latch just proved the owner in descent
         // and only Tree writes intervened, so a `None` is a state-machine breach — a silent
@@ -619,15 +584,12 @@ impl crate::Engine {
 
         // Through the ProfileMap chokepoint: the bundled `Pending → (Idle, classified)` write is a
         // carrier-count edge (`Pending` counted, `Idle` not) the wrapper reconciles.
-        self.profiles
-            .materialize_anchor(profile_id, ResourceKind::from(entry_kind));
+        self.profiles.materialize_anchor(profile_id, ResourceKind::from(entry_kind));
 
         // Profile.resource was assigned to the anchor's slot at attach time; the materialised slot's
         // id should match by construction.
         debug_assert!(
-            self.profiles
-                .get(profile_id)
-                .is_some_and(|p| p.resource() == new_resource),
+            self.profiles.get(profile_id).is_some_and(|p| p.resource() == new_resource),
             "descent anchor materialization: Profile.resource diverges from descent anchor",
         );
 
@@ -642,12 +604,7 @@ impl crate::Engine {
 
         self.seed_at_anchor(profile_id, witness, now, out);
 
-        sub_watch(
-            &mut self.tree,
-            prefix,
-            ContribKey::ProfileDescent(profile_id),
-            out,
-        );
+        sub_watch(&mut self.tree, prefix, ContribKey::ProfileDescent(profile_id), out);
     }
 
     /// **Rewind chain depth.** A `Vanished` response on a rewound prefix triggers a further rewind
@@ -673,10 +630,7 @@ impl crate::Engine {
     /// rewind cycles per Pending Profile (one Watch + one descent probe per cycle). Acceptable in
     /// v1. Rewinds descent to the next-existing ancestor of `prefix`.
     pub(crate) fn dispatch_descent_vanished(
-        &mut self,
-        owner: ProfileId,
-        _now: Instant,
-        out: &mut StepOutput,
+        &mut self, owner: ProfileId, _now: Instant, out: &mut StepOutput,
     ) {
         // Loud entry: the probe gate proved `Pending` and the consume-once disarm leaves the variant
         // intact, so a `None` is a state-machine breach — a silent skip would drop the rewind and
@@ -700,10 +654,7 @@ impl crate::Engine {
         descent.clear_signal_probe();
         let prefix = descent.current_prefix();
 
-        out.diagnostics.push(Diagnostic::PendingPathProbeVanished {
-            profile: owner,
-            prefix,
-        });
+        out.diagnostics.push(Diagnostic::PendingPathProbeVanished { profile: owner, prefix });
 
         // Capture the parent + the prefix's segment name BEFORE we mutate descent state. `parent`
         // selects the rewind branch; `prefix_name` becomes the new first remaining component.
@@ -776,10 +727,7 @@ impl crate::Engine {
     ///   A signal-bearing probe that hit a path-fatal `Denied` fate also clears its marker (it will
     ///   not retry) so a later event re-budgets.
     pub(crate) fn dispatch_descent_failed(
-        &mut self,
-        owner: ProfileId,
-        failure: ProbeFailure,
-        out: &mut StepOutput,
+        &mut self, owner: ProfileId, failure: ProbeFailure, out: &mut StepOutput,
     ) {
         // Loud entry: the probe gate proved `Pending` and the consume-once disarm leaves the variant
         // intact, so a `None` is a state-machine breach — a silent skip would swallow the failure
@@ -818,13 +766,12 @@ impl crate::Engine {
                     );
                 };
                 d.clear_signal_probe();
-                out.diagnostics
-                    .push(Diagnostic::PendingPathRetriesExhausted {
-                        profile: owner,
-                        prefix,
-                        retries: spent,
-                        errno,
-                    });
+                out.diagnostics.push(Diagnostic::PendingPathRetriesExhausted {
+                    profile: owner,
+                    prefix,
+                    retries: spent,
+                    errno,
+                });
             }
             _ => {
                 // Denied (path-fatal), or a non-signal-bearing transient failure: retain Pending,
@@ -976,9 +923,9 @@ mod tests {
     }
 
     fn empty_program() -> Arc<ActionProgram> {
-        single_exec_program([specter_core::ArgTemplate::new([
-            specter_core::ArgPart::literal("/bin/true"),
-        ])])
+        single_exec_program([specter_core::ArgTemplate::new([specter_core::ArgPart::literal(
+            "/bin/true",
+        )])])
     }
 
     /// Set up an Engine with `/foo` as a Dir; attach a Sub at path `/foo/bar`. Bar doesn't exist
@@ -1012,10 +959,8 @@ mod tests {
     /// Resolve `/foo` after the helper's `ensure_path` placed it under the synthetic FS-root.
     /// Centralises the two-step lookup so individual tests stay readable.
     fn lookup_foo(e: &Engine) -> ResourceId {
-        let root = e
-            .tree()
-            .lookup(None, FS_ROOT_SEGMENT)
-            .expect("FS-root bootstrapped by ensure_path");
+        let root =
+            e.tree().lookup(None, FS_ROOT_SEGMENT).expect("FS-root bootstrapped by ensure_path");
         e.tree().lookup(Some(root), "foo").expect("/foo exists")
     }
 
@@ -1026,11 +971,7 @@ mod tests {
         let descent = e.descent_state(pid).unwrap();
         let correlation = e.pending_probe_for(pid).expect("first probe in flight");
         assert_eq!(
-            descent
-                .remaining_components()
-                .iter()
-                .cloned()
-                .collect::<Vec<_>>(),
+            descent.remaining_components().iter().cloned().collect::<Vec<_>>(),
             vec![CompactString::from("bar")],
         );
 
@@ -1040,9 +981,7 @@ mod tests {
             Input::ProbeResponse(ProbeResponse {
                 owner: pid,
                 correlation,
-                outcome: ProbeOutcome::SegmentObserved {
-                    kind: Some(EntryKind::Dir),
-                },
+                outcome: ProbeOutcome::SegmentObserved { kind: Some(EntryKind::Dir) },
             }),
             Instant::now(),
         );
@@ -1058,9 +997,7 @@ mod tests {
             "materialization starts the Seed burst (Active, not Idle)",
         );
         assert!(
-            out.probe_ops()
-                .iter()
-                .any(|op| matches!(op, ProbeOp::Probe { .. })),
+            out.probe_ops().iter().any(|op| matches!(op, ProbeOp::Probe { .. })),
             "cold-arm Seed: probe emitted at burst construction (materialization)",
         );
         // The terminus narrates its single positive signal: the awaited anchor is now live.
@@ -1090,9 +1027,7 @@ mod tests {
             Input::ProbeResponse(ProbeResponse {
                 owner: pid,
                 correlation,
-                outcome: ProbeOutcome::SegmentObserved {
-                    kind: Some(EntryKind::Dir),
-                },
+                outcome: ProbeOutcome::SegmentObserved { kind: Some(EntryKind::Dir) },
             }),
             Instant::now(),
         );
@@ -1143,11 +1078,7 @@ mod tests {
         let descent = e.descent_state(pid).unwrap();
         let corr1 = e.pending_probe_for(pid).unwrap();
         assert_eq!(
-            descent
-                .remaining_components()
-                .iter()
-                .cloned()
-                .collect::<Vec<_>>(),
+            descent.remaining_components().iter().cloned().collect::<Vec<_>>(),
             vec![CompactString::from("bar"), CompactString::from("baz")],
         );
 
@@ -1155,9 +1086,7 @@ mod tests {
             Input::ProbeResponse(ProbeResponse {
                 owner: pid,
                 correlation: corr1,
-                outcome: ProbeOutcome::SegmentObserved {
-                    kind: Some(EntryKind::Dir),
-                },
+                outcome: ProbeOutcome::SegmentObserved { kind: Some(EntryKind::Dir) },
             }),
             Instant::now(),
         );
@@ -1165,11 +1094,7 @@ mod tests {
         // Now descent should be at /foo/bar with remaining=[baz].
         let descent = e.descent_state(pid).expect("still pending");
         assert_eq!(
-            descent
-                .remaining_components()
-                .iter()
-                .cloned()
-                .collect::<Vec<_>>(),
+            descent.remaining_components().iter().cloned().collect::<Vec<_>>(),
             vec![CompactString::from("baz")],
         );
         let _bar = e.tree().lookup(Some(foo), "bar").expect("bar materialized");
@@ -1181,9 +1106,7 @@ mod tests {
             Input::ProbeResponse(ProbeResponse {
                 owner: pid,
                 correlation: corr2,
-                outcome: ProbeOutcome::SegmentObserved {
-                    kind: Some(EntryKind::Dir),
-                },
+                outcome: ProbeOutcome::SegmentObserved { kind: Some(EntryKind::Dir) },
             }),
             Instant::now(),
         );
@@ -1212,11 +1135,7 @@ mod tests {
         // Still pending; no new probe.
         let descent = e.descent_state(pid).unwrap();
         assert_eq!(
-            descent
-                .remaining_components()
-                .iter()
-                .cloned()
-                .collect::<Vec<_>>(),
+            descent.remaining_components().iter().cloned().collect::<Vec<_>>(),
             vec![CompactString::from("bar")],
         );
         assert!(e.pending_probe_for(pid).is_none(), "no probe in flight");
@@ -1241,10 +1160,7 @@ mod tests {
 
         // Inject a StructureChanged at /foo (the prefix).
         let out = e.step(
-            Input::FsEvent {
-                resource: foo,
-                event: specter_core::FsEvent::StructureChanged,
-            },
+            Input::FsEvent { resource: foo, event: specter_core::FsEvent::StructureChanged },
             Instant::now(),
         );
 
@@ -1266,10 +1182,7 @@ mod tests {
 
         let foo = lookup_foo(&e);
         let out = e.step(
-            Input::FsEvent {
-                resource: foo,
-                event: specter_core::FsEvent::StructureChanged,
-            },
+            Input::FsEvent { resource: foo, event: specter_core::FsEvent::StructureChanged },
             Instant::now(),
         );
 
@@ -1295,16 +1208,11 @@ mod tests {
 
         // A prefix event races the in-flight probe — latched, not dropped (no new probe emitted).
         let out = e.step(
-            Input::FsEvent {
-                resource: foo,
-                event: specter_core::FsEvent::StructureChanged,
-            },
+            Input::FsEvent { resource: foo, event: specter_core::FsEvent::StructureChanged },
             Instant::now(),
         );
         assert!(
-            !out.probe_ops()
-                .iter()
-                .any(|op| matches!(op, ProbeOp::Probe { .. })),
+            !out.probe_ops().iter().any(|op| matches!(op, ProbeOp::Probe { .. })),
             "event during in-flight probe latches the debt, emits no probe",
         );
         assert_eq!(
@@ -1322,9 +1230,8 @@ mod tests {
             }),
             Instant::now(),
         );
-        let corr2 = e
-            .pending_probe_for(pid)
-            .expect("Failed + latched debt repays with a fresh probe");
+        let corr2 =
+            e.pending_probe_for(pid).expect("Failed + latched debt repays with a fresh probe");
         assert_ne!(corr1, corr2, "the repay probe is freshly correlated");
         assert_eq!(
             out.probe_ops()
@@ -1349,10 +1256,7 @@ mod tests {
             e.pending_probe_for(pid).is_none(),
             "no probe in flight: an unlatched Failed owes no re-probe",
         );
-        assert!(
-            e.descent_state(pid).is_some(),
-            "descent retained for the next event",
-        );
+        assert!(e.descent_state(pid).is_some(), "descent retained for the next event");
     }
 
     /// A signal-bearing descent probe that keeps failing *transiently* re-latches a **bounded**
@@ -1371,10 +1275,7 @@ mod tests {
         // signal-bearing probe, and every signal-bearing failure thereafter re-latches until the
         // budget is spent.
         let _ = e.step(
-            Input::FsEvent {
-                resource: foo,
-                event: specter_core::FsEvent::StructureChanged,
-            },
+            Input::FsEvent { resource: foo, event: specter_core::FsEvent::StructureChanged },
             Instant::now(),
         );
 
@@ -1458,16 +1359,11 @@ mod tests {
 
         // A prefix event races the in-flight probe — latched.
         let out = e.step(
-            Input::FsEvent {
-                resource: foo,
-                event: specter_core::FsEvent::StructureChanged,
-            },
+            Input::FsEvent { resource: foo, event: specter_core::FsEvent::StructureChanged },
             Instant::now(),
         );
         assert!(
-            !out.probe_ops()
-                .iter()
-                .any(|op| matches!(op, ProbeOp::Probe { .. })),
+            !out.probe_ops().iter().any(|op| matches!(op, ProbeOp::Probe { .. })),
             "event during in-flight probe latches, emits no probe",
         );
 
@@ -1477,15 +1373,11 @@ mod tests {
             Input::ProbeResponse(ProbeResponse {
                 owner: pid,
                 correlation: corr1,
-                outcome: ProbeOutcome::SegmentObserved {
-                    kind: Some(EntryKind::Dir),
-                },
+                outcome: ProbeOutcome::SegmentObserved { kind: Some(EntryKind::Dir) },
             }),
             Instant::now(),
         );
-        let corr2 = e
-            .pending_probe_for(pid)
-            .expect("advance re-armed a probe at /foo/bar");
+        let corr2 = e.pending_probe_for(pid).expect("advance re-armed a probe at /foo/bar");
         assert_ne!(corr1, corr2);
         assert_eq!(
             out.probe_ops()
@@ -1507,9 +1399,7 @@ mod tests {
             Instant::now(),
         );
         assert!(
-            !out.probe_ops()
-                .iter()
-                .any(|op| matches!(op, ProbeOp::Probe { .. })),
+            !out.probe_ops().iter().any(|op| matches!(op, ProbeOp::Probe { .. })),
             "no spurious probe after the park — the latch did not survive the advance",
         );
         assert!(
@@ -1545,11 +1435,7 @@ mod tests {
         // Still pending; no probe in flight.
         let descent = e.descent_state(pid).unwrap();
         assert_eq!(
-            descent
-                .remaining_components()
-                .iter()
-                .cloned()
-                .collect::<Vec<_>>(),
+            descent.remaining_components().iter().cloned().collect::<Vec<_>>(),
             vec![CompactString::from("bar")],
         );
         assert!(e.pending_probe_for(pid).is_none());
@@ -1567,9 +1453,7 @@ mod tests {
             Input::ProbeResponse(ProbeResponse {
                 owner: pid,
                 correlation: corr,
-                outcome: ProbeOutcome::SegmentObserved {
-                    kind: Some(EntryKind::Dir),
-                },
+                outcome: ProbeOutcome::SegmentObserved { kind: Some(EntryKind::Dir) },
             }),
             Instant::now(),
         );
@@ -1603,9 +1487,7 @@ mod tests {
             Input::ProbeResponse(ProbeResponse {
                 owner: pid,
                 correlation: corr,
-                outcome: ProbeOutcome::SegmentObserved {
-                    kind: Some(EntryKind::File),
-                },
+                outcome: ProbeOutcome::SegmentObserved { kind: Some(EntryKind::File) },
             }),
             Instant::now(),
         );
@@ -1643,22 +1525,13 @@ mod tests {
 
         // Tree contains the synthetic FS-root and the `tmp` scaffold.
         let root = e.tree().lookup(None, "/").expect("FS-root bootstrapped");
-        let tmp = e
-            .tree()
-            .lookup(Some(root), "tmp")
-            .expect("anchor scaffold installed under /");
+        let tmp = e.tree().lookup(Some(root), "tmp").expect("anchor scaffold installed under /");
 
         // Profile registered; descent in flight at the FS-root.
-        let descent = e
-            .descent_state(pid)
-            .expect("absolute attach against empty Tree is pending");
+        let descent = e.descent_state(pid).expect("absolute attach against empty Tree is pending");
         assert_eq!(descent.current_prefix(), root);
         assert_eq!(
-            descent
-                .remaining_components()
-                .iter()
-                .cloned()
-                .collect::<Vec<_>>(),
+            descent.remaining_components().iter().cloned().collect::<Vec<_>>(),
             vec![CompactString::from("tmp")],
         );
         assert!(e.pending_probe_for(pid).is_some());
@@ -1685,12 +1558,7 @@ mod tests {
         // The probe op for the descent also carries an absolute prefix path.
         let probe_path = out.probe_ops().iter().find_map(|op| match op {
             ProbeOp::Probe {
-                request:
-                    ProbeRequest::Descent {
-                        owner: profile,
-                        target_path,
-                        ..
-                    },
+                request: ProbeRequest::Descent { owner: profile, target_path, .. },
             } if *profile == pid => Some(target_path.as_ref()),
             _ => None,
         });
@@ -1759,11 +1627,7 @@ mod tests {
         let descent = e.descent_state(pid).unwrap();
         assert_eq!(descent.current_prefix(), root);
         assert_eq!(
-            descent
-                .remaining_components()
-                .iter()
-                .cloned()
-                .collect::<Vec<_>>(),
+            descent.remaining_components().iter().cloned().collect::<Vec<_>>(),
             vec![
                 CompactString::from("var"),
                 CompactString::from("log"),
@@ -1803,14 +1667,10 @@ mod tests {
         );
         let out = e.step(Input::AttachSub(req), Instant::now());
 
-        let descent_emitted = out.probe_ops().iter().any(|op| {
-            matches!(
-                op,
-                ProbeOp::Probe {
-                    request: ProbeRequest::Descent { .. },
-                }
-            )
-        });
+        let descent_emitted = out
+            .probe_ops()
+            .iter()
+            .any(|op| matches!(op, ProbeOp::Probe { request: ProbeRequest::Descent { .. } }));
         assert!(
             descent_emitted,
             "Pending descent must emit ProbeRequest::Descent (not Subtree); \
@@ -1831,9 +1691,7 @@ mod tests {
             Input::ProbeResponse(ProbeResponse {
                 owner: pid,
                 correlation: corr,
-                outcome: ProbeOutcome::SegmentObserved {
-                    kind: Some(EntryKind::Dir),
-                },
+                outcome: ProbeOutcome::SegmentObserved { kind: Some(EntryKind::Dir) },
             }),
             Instant::now(),
         );
@@ -1858,10 +1716,7 @@ mod tests {
         // Pre-conditions: descent contributes to `foo`, anchor `bar` is unbumped.
         assert_eq!(e.tree().get(foo).unwrap().watch_demand(), 1);
         assert_eq!(e.tree().get(bar).unwrap().watch_demand(), 0);
-        assert_eq!(
-            e.profiles().get(pid).unwrap().anchor_claim(),
-            AnchorClaim::None,
-        );
+        assert_eq!(e.profiles().get(pid).unwrap().anchor_claim(), AnchorClaim::None);
 
         // Detach the only Sub. Profile is Pending; Pending Profiles reap immediately (they hold no
         // burst that would resolve a deferred reap).
@@ -1870,9 +1725,7 @@ mod tests {
         // `bar`'s slot is reaped (no other anchors), `foo` still has its pre-existing User Resource
         // — only the descent's contribution is released.
         assert_eq!(
-            e.tree()
-                .get(foo)
-                .map_or(0, specter_core::Resource::watch_demand),
+            e.tree().get(foo).map_or(0, specter_core::Resource::watch_demand),
             0,
             "descent prefix watch_demand released",
         );
@@ -1978,11 +1831,7 @@ mod tests {
         let (mut e, _sid, pid) = setup_pending_one_level();
         let descent = e.descent_state(pid).expect("Pending state populated");
         assert_eq!(
-            descent
-                .remaining_components()
-                .iter()
-                .cloned()
-                .collect::<Vec<_>>(),
+            descent.remaining_components().iter().cloned().collect::<Vec<_>>(),
             vec![CompactString::from("bar")],
         );
         assert!(e.pending_probe_for(pid).is_some());
@@ -2006,28 +1855,20 @@ mod tests {
         use specter_core::ProfileState;
         let (mut e, _sid, pid) = setup_pending_one_level();
         // Initially Pending.
-        assert!(matches!(
-            e.profiles().get(pid).unwrap().state(),
-            ProfileState::Pending(_)
-        ));
+        assert!(matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Pending(_)));
         let corr = e.pending_probe_for(pid).unwrap();
         let _foo = lookup_foo(&e);
         let _ = e.step(
             Input::ProbeResponse(ProbeResponse {
                 owner: pid,
                 correlation: corr,
-                outcome: ProbeOutcome::SegmentObserved {
-                    kind: Some(EntryKind::Dir),
-                },
+                outcome: ProbeOutcome::SegmentObserved { kind: Some(EntryKind::Dir) },
             }),
             Instant::now(),
         );
         // After anchor materialization: Pending → Idle, then start_seed_burst transitions Idle →
         // Active(Seed). The post-step state is Active.
-        assert!(matches!(
-            e.profiles().get(pid).unwrap().state(),
-            ProfileState::Active(_, _)
-        ));
+        assert!(matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Active(_, _)));
         // descent_state agrees: no descent.
         assert!(e.descent_state(pid).is_none());
         let _ = e.cancel_all_in_flight_probes();
@@ -2065,10 +1906,7 @@ mod tests {
         let out = e.step(Input::AttachSub(req), Instant::now());
         let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
         let pid = e.subs().get(sid).unwrap().profile();
-        assert_eq!(
-            e.profiles().get(pid).unwrap().anchor_claim(),
-            AnchorClaim::Held,
-        );
+        assert_eq!(e.profiles().get(pid).unwrap().anchor_claim(), AnchorClaim::Held);
         // Drain Seed via Vanished so the Profile lands Idle with the anchor's contribution still
         // held. Then detach.
         let Some(corr) = e.pending_probe_for(pid) else {
@@ -2106,9 +1944,7 @@ mod tests {
         // atomically.
         assert!(e.profiles().get(pid).is_none(), "Profile reaped");
         assert_eq!(
-            e.tree()
-                .get(foo)
-                .map_or(0, specter_core::Resource::watch_demand),
+            e.tree().get(foo).map_or(0, specter_core::Resource::watch_demand),
             0,
             "descent contribution released",
         );
@@ -2136,9 +1972,7 @@ mod tests {
             Input::ProbeResponse(ProbeResponse {
                 owner: pid,
                 correlation: corr,
-                outcome: ProbeOutcome::SegmentObserved {
-                    kind: Some(EntryKind::Dir),
-                },
+                outcome: ProbeOutcome::SegmentObserved { kind: Some(EntryKind::Dir) },
             }),
             Instant::now(),
         );
@@ -2157,10 +1991,7 @@ mod tests {
         use specter_core::ProfileState;
         let (mut e, _sid, pid) = setup_pending_one_level();
         let foo = lookup_foo(&e);
-        assert!(matches!(
-            e.profiles().get(pid).unwrap().state(),
-            ProfileState::Pending(_)
-        ));
+        assert!(matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Pending(_)));
 
         let _ = e.step(
             Input::WatchOpRejected {
@@ -2171,10 +2002,7 @@ mod tests {
         );
 
         // Purge parks the torn-down descent; descent_state agrees.
-        assert!(matches!(
-            e.profiles().get(pid).unwrap().state(),
-            ProfileState::Parked
-        ));
+        assert!(matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Parked));
         assert!(e.descent_state(pid).is_none());
     }
 
@@ -2201,14 +2029,8 @@ mod tests {
         use specter_core::ProfileState;
         let (mut e, _sid, pid) = setup_pending_one_level();
         let foo = lookup_foo(&e);
-        assert!(
-            e.pending_probe_for(pid).is_some(),
-            "descent probe in flight after attach",
-        );
-        assert!(matches!(
-            e.profiles().get(pid).unwrap().state(),
-            ProfileState::Pending(_),
-        ));
+        assert!(e.pending_probe_for(pid).is_some(), "descent probe in flight after attach");
+        assert!(matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Pending(_)));
 
         let out = e.step(
             Input::WatchOpRejected {
@@ -2219,15 +2041,9 @@ mod tests {
         );
 
         // Field-discipline: slot disarmed atomically with the purge.
-        assert!(
-            e.pending_probe_for(pid).is_none(),
-            "slot disarmed by cancel-before-release",
-        );
+        assert!(e.pending_probe_for(pid).is_none(), "slot disarmed by cancel-before-release");
         // Profile parked via `release_descent_prefix_claim`.
-        assert!(matches!(
-            e.profiles().get(pid).unwrap().state(),
-            ProfileState::Parked,
-        ));
+        assert!(matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Parked));
         // Exactly one Cancel for the Profile (idempotency check).
         let cancels = out
             .probe_ops()
@@ -2267,9 +2083,7 @@ mod tests {
             Input::ProbeResponse(ProbeResponse {
                 owner: pid,
                 correlation: corr,
-                outcome: ProbeOutcome::SegmentObserved {
-                    kind: Some(EntryKind::Dir),
-                },
+                outcome: ProbeOutcome::SegmentObserved { kind: Some(EntryKind::Dir) },
             }),
             t_mat,
         );
@@ -2291,17 +2105,12 @@ mod tests {
         let t_settle = t_mat + SETTLE;
         while let Some(entry) = e.pop_expired(t_settle) {
             e.step(
-                Input::TimerExpired {
-                    profile: entry.profile,
-                    kind: entry.kind,
-                    id: entry.id,
-                },
+                Input::TimerExpired { profile: entry.profile, kind: entry.kind, id: entry.id },
                 t_settle,
             );
         }
-        let seed_corr = e
-            .pending_probe_for(pid)
-            .expect("Seed verify probe in flight after settle expiry");
+        let seed_corr =
+            e.pending_probe_for(pid).expect("Seed verify probe in flight after settle expiry");
         let out = e.step(
             Input::ProbeResponse(ProbeResponse {
                 owner: pid,
@@ -2313,14 +2122,8 @@ mod tests {
         // dispatch_pre_fire_vanished routes through finalize_anchor_lost_and_descend: anchor
         // contribution released, baseline/current cleared, and the same step re-enters pending
         // descent at foo — the recovery overlap is established by the production loss path itself.
-        assert!(matches!(
-            e.profiles().get(pid).unwrap().state(),
-            ProfileState::Pending(_),
-        ));
-        assert!(
-            e.pending_probe_for(pid).is_some(),
-            "descent probe re-armed by the loss step",
-        );
+        assert!(matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Pending(_)));
+        assert!(e.pending_probe_for(pid).is_some(), "descent probe re-armed by the loss step");
 
         // Recovery overlap: foo's watch_demand is +2 (watch_root_parent STRUCTURE + descent
         // STRUCTURE); bar's anchor contribution is gone.

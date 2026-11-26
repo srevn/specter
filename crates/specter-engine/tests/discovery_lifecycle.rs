@@ -49,19 +49,9 @@ fn respond(e: &mut Engine, pid: ProfileId, snap: &Arc<DirSnapshot>, at: Instant)
 /// Open a Standard burst with a `StructureChanged` at `resource`, drain the settle window, answer
 /// the verify probe with `snap` — one event, one probe, one reconcile (`EventsReliable`, N = 1).
 fn burst_and_respond(
-    e: &mut Engine,
-    pid: ProfileId,
-    resource: ResourceId,
-    snap: &Arc<DirSnapshot>,
-    now: Instant,
+    e: &mut Engine, pid: ProfileId, resource: ResourceId, snap: &Arc<DirSnapshot>, now: Instant,
 ) -> (StepOutput, Instant) {
-    let _ = e.step(
-        Input::FsEvent {
-            resource,
-            event: FsEvent::StructureChanged,
-        },
-        now,
-    );
+    let _ = e.step(Input::FsEvent { resource, event: FsEvent::StructureChanged }, now);
     let at = now + SETTLE * 2;
     drain_due(e, at);
     (respond(e, pid, snap, at), at)
@@ -95,14 +85,8 @@ fn settle_minted(e: &mut Engine, mid: SubId, kind: Option<EntryKind>, mut at: In
                 Some(ResourceKind::File) => anchor_ok(file_leaf(EntryKind::File, 1)),
                 _ => proven(dir_snap(&[])),
             };
-            let out = e.step(
-                Input::ProbeResponse(ProbeResponse {
-                    owner: pid,
-                    correlation,
-                    outcome,
-                }),
-                at,
-            );
+            let out = e
+                .step(Input::ProbeResponse(ProbeResponse { owner: pid, correlation, outcome }), at);
             for eff in out.effects().iter() {
                 let _ = e.step(
                     Input::EffectComplete(EffectCompletion {
@@ -154,11 +138,9 @@ fn unsupported_warns(out: &StepOutput) -> Vec<(SubId, String, EntryKind)> {
     out.diagnostics
         .iter()
         .filter_map(|d| match d {
-            Diagnostic::DiscoveryUnsupportedAnchorKind {
-                template,
-                path,
-                kind,
-            } => Some((*template, path.display().to_string(), *kind)),
+            Diagnostic::DiscoveryUnsupportedAnchorKind { template, path, kind } => {
+                Some((*template, path.display().to_string(), *kind))
+            }
             _ => None,
         })
         .collect()
@@ -177,10 +159,7 @@ fn cold_seed_reconcile_mints_per_terminus_then_re_reconcile_dedups() {
     // Pruned chain shape: `a/log` a Dir terminus (Uncovered), `b/log` a File terminus (Leaf).
     let chain = dir_snap_nested(&[
         ("a", covered(dir_snap_nested(&[("log", uncovered(10))]))),
-        (
-            "b",
-            covered(dir_snap_nested(&[("log", leaf(EntryKind::File, 11))])),
-        ),
+        ("b", covered(dir_snap_nested(&[("log", leaf(EntryKind::File, 11))]))),
     ]);
     let out = respond(&mut e, pid, &chain, now);
 
@@ -192,10 +171,8 @@ fn cold_seed_reconcile_mints_per_terminus_then_re_reconcile_dedups() {
 
     let minted = minted_subs_of(&e, sid);
     assert_eq!(minted.len(), 2, "one mint per terminus");
-    let names: BTreeSet<String> = minted
-        .values()
-        .map(|&mid| e.subs().get(mid).unwrap().name.to_string())
-        .collect();
+    let names: BTreeSet<String> =
+        minted.values().map(|&mid| e.subs().get(mid).unwrap().name.to_string()).collect();
     assert_eq!(
         names,
         BTreeSet::from(["disc@/srv/a/log".to_string(), "disc@/srv/b/log".to_string()]),
@@ -203,10 +180,7 @@ fn cold_seed_reconcile_mints_per_terminus_then_re_reconcile_dedups() {
     );
     assert_eq!(
         minted_paths(&out),
-        vec![
-            (sid, "/srv/a/log".to_string()),
-            (sid, "/srv/b/log".to_string()),
-        ],
+        vec![(sid, "/srv/a/log".to_string()), (sid, "/srv/b/log".to_string()),],
         "DiscoveryMinted narrates each mint, lexicographic terminus order",
     );
     let kinds: Vec<ResourceKind> = out
@@ -251,11 +225,7 @@ fn cold_seed_reconcile_mints_per_terminus_then_re_reconcile_dedups() {
     // Standard re-reconcile over the same tree: dedup makes it a no-op.
     let (out2, _) = burst_and_respond(&mut e, pid, srv, &chain, now + Duration::from_millis(10));
     assert!(minted_paths(&out2).is_empty(), "re-reconcile mints nothing");
-    assert_eq!(
-        minted_subs_of(&e, sid),
-        minted,
-        "minted set unchanged — same SubIds, no churn",
-    );
+    assert_eq!(minted_subs_of(&e, sid), minted, "minted set unchanged — same SubIds, no churn");
     assert!(
         matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Idle),
         "re-reconcile seals back to Idle",
@@ -281,18 +251,9 @@ fn witnessed_appearance_mints_sub_that_fires() {
     // The atomic appearance: one STRUCTURE event at the anchor, certified listing carries the new
     // terminus, then silence.
     let t1 = now + Duration::from_millis(10);
-    let (out, t2) = burst_and_respond(
-        &mut e,
-        pid,
-        srv,
-        &dir_snap(&[("app", EntryKind::Dir, 7)]),
-        t1,
-    );
-    assert_eq!(
-        minted_paths(&out),
-        vec![(sid, "/srv/app".to_string())],
-        "the appearance mints",
-    );
+    let (out, t2) =
+        burst_and_respond(&mut e, pid, srv, &dir_snap(&[("app", EntryKind::Dir, 7)]), t1);
+    assert_eq!(minted_paths(&out), vec![(sid, "/srv/app".to_string())], "the appearance mints");
     assert!(
         out.diagnostics.iter().any(|d| matches!(
             d,
@@ -305,15 +266,8 @@ fn witnessed_appearance_mints_sub_that_fires() {
     // Converge the minted Profile with no further input: the witness alone owes the fire.
     let _ = settle_minted(&mut e, mid, None, t2);
     let s = e.subs().get(mid).expect("minted Sub live");
-    assert!(
-        s.has_fired(),
-        "a witnessed appearance owes its first fire — mv-then-quiet must react",
-    );
-    assert_eq!(
-        s.fire_history().map(|h| h.fire_count),
-        Some(1),
-        "exactly one first fire",
-    );
+    assert!(s.has_fired(), "a witnessed appearance owes its first fire — mv-then-quiet must react");
+    assert_eq!(s.fire_history().map(|h| h.fire_count), Some(1), "exactly one first fire");
 }
 
 /// The `DiscoveryMinted` narration in emission order, projected to `(path, entry)`.
@@ -332,9 +286,7 @@ fn minted_entries(out: &StepOutput) -> Vec<(String, MintEntry)> {
 /// The Sub `sid` minted at the slot `segments` names under `srv`.
 fn minted_under(e: &Engine, sid: SubId, srv: ResourceId, segments: &[&str]) -> SubId {
     let slot = segments.iter().fold(srv, |parent, segment| {
-        e.tree()
-            .lookup(Some(parent), segment)
-            .expect("minted slot live")
+        e.tree().lookup(Some(parent), segment).expect("minted slot live")
     });
     minted_subs_of(e, sid)[&slot]
 }
@@ -387,18 +339,11 @@ fn opened_branch_mints_cold_beside_appearances() {
         "the opened branch is an enumeration; a new and a replaced branch are appearances",
     );
     let probing = |segments: &[&str]| {
-        e.pending_probe_for(pid_of(&e, minted_under(&e, sid, srv, segments)))
-            .is_some()
+        e.pending_probe_for(pid_of(&e, minted_under(&e, sid, srv, segments))).is_some()
     };
     assert!(probing(&["b", "log"]), "a cold Seed probes at once");
-    assert!(
-        !probing(&["c", "log"]),
-        "an appearance's Seed batches first"
-    );
-    assert!(
-        !probing(&["d", "log"]),
-        "an appearance's Seed batches first"
-    );
+    assert!(!probing(&["c", "log"]), "an appearance's Seed batches first");
+    assert!(!probing(&["d", "log"]), "an appearance's Seed batches first");
     let _ = e.cancel_all_in_flight_probes();
 }
 
@@ -427,10 +372,7 @@ fn minted_sub_beneath_a_denied_directory_is_kept_until_a_listing_answers() {
 
     let t1 = now + Duration::from_millis(10);
     let (out, t2) = burst_and_respond(&mut e, pid, srv, &dir_snap_nested(&[("b", denied(22))]), t1);
-    assert!(
-        !reaped(&out),
-        "nothing is certified beneath a denied directory"
-    );
+    assert!(!reaped(&out), "nothing is certified beneath a denied directory");
     assert!(e.subs().get(mid).is_some(), "the Sub stays as it is");
 
     let (out, _) = burst_and_respond(
@@ -448,11 +390,7 @@ fn minted_sub_beneath_a_denied_directory_is_kept_until_a_listing_answers() {
 /// window apart, until the burst's ceiling ends it. Returns every diagnostic the walks and the timers
 /// between them emitted, and the instant the burst ended.
 fn walk_denied_to_ceiling(
-    e: &mut Engine,
-    pid: ProfileId,
-    snap: &Arc<DirSnapshot>,
-    denied: &[&str],
-    mut at: Instant,
+    e: &mut Engine, pid: ProfileId, snap: &Arc<DirSnapshot>, denied: &[&str], mut at: Instant,
 ) -> (Vec<Diagnostic>, Instant) {
     let deadline = at + MAX_SETTLE * 2;
     let mut diagnostics = Vec::new();
@@ -473,10 +411,7 @@ fn walk_denied_to_ceiling(
             );
             diagnostics.extend(out.diagnostics);
             if !matches!(
-                e.profiles()
-                    .get(pid)
-                    .expect("discovery Profile live")
-                    .state(),
+                e.profiles().get(pid).expect("discovery Profile live").state(),
                 ProfileState::Active(..)
             ) {
                 return (diagnostics, at);
@@ -528,12 +463,10 @@ fn a_pattern_at_its_ceiling_names_what_it_was_denied_and_goes_on() {
         ],
         "once, at the ceiling, in (template, path) order",
     );
-    let last_named = diagnostics
-        .iter()
-        .rposition(|d| matches!(d, Diagnostic::DiscoveryDenied { .. }));
-    let first_minted = diagnostics
-        .iter()
-        .position(|d| matches!(d, Diagnostic::DiscoveryMinted { .. }));
+    let last_named =
+        diagnostics.iter().rposition(|d| matches!(d, Diagnostic::DiscoveryDenied { .. }));
+    let first_minted =
+        diagnostics.iter().position(|d| matches!(d, Diagnostic::DiscoveryMinted { .. }));
     assert!(last_named < first_minted, "the lines precede the pass");
     let minted: Vec<(String, MintEntry)> = diagnostics
         .iter()
@@ -553,18 +486,13 @@ fn a_pattern_at_its_ceiling_names_what_it_was_denied_and_goes_on() {
         "each template mints what was read, cold",
     );
     assert!(
-        !diagnostics
-            .iter()
-            .any(|d| matches!(d, Diagnostic::QuiescenceCeilingUnreadable { .. })),
+        !diagnostics.iter().any(|d| matches!(d, Diagnostic::QuiescenceCeilingUnreadable { .. })),
         "a pattern does not refuse at its ceiling",
     );
     let current = e.profiles().get(pid).unwrap().current_dir().unwrap();
     for name in ["x", "y"] {
         assert!(
-            matches!(
-                current.entries().get(name),
-                Some(ChildEntry::Dir(DirChild::Denied(_)))
-            ),
+            matches!(current.entries().get(name), Some(ChildEntry::Dir(DirChild::Denied(_)))),
             "{name} is committed as a directory the walk was denied",
         );
     }
@@ -587,12 +515,7 @@ fn a_branch_denied_at_the_ceiling_opens_cold_through_an_overflow_reseed() {
     settle_minted_seeds(&mut e, sid, at);
 
     let t = at + Duration::from_secs(1);
-    let _ = e.step(
-        Input::SensorOverflow {
-            scope: OverflowScope::Global,
-        },
-        t,
-    );
+    let _ = e.step(Input::SensorOverflow { scope: OverflowScope::Global }, t);
     let out = respond(
         &mut e,
         pid,
@@ -613,9 +536,7 @@ fn a_branch_denied_at_the_ceiling_opens_cold_through_an_overflow_reseed() {
         "the opened branch is an enumeration; the new one an appearance",
     );
     assert!(
-        !out.diagnostics
-            .iter()
-            .any(|d| matches!(d, Diagnostic::DiscoveryDenied { .. })),
+        !out.diagnostics.iter().any(|d| matches!(d, Diagnostic::DiscoveryDenied { .. })),
         "a pass over a committed denial is silent",
     );
     let _ = e.cancel_all_in_flight_probes();
@@ -634,13 +555,7 @@ fn storm_coalesces_to_one_probe_and_one_reconcile() {
     // Three events, 10ms apart — all inside the 100ms settle window.
     let mut at = now + Duration::from_millis(10);
     for _ in 0..3 {
-        let _ = e.step(
-            Input::FsEvent {
-                resource: data,
-                event: FsEvent::StructureChanged,
-            },
-            at,
-        );
+        let _ = e.step(Input::FsEvent { resource: data, event: FsEvent::StructureChanged }, at);
         assert!(
             e.pending_probe_for(pid).is_none(),
             "still Batching mid-storm — no probe until the window settles",
@@ -655,11 +570,7 @@ fn storm_coalesces_to_one_probe_and_one_reconcile() {
         ("z.log", EntryKind::File, 3),
     ]);
     let out = respond(&mut e, pid, &untar, drain_at);
-    assert_eq!(
-        minted_paths(&out).len(),
-        3,
-        "one settle-debounced reconcile mints the whole batch",
-    );
+    assert_eq!(minted_paths(&out).len(), 3, "one settle-debounced reconcile mints the whole batch");
     assert_eq!(minted_subs_of(&e, sid).len(), 3);
     let _ = e.cancel_all_in_flight_probes();
 }
@@ -686,13 +597,7 @@ fn terminus_churn_drops_for_discovery_and_drives_only_the_minted_profile() {
     // Churn inside the terminus surfaces as STRUCTURE at the terminus slot — the minted Profile's
     // anchor FD (the discovery Profile holds no contribution at its boundary).
     let t1 = now + Duration::from_millis(10);
-    let out = e.step(
-        Input::FsEvent {
-            resource: log,
-            event: FsEvent::StructureChanged,
-        },
-        t1,
-    );
+    let out = e.step(Input::FsEvent { resource: log, event: FsEvent::StructureChanged }, t1);
     assert!(
         out.diagnostics.iter().any(|d| matches!(
             d,
@@ -707,16 +612,11 @@ fn terminus_churn_drops_for_discovery_and_drives_only_the_minted_profile() {
         "terminus churn never drives the discovery Profile",
     );
     assert!(
-        matches!(
-            e.profiles().get(minted_pid).unwrap().state(),
-            ProfileState::Active(_, _),
-        ),
+        matches!(e.profiles().get(minted_pid).unwrap().state(), ProfileState::Active(_, _)),
         "the minted Profile drives its own burst from the same event",
     );
     assert!(
-        !out.diagnostics
-            .iter()
-            .any(|d| matches!(d, Diagnostic::SpliceCrossedUncovered { .. })),
+        !out.diagnostics.iter().any(|d| matches!(d, Diagnostic::SpliceCrossedUncovered { .. })),
         "no splice breach on a healthy system",
     );
 
@@ -753,25 +653,13 @@ fn terminus_delete_drives_clamped_reconcile_and_reaps_minted() {
     // the minted Profile (loss-step descent); identity-at-boundary for the discovery Profile (drives
     // the reconcile — removal authority stays with the reconcile, not the terminal).
     let t1 = now + Duration::from_millis(10);
-    let _ = e.step(
-        Input::FsEvent {
-            resource: log,
-            event: FsEvent::Removed,
-        },
-        t1,
-    );
+    let _ = e.step(Input::FsEvent { resource: log, event: FsEvent::Removed }, t1);
     assert!(
-        matches!(
-            e.profiles().get(minted_pid).unwrap().state(),
-            ProfileState::Pending(_)
-        ),
+        matches!(e.profiles().get(minted_pid).unwrap().state(), ProfileState::Pending(_)),
         "the minted Profile re-enters descent in the loss step",
     );
     assert!(
-        matches!(
-            e.profiles().get(pid).unwrap().state(),
-            ProfileState::Active(_, _)
-        ),
+        matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Active(_, _)),
         "the identity exemption lets the terminus delete drive the discovery Profile",
     );
 
@@ -780,14 +668,7 @@ fn terminus_delete_drives_clamped_reconcile_and_reaps_minted() {
     let t2 = t1 + SETTLE * 2;
     let mut probe_path = None;
     while let Some(en) = e.pop_expired(t2) {
-        let out = e.step(
-            Input::TimerExpired {
-                profile: en.profile,
-                kind: en.kind,
-                id: en.id,
-            },
-            t2,
-        );
+        let out = e.step(Input::TimerExpired { profile: en.profile, kind: en.kind, id: en.id }, t2);
         if let Some(p) = last_probe_path(&out) {
             probe_path = Some(p);
         }
@@ -803,9 +684,7 @@ fn terminus_delete_drives_clamped_reconcile_and_reaps_minted() {
     // not content, is the proof — and the reconcile reaps the minted Sub.
     let out = respond(&mut e, pid, &dir_snap(&[]), t2);
     assert!(
-        !out.diagnostics
-            .iter()
-            .any(|d| matches!(d, Diagnostic::SpliceCrossedUncovered { .. })),
+        !out.diagnostics.iter().any(|d| matches!(d, Diagnostic::SpliceCrossedUncovered { .. })),
         "the clamped target grafts cleanly; got {:?}",
         out.diagnostics,
     );
@@ -859,18 +738,9 @@ fn unsupported_terminus_skips_mint_and_warns_once() {
     // a regular file — the exact shape a symlink-farm pattern matches.
     let chain = |a_kind: EntryKind| {
         dir_snap_nested(&[
-            (
-                "a",
-                covered(dir_snap_nested(&[("current", leaf(a_kind, 10))])),
-            ),
-            (
-                "b",
-                covered(dir_snap_nested(&[("current", leaf(EntryKind::Other, 11))])),
-            ),
-            (
-                "c",
-                covered(dir_snap_nested(&[("current", leaf(EntryKind::File, 12))])),
-            ),
+            ("a", covered(dir_snap_nested(&[("current", leaf(a_kind, 10))]))),
+            ("b", covered(dir_snap_nested(&[("current", leaf(EntryKind::Other, 11))]))),
+            ("c", covered(dir_snap_nested(&[("current", leaf(EntryKind::File, 12))]))),
         ])
     };
     let out = respond(&mut e, pid, &chain(EntryKind::Symlink), now);
@@ -916,10 +786,7 @@ fn unsupported_terminus_skips_mint_and_warns_once() {
         &chain(EntryKind::Symlink),
         now + Duration::from_millis(10),
     );
-    assert!(
-        unsupported_warns(&out2).is_empty(),
-        "latched: the second pass narrates nothing",
-    );
+    assert!(unsupported_warns(&out2).is_empty(), "latched: the second pass narrates nothing");
     assert!(minted_paths(&out2).is_empty(), "no re-mint, no churn");
     assert_eq!(minted_subs_of(&e, sid).len(), 1, "minted set stable");
 
@@ -938,10 +805,7 @@ fn unsupported_terminus_skips_mint_and_warns_once() {
         "kind is read fresh — the latch gated only the diagnostic, never the mint",
     );
     assert_eq!(minted_subs_of(&e, sid).len(), 2);
-    let replaced = e
-        .subs()
-        .find_by_name("disc@/srv/a/current")
-        .expect("replacement minted");
+    let replaced = e.subs().find_by_name("disc@/srv/a/current").expect("replacement minted");
     let _ = settle_minted(&mut e, replaced, None, t3);
     assert!(
         e.subs().get(replaced).unwrap().has_fired(),
@@ -959,12 +823,8 @@ fn a_match_degraded_to_a_symlink_reaps_its_sub_and_is_named() {
     let srv = pre_place_dir(&mut e, &["srv"]);
     let now = Instant::now();
     let (sid, pid) = attach_discovery(&mut e, "disc", "/srv/*", now);
-    let _ = respond(
-        &mut e,
-        pid,
-        &dir_snap(&[("a", EntryKind::Dir, 1), ("s", EntryKind::Dir, 2)]),
-        now,
-    );
+    let _ =
+        respond(&mut e, pid, &dir_snap(&[("a", EntryKind::Dir, 1), ("s", EntryKind::Dir, 2)]), now);
     settle_minted_seeds(&mut e, sid, now);
     let kept = minted_under(&e, sid, srv, &["a"]);
     let degraded = minted_under(&e, sid, srv, &["s"]);
@@ -1011,12 +871,7 @@ fn terminus_vanish_reaps_minted_and_reappearance_remints_fresh() {
     let data = pre_place_dir(&mut e, &["data"]);
     let now = Instant::now();
     let (sid, pid) = attach_discovery(&mut e, "disc", "/data/*", now);
-    let _ = respond(
-        &mut e,
-        pid,
-        &dir_snap(&[("x.log", EntryKind::File, 5)]),
-        now,
-    );
+    let _ = respond(&mut e, pid, &dir_snap(&[("x.log", EntryKind::File, 5)]), now);
     settle_minted_seeds(&mut e, sid, now);
     let minted = minted_subs_of(&e, sid);
     let (&terminus, &old_mid) = minted.iter().next().expect("one mint");
@@ -1026,28 +881,14 @@ fn terminus_vanish_reaps_minted_and_reappearance_remints_fresh() {
     // Profile; class CONTENT for a File, so the discovery mask drops it as a descendant event) +
     // `StructureChanged` on the parent (drives the discovery reconcile).
     let t1 = now + Duration::from_millis(10);
-    let rm = e.step(
-        Input::FsEvent {
-            resource: terminus,
-            event: FsEvent::Removed,
-        },
-        t1,
-    );
+    let rm = e.step(Input::FsEvent { resource: terminus, event: FsEvent::Removed }, t1);
     assert!(
-        matches!(
-            e.profiles().get(minted_pid).unwrap().state(),
-            ProfileState::Pending(_)
-        ),
+        matches!(e.profiles().get(minted_pid).unwrap().state(), ProfileState::Pending(_)),
         "the loss step re-enters descent — removal authority is the reconcile, not the terminal",
     );
+    assert!(e.subs().get(old_mid).is_some(), "the minted Sub survives its anchor terminal");
     assert!(
-        e.subs().get(old_mid).is_some(),
-        "the minted Sub survives its anchor terminal",
-    );
-    assert!(
-        !rm.diagnostics
-            .iter()
-            .any(|d| matches!(d, Diagnostic::DiscoverySubReaped { .. })),
+        !rm.diagnostics.iter().any(|d| matches!(d, Diagnostic::DiscoverySubReaped { .. })),
         "no reap narration in the loss step; got {:?}",
         rm.diagnostics,
     );
@@ -1070,10 +911,7 @@ fn terminus_vanish_reaps_minted_and_reappearance_remints_fresh() {
         )),
         "the minted Sub's lifecycle signal carries MatchVanished",
     );
-    assert!(
-        minted_paths(&gone).is_empty(),
-        "vanished match mints nothing"
-    );
+    assert!(minted_paths(&gone).is_empty(), "vanished match mints nothing");
     assert!(e.subs().get(old_mid).is_none(), "minted Sub removed");
     assert!(
         e.profiles().get(minted_pid).is_none(),
@@ -1159,27 +997,16 @@ fn ancestor_rename_reaps_old_minted_and_mints_new() {
         vec![(sid, "/srv/b/log".to_string())],
         "the new path mints in the same pass",
     );
-    assert!(
-        e.subs().get(old_mid).is_none(),
-        "no zombie Sub at the old path"
-    );
+    assert!(e.subs().get(old_mid).is_none(), "no zombie Sub at the old path");
     let new_mid = *minted_subs_of(&e, sid).values().next().expect("re-minted");
-    assert_ne!(
-        new_mid, old_mid,
-        "path identity changed — fresh history is correct",
-    );
+    assert_ne!(new_mid, old_mid, "path identity changed — fresh history is correct");
     // The rename's re-mint is an appearance (fresh path against an established enumeration) —
     // converge its triggered Seed so the second-half reconcile reaps from Idle.
     let _ = settle_minted(&mut e, new_mid, None, t2);
 
     // mv /srv/b out of the pattern: reap only, nothing mints.
-    let (gone, _) = burst_and_respond(
-        &mut e,
-        pid,
-        srv,
-        &dir_snap(&[]),
-        t2 + Duration::from_millis(10),
-    );
+    let (gone, _) =
+        burst_and_respond(&mut e, pid, srv, &dir_snap(&[]), t2 + Duration::from_millis(10));
     assert!(
         gone.diagnostics.iter().any(|d| matches!(
             d,
@@ -1210,32 +1037,19 @@ fn terminus_replace_keeps_minted_sub_and_re_fires() {
     template.events = DEFAULT_EVENTS;
     let (src, dpid, _) = attach_request(&mut e, template, now);
     // Discovery cold Seed: enumerate one terminus -> mint.
-    let out = respond(
-        &mut e,
-        dpid,
-        &dir_snap(&[("x.log", EntryKind::File, 5)]),
-        now,
-    );
+    let out = respond(&mut e, dpid, &dir_snap(&[("x.log", EntryKind::File, 5)]), now);
     assert!(out.effects().is_empty(), "discovery never fires");
     let minted = minted_subs_of(&e, src);
     assert_eq!(minted.len(), 1);
     let (&terminus, &mid) = minted.iter().next().unwrap();
     let minted_pid = pid_of(&e, mid);
     assert!(
-        e.profiles()
-            .get(minted_pid)
-            .unwrap()
-            .watch_root_parent()
-            .is_some(),
+        e.profiles().get(minted_pid).unwrap().watch_root_parent().is_some(),
         "minted Profile holds the watch_root_parent recovery channel from attach",
     );
     // Minted cold Seed pins silently.
-    let t0 = seed_to_idle_with(
-        &mut e,
-        minted_pid,
-        || anchor_ok(file_leaf(EntryKind::File, 5)),
-        now,
-    );
+    let t0 =
+        seed_to_idle_with(&mut e, minted_pid, || anchor_ok(file_leaf(EntryKind::File, 5)), now);
 
     // The minted Sub fires once (in-place content change).
     let t1 = fire_standard_once(&mut e, mid, terminus, 6, t0 + SETTLE);
@@ -1243,39 +1057,22 @@ fn terminus_replace_keeps_minted_sub_and_re_fires() {
 
     // Atomic replace: the terminal re-enters descent in the loss step — Sub and Profile survive.
     let t2 = t1 + Duration::from_millis(10);
-    let out = e.step(
-        Input::FsEvent {
-            resource: terminus,
-            event: FsEvent::Removed,
-        },
-        t2,
-    );
+    let out = e.step(Input::FsEvent { resource: terminus, event: FsEvent::Removed }, t2);
     assert!(out.effects().is_empty());
     assert!(
-        !out.diagnostics
-            .iter()
-            .any(|d| matches!(d, Diagnostic::DiscoverySubReaped { .. })),
+        !out.diagnostics.iter().any(|d| matches!(d, Diagnostic::DiscoverySubReaped { .. })),
         "no reap on the terminal — reconcile is the removal authority",
     );
     assert!(e.subs().get(mid).is_some(), "minted Sub survives");
     assert!(
-        matches!(
-            e.profiles().get(minted_pid).unwrap().state(),
-            ProfileState::Pending(_)
-        ),
+        matches!(e.profiles().get(minted_pid).unwrap().state(), ProfileState::Pending(_)),
         "the loss step re-enters descent",
     );
 
     // The rename's parent STRUCTURE event drives the discovery burst; the minted Profile's live
     // descent absorbs the same event (I5 — its probe is already in flight).
     let t3 = t2 + Duration::from_millis(1);
-    let _ = e.step(
-        Input::FsEvent {
-            resource: data,
-            event: FsEvent::StructureChanged,
-        },
-        t3,
-    );
+    let _ = e.step(Input::FsEvent { resource: data, event: FsEvent::StructureChanged }, t3);
     // The minted descent finds the replacement (a fire-worthy change) and materializes into a
     // triggered Seed, Batching-first.
     let out = descent_advance(&mut e, minted_pid, Some(EntryKind::File), t3);
@@ -1285,19 +1082,11 @@ fn terminus_replace_keeps_minted_sub_and_re_fires() {
     // together.
     let t4 = t3 + SETTLE * 2;
     drain_due(&mut e, t4);
-    let out = respond(
-        &mut e,
-        dpid,
-        &dir_snap(&[("x.log", EntryKind::File, 7)]),
-        t4,
-    );
+    let out = respond(&mut e, dpid, &dir_snap(&[("x.log", EntryKind::File, 7)]), t4);
     assert!(out.effects().is_empty(), "reconcile never fires");
     assert!(
         !out.diagnostics.iter().any(|d| {
-            matches!(
-                d,
-                Diagnostic::DiscoverySubReaped { .. } | Diagnostic::DiscoveryMinted { .. }
-            )
+            matches!(d, Diagnostic::DiscoverySubReaped { .. } | Diagnostic::DiscoveryMinted { .. })
         }),
         "the replaced terminus kept its slot — no reap, no double-mint; got {:?}",
         out.diagnostics,
@@ -1311,23 +1100,13 @@ fn terminus_replace_keeps_minted_sub_and_re_fires() {
     // The minted Seed's verify folds the recovery verdict: fired before + witness drift ⇒
     // RecoveryFire. Full parity with the static replace.
     let out = respond_anchor_file(&mut e, minted_pid, 7, t4);
-    assert_eq!(
-        out.effects().len(),
-        1,
-        "the replace re-fires through the surviving Sub",
-    );
-    assert!(
-        e.subs().get(mid).unwrap().has_fired(),
-        "fire history preserved across the replace",
-    );
+    assert_eq!(out.effects().len(), 1, "the replace re-fires through the surviving Sub");
+    assert!(e.subs().get(mid).unwrap().has_fired(), "fire history preserved across the replace");
     // Drain the fire cycle: effect Ok -> rebase -> Idle.
     let key = out.effects()[0].key();
     let _ = complete_effect_to_rebasing(&mut e, mid, key, t4);
     let _ = respond_anchor_file(&mut e, minted_pid, 7, t4);
-    assert!(matches!(
-        e.profiles().get(minted_pid).unwrap().state(),
-        ProfileState::Idle
-    ));
+    assert!(matches!(e.profiles().get(minted_pid).unwrap().state(), ProfileState::Idle));
     let _ = e.cancel_all_in_flight_probes();
 }
 
@@ -1365,12 +1144,11 @@ fn a_minted_subs_per_file_fire_and_late_completion_name_its_template() {
     let _ = complete_effect_to_rebasing(&mut e, mid, key, t2);
     let late = complete_effect_to_rebasing(&mut e, mid, key, t2);
     assert!(
-        late.diagnostics
-            .contains(&Diagnostic::EffectCompleteOutsideAwaiting {
-                sub: mid,
-                profile: minted_pid,
-                minted_by: Some(sid),
-            }),
+        late.diagnostics.contains(&Diagnostic::EffectCompleteOutsideAwaiting {
+            sub: mid,
+            profile: minted_pid,
+            minted_by: Some(sid),
+        }),
         "a late completion names its template; got {:?}",
         late.diagnostics,
     );
@@ -1385,12 +1163,8 @@ fn detach_discovery_template_cascades_to_minted_subs() {
     pre_place_dir(&mut e, &["data"]);
     let now = Instant::now();
     let (sid, pid) = attach_discovery(&mut e, "disc", "/data/*", now);
-    let _ = respond(
-        &mut e,
-        pid,
-        &dir_snap(&[("x", EntryKind::Dir, 1), ("y", EntryKind::Dir, 2)]),
-        now,
-    );
+    let _ =
+        respond(&mut e, pid, &dir_snap(&[("x", EntryKind::Dir, 1), ("y", EntryKind::Dir, 2)]), now);
     settle_minted_seeds(&mut e, sid, now);
     let minted = minted_subs_of(&e, sid);
     let minted_pids: Vec<ProfileId> = minted.values().map(|&m| pid_of(&e, m)).collect();
@@ -1447,10 +1221,7 @@ fn second_template_shares_profile_and_walk_mints_per_template() {
     assert_eq!((m1.len(), m2.len()), (1, 1));
     let p1 = pid_of(&e, *m1.values().next().unwrap());
     let p2 = pid_of(&e, *m2.values().next().unwrap());
-    assert_eq!(
-        p1, p2,
-        "identical minted identity ⇒ the two minted Subs share one minted Profile",
-    );
+    assert_eq!(p1, p2, "identical minted identity ⇒ the two minted Subs share one minted Profile");
     let _ = e.cancel_all_in_flight_probes();
 }
 
@@ -1488,11 +1259,7 @@ fn a_mint_at_a_slot_a_watch_rejection_vacated_founds_its_profile_kinded() {
             _ => None,
         })
         .collect();
-    assert_eq!(
-        narrated,
-        [ResourceKind::Dir],
-        "the mint narrates the listed kind"
-    );
+    assert_eq!(narrated, [ResourceKind::Dir], "the mint narrates the listed kind");
     let minted = pid_of(&e, minted_under(&e, beta, data, &["a"]));
     assert_ne!(minted, pid_of(&e, minted_under(&e, alpha, data, &["a"])));
     assert_eq!(
@@ -1585,20 +1352,8 @@ fn prefix_rm_rf_recovery_preserves_minted_sub_without_per_file_warning() {
     // watch_root_parent is preserved either way).
     let t1 = now + Duration::from_millis(10);
     let mut outs: Vec<StepOutput> = Vec::new();
-    outs.push(e.step(
-        Input::FsEvent {
-            resource: x,
-            event: FsEvent::Removed,
-        },
-        t1,
-    ));
-    outs.push(e.step(
-        Input::FsEvent {
-            resource: data,
-            event: FsEvent::Removed,
-        },
-        t1,
-    ));
+    outs.push(e.step(Input::FsEvent { resource: x, event: FsEvent::Removed }, t1));
+    outs.push(e.step(Input::FsEvent { resource: data, event: FsEvent::Removed }, t1));
     assert!(
         e.subs().get(old_mid).is_some(),
         "minted Sub survives the loss window — reconcile is the removal authority",
@@ -1608,13 +1363,7 @@ fn prefix_rm_rf_recovery_preserves_minted_sub_without_per_file_warning() {
     // Reappearance: the parent's StructureChanged re-enters descent; one hop materialises the anchor
     // and opens the recovery Seed.
     let t2 = t1 + Duration::from_millis(10);
-    outs.push(e.step(
-        Input::FsEvent {
-            resource: root,
-            event: FsEvent::StructureChanged,
-        },
-        t2,
-    ));
+    outs.push(e.step(Input::FsEvent { resource: root, event: FsEvent::StructureChanged }, t2));
     outs.push(descent_advance(&mut e, pid, Some(EntryKind::Dir), t2));
     // The witnessed loss re-entry materializes into a triggered Seed — Batching-first; drain the
     // settle window to surface the verify probe.
@@ -1626,17 +1375,11 @@ fn prefix_rm_rf_recovery_preserves_minted_sub_without_per_file_warning() {
         "the reappeared terminus kept its slot — the still-attached Sub dedups the mint",
     );
     assert!(
-        !recovered
-            .diagnostics
-            .iter()
-            .any(|d| matches!(d, Diagnostic::DiscoverySubReaped { .. })),
+        !recovered.diagnostics.iter().any(|d| matches!(d, Diagnostic::DiscoverySubReaped { .. })),
         "a live terminus is never a removal victim",
     );
     let survivor = *minted_subs_of(&e, sid).values().next().expect("minted");
-    assert_eq!(
-        survivor, old_mid,
-        "same Sub across the rm -rf window — identity preserved",
-    );
+    assert_eq!(survivor, old_mid, "same Sub across the rm -rf window — identity preserved");
     outs.push(recovered);
     for out in &outs {
         assert!(
@@ -1666,66 +1409,35 @@ fn overflow_reseed_recovers_missed_mints() {
 
     // Idle arm: overflow reseeds; the fresh cold walk surfaces a match the lost events hid.
     let t1 = now + Duration::from_millis(10);
-    let _ = e.step(
-        Input::SensorOverflow {
-            scope: OverflowScope::Global,
-        },
-        t1,
-    );
+    let _ = e.step(Input::SensorOverflow { scope: OverflowScope::Global }, t1);
     assert!(
         e.pending_probe_for(pid).is_some(),
         "Idle overflow arm reseeds with a fresh cold probe",
     );
-    let out = respond(
-        &mut e,
-        pid,
-        &dir_snap(&[("x", EntryKind::Dir, 1), ("y", EntryKind::Dir, 2)]),
-        t1,
-    );
+    let out =
+        respond(&mut e, pid, &dir_snap(&[("x", EntryKind::Dir, 1), ("y", EntryKind::Dir, 2)]), t1);
     assert_eq!(
         minted_paths(&out),
         vec![(sid, "/data/y".to_string())],
         "the missed match mints on the reseed reconcile",
     );
     assert!(
-        out.diagnostics.iter().any(|d| matches!(
-            d,
-            Diagnostic::DiscoveryMinted {
-                entry: MintEntry::Appeared,
-                ..
-            }
-        )),
+        out.diagnostics
+            .iter()
+            .any(|d| matches!(d, Diagnostic::DiscoveryMinted { entry: MintEntry::Appeared, .. })),
         "the reseed burst is cold, but the latched miss classifies as an appearance",
     );
 
     // Mid-burst arm: overflow lands while Batching — disarm, finish, reseed, same recovery.
     let t2 = t1 + Duration::from_millis(10);
-    let _ = e.step(
-        Input::FsEvent {
-            resource: data,
-            event: FsEvent::StructureChanged,
-        },
-        t2,
-    );
+    let _ = e.step(Input::FsEvent { resource: data, event: FsEvent::StructureChanged }, t2);
     assert!(e.pending_probe_for(pid).is_none());
-    let _ = e.step(
-        Input::SensorOverflow {
-            scope: OverflowScope::Global,
-        },
-        t2,
-    );
-    assert!(
-        e.pending_probe_for(pid).is_some(),
-        "mid-burst overflow arm reseeds immediately",
-    );
+    let _ = e.step(Input::SensorOverflow { scope: OverflowScope::Global }, t2);
+    assert!(e.pending_probe_for(pid).is_some(), "mid-burst overflow arm reseeds immediately");
     let out2 = respond(
         &mut e,
         pid,
-        &dir_snap(&[
-            ("x", EntryKind::Dir, 1),
-            ("y", EntryKind::Dir, 2),
-            ("z", EntryKind::Dir, 3),
-        ]),
+        &dir_snap(&[("x", EntryKind::Dir, 1), ("y", EntryKind::Dir, 2), ("z", EntryKind::Dir, 3)]),
         t2,
     );
     assert_eq!(minted_paths(&out2), vec![(sid, "/data/z".to_string())]);
@@ -1777,17 +1489,12 @@ fn overflow_resource_scope_skips_profile_holding_descendant_fds_inside_scope() {
     );
 
     let out = e.step(
-        Input::SensorOverflow {
-            scope: OverflowScope::Resource(a),
-        },
+        Input::SensorOverflow { scope: OverflowScope::Resource(a) },
         now + Duration::from_millis(10),
     );
 
     assert!(
-        matches!(
-            e.profiles().get(disc_pid).unwrap().state(),
-            ProfileState::Idle
-        ),
+        matches!(e.profiles().get(disc_pid).unwrap().state(), ProfileState::Idle),
         "anchors-only membership: the contribution-holding Profile is not reseeded",
     );
     assert!(
@@ -1799,10 +1506,7 @@ fn overflow_resource_scope_skips_profile_holding_descendant_fds_inside_scope() {
     );
     // The minted Profile (anchor at `a/log`, inside the scope) reseeds through the same rule — the
     // scope itself was honoured, just anchor-scoped.
-    let minted_pid = pid_of(
-        &e,
-        *minted_subs_of(&e, sid).values().next().expect("minted"),
-    );
+    let minted_pid = pid_of(&e, *minted_subs_of(&e, sid).values().next().expect("minted"));
     assert!(
         e.pending_probe_for(minted_pid).is_some(),
         "the Profile anchored below the scope root reseeds",
@@ -1821,24 +1525,15 @@ fn absorbing_a_template_arms_its_matches_and_never_its_own_profile() {
     let mut reliable = discovery_req("disc", "/data/*");
     reliable.events = DEFAULT_EVENTS;
     let (sid, pid, _) = attach_request(&mut e, reliable, now);
-    let three = dir_snap(&[
-        ("a", EntryKind::Dir, 1),
-        ("b", EntryKind::Dir, 2),
-        ("c", EntryKind::Dir, 3),
-    ]);
+    let three =
+        dir_snap(&[("a", EntryKind::Dir, 1), ("b", EntryKind::Dir, 2), ("c", EntryKind::Dir, 3)]);
     let _ = respond(&mut e, pid, &three, now);
     settle_minted_seeds(&mut e, sid, now);
     let matches: Vec<ProfileId> = e.subs().minted(sid).map(|mid| pid_of(&e, mid)).collect();
     assert_eq!(matches.len(), 3, "premise: one Sub per match");
 
     let t1 = now + Duration::from_millis(10);
-    let armed = e.step(
-        Input::ArmAbsorb {
-            sub: sid,
-            duration: Some(Duration::from_mins(1)),
-        },
-        t1,
-    );
+    let armed = e.step(Input::ArmAbsorb { sub: sid, duration: Some(Duration::from_mins(1)) }, t1);
     let windows: Vec<ProfileId> = armed
         .diagnostics
         .iter()
@@ -1855,21 +1550,11 @@ fn absorbing_a_template_arms_its_matches_and_never_its_own_profile() {
 
     let a = e.tree().lookup(Some(data), "a").expect("the match's slot");
     let a_pid = pid_of(&e, minted_subs_of(&e, sid)[&a]);
-    let (folded, _) = burst_and_respond(
-        &mut e,
-        a_pid,
-        a,
-        &dir_snap(&[("f", EntryKind::File, 7)]),
-        t1,
-    );
+    let (folded, _) =
+        burst_and_respond(&mut e, a_pid, a, &dir_snap(&[("f", EntryKind::File, 7)]), t1);
+    assert!(folded.effects().is_empty(), "the match's burst folds, not fires");
     assert!(
-        folded.effects().is_empty(),
-        "the match's burst folds, not fires"
-    );
-    assert!(
-        folded
-            .diagnostics
-            .contains(&Diagnostic::QuiescenceAbsorbed { profile: a_pid }),
+        folded.diagnostics.contains(&Diagnostic::QuiescenceAbsorbed { profile: a_pid }),
         "the fold is the match's own; got {:?}",
         folded.diagnostics,
     );
@@ -1887,23 +1572,13 @@ fn forced_ceiling_reconciles_and_seals() {
     let _ = respond(&mut e, pid, &dir_snap(&[]), now);
 
     let t1 = now + Duration::from_millis(10);
-    let _ = e.step(
-        Input::FsEvent {
-            resource: data,
-            event: FsEvent::StructureChanged,
-        },
-        t1,
-    );
+    let _ = e.step(Input::FsEvent { resource: data, event: FsEvent::StructureChanged }, t1);
     // Drain at the burst-deadline horizon: the settle expiry fires first (Verifying), then the
     // ceiling forces a fresh probe through `force_pending`.
     let horizon = t1 + MAX_SETTLE;
     drain_due(&mut e, horizon);
     let out = respond(&mut e, pid, &dir_snap(&[("x", EntryKind::Dir, 1)]), horizon);
-    assert_eq!(
-        minted_paths(&out).len(),
-        1,
-        "forced verdict reconciles from the forced graft",
-    );
+    assert_eq!(minted_paths(&out).len(), 1, "forced verdict reconciles from the forced graft");
     assert!(
         matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Idle),
         "forced reconcile seals to Idle",
@@ -1941,28 +1616,13 @@ fn mid_burst_discovery_descendant_does_not_drain_covering_profile() {
     // Profile (deeper) stays Idle. Answer the outer verify first, while discovery is still mid-burst
     // Verifying.
     let t1 = seed_done + Duration::from_millis(10);
-    let _ = e.step(
-        Input::FsEvent {
-            resource: apps,
-            event: FsEvent::StructureChanged,
-        },
-        t1,
-    );
+    let _ = e.step(Input::FsEvent { resource: apps, event: FsEvent::StructureChanged }, t1);
     let t2 = t1 + SETTLE * 2;
     drain_due(&mut e, t2);
-    assert!(
-        e.pending_probe_for(disc_pid).is_some(),
-        "discovery mid-burst at the outer verdict",
-    );
+    assert!(e.pending_probe_for(disc_pid).is_some(), "discovery mid-burst at the outer verdict");
     let out = respond(&mut e, outer_pid, &outer_base, t2);
-    assert!(
-        !is_draining(&e, outer_pid),
-        "a chain-shaped descendant burst never holds the gate",
-    );
-    assert!(
-        !out.effects().is_empty(),
-        "outer fires through — the filter, not the gate, decided",
-    );
+    assert!(!is_draining(&e, outer_pid), "a chain-shaped descendant burst never holds the gate");
+    assert!(!out.effects().is_empty(), "outer fires through — the filter, not the gate, decided");
     let _ = e.cancel_all_in_flight_probes();
 }
 
@@ -1995,13 +1655,7 @@ fn mid_burst_minted_descendant_still_drains_through_discovery() {
 
     // One event at the minted anchor opens all three bursts (anchor bypass for the minted one).
     let t1 = seed_done + Duration::from_millis(10);
-    let _ = e.step(
-        Input::FsEvent {
-            resource: log,
-            event: FsEvent::StructureChanged,
-        },
-        t1,
-    );
+    let _ = e.step(Input::FsEvent { resource: log, event: FsEvent::StructureChanged }, t1);
     let t2 = t1 + SETTLE * 2;
     drain_due(&mut e, t2);
     let minted_pid = pid_of(&e, *minted_subs_of(&e, tpl_sid).values().next().unwrap());
@@ -2045,28 +1699,16 @@ fn mixed_profile_at_minted_anchor_survives_anchor_loss_without_remint() {
         MAX_SETTLE,
         now,
     );
-    assert_eq!(
-        co_pid,
-        pid_of(&e, mid),
-        "static Sub joins the minted Profile"
-    );
+    assert_eq!(co_pid, pid_of(&e, mid), "static Sub joins the minted Profile");
 
     let t1 = now + Duration::from_millis(10);
-    let rm = e.step(
-        Input::FsEvent {
-            resource: x,
-            event: FsEvent::Removed,
-        },
-        t1,
-    );
+    let rm = e.step(Input::FsEvent { resource: x, event: FsEvent::Removed }, t1);
     assert!(
         e.subs().get(mid).is_some(),
         "anchor loss re-enters descent — the minted Sub survives the terminal",
     );
     assert!(
-        !rm.diagnostics
-            .iter()
-            .any(|d| matches!(d, Diagnostic::DiscoverySubReaped { .. })),
+        !rm.diagnostics.iter().any(|d| matches!(d, Diagnostic::DiscoverySubReaped { .. })),
         "no reap narration in the loss step",
     );
 
@@ -2117,16 +1759,9 @@ fn an_appearance_minted_onto_a_standing_profile_owes_its_fire() {
         &dir_snap(&[("o", EntryKind::Dir, 1)]),
         now + Duration::from_secs(1),
     );
-    assert_eq!(
-        minted_entries(&out),
-        [("/data/o".to_string(), MintEntry::Appeared)]
-    );
+    assert_eq!(minted_entries(&out), [("/data/o".to_string(), MintEntry::Appeared)]);
     let mid = *minted_subs_of(&e, sid).values().next().expect("minted");
-    assert_eq!(
-        pid_of(&e, mid),
-        co_pid,
-        "minted onto the operator's Profile"
-    );
+    assert_eq!(pid_of(&e, mid), co_pid, "minted onto the operator's Profile");
     let _ = settle_minted(&mut e, mid, None, at);
     assert!(
         e.subs().get(mid).unwrap().has_fired(),
@@ -2144,11 +1779,8 @@ fn fanout_threshold_warns_exactly_once() {
     let now = Instant::now();
     let (sid, pid) = attach_discovery(&mut e, "disc", "/big/*", now);
     let names: Vec<String> = (0..=1000).map(|i| format!("d{i:04}")).collect();
-    let entries: Vec<(&str, EntryKind, u64)> = names
-        .iter()
-        .enumerate()
-        .map(|(i, n)| (n.as_str(), EntryKind::Dir, i as u64 + 1))
-        .collect();
+    let entries: Vec<(&str, EntryKind, u64)> =
+        names.iter().enumerate().map(|(i, n)| (n.as_str(), EntryKind::Dir, i as u64 + 1)).collect();
     let huge = dir_snap(&entries);
 
     let out = respond(&mut e, pid, &huge, now);
@@ -2182,11 +1814,8 @@ fn subs_kept_beneath_a_denied_directory_count_toward_fanout() {
     let now = Instant::now();
     let (sid, pid) = attach_discovery(&mut e, "disc", "/big/*/*", now);
     let names: Vec<String> = (0..1000).map(|i| format!("m{i:04}")).collect();
-    let held: Vec<(&str, ChildEntry)> = names
-        .iter()
-        .zip(1..)
-        .map(|(n, inode)| (n.as_str(), uncovered(inode)))
-        .collect();
+    let held: Vec<(&str, ChildEntry)> =
+        names.iter().zip(1..).map(|(n, inode)| (n.as_str(), uncovered(inode))).collect();
     let warned = |o: &StepOutput| {
         o.diagnostics.iter().any(|d| {
             matches!(
@@ -2197,12 +1826,7 @@ fn subs_kept_beneath_a_denied_directory_count_toward_fanout() {
         })
     };
 
-    let out = respond(
-        &mut e,
-        pid,
-        &dir_snap_nested(&[("held", covered_at(5000, &held))]),
-        now,
-    );
+    let out = respond(&mut e, pid, &dir_snap_nested(&[("held", covered_at(5000, &held))]), now);
     assert_eq!(minted_paths(&out).len(), 1000);
     assert!(!warned(&out), "a thousand is the threshold, not past it");
 
@@ -2217,10 +1841,7 @@ fn subs_kept_beneath_a_denied_directory_count_toward_fanout() {
         now + Duration::from_millis(10),
     );
     assert_eq!(minted_paths(&out).len(), 1, "one new match mints");
-    assert!(
-        warned(&out),
-        "the kept thousand and the new one cross the threshold"
-    );
+    assert!(warned(&out), "the kept thousand and the new one cross the threshold");
     let _ = e.cancel_all_in_flight_probes();
 }
 
@@ -2260,10 +1881,7 @@ fn pending_prefix_descends_then_first_reconcile_mints() {
     let now = Instant::now();
     let (sid, pid, attach_out) = attach_discovery_returning(&mut e, "disc", "/data/x/*", now);
     assert!(
-        matches!(
-            e.profiles().get(pid).unwrap().state(),
-            ProfileState::Pending(_)
-        ),
+        matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Pending(_)),
         "absent literal prefix ⇒ Pending descent",
     );
     assert!(
@@ -2282,10 +1900,7 @@ fn pending_prefix_descends_then_first_reconcile_mints() {
         "materialisation Seed reconciles and mints",
     );
     assert_eq!(
-        e.subs()
-            .get(*minted_subs_of(&e, sid).values().next().unwrap())
-            .unwrap()
-            .name,
+        e.subs().get(*minted_subs_of(&e, sid).values().next().unwrap()).unwrap().name,
         "disc@/data/x/m",
     );
     let _ = e.cancel_all_in_flight_probes();
@@ -2301,27 +1916,16 @@ fn a_prefix_found_at_once_enumerates_cold() {
     let now = Instant::now();
     let (sid, pid, _) = attach_discovery_returning(&mut e, "disc", "/data/*", now);
     assert!(
-        matches!(
-            e.profiles().get(pid).unwrap().state(),
-            ProfileState::Pending(_)
-        ),
+        matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Pending(_)),
         "absent anchor ⇒ Pending descent",
     );
-    let root = e
-        .tree()
-        .lookup(None, FS_ROOT_SEGMENT)
-        .expect("FS root bootstrapped by the pending attach");
+    let root =
+        e.tree().lookup(None, FS_ROOT_SEGMENT).expect("FS root bootstrapped by the pending attach");
 
     // A change at the prefix's parent while the attach-time probe is in flight; the probe then finds
     // the prefix present, never having seen it absent.
     let t1 = now + Duration::from_millis(10);
-    let _ = e.step(
-        Input::FsEvent {
-            resource: root,
-            event: FsEvent::StructureChanged,
-        },
-        t1,
-    );
+    let _ = e.step(Input::FsEvent { resource: root, event: FsEvent::StructureChanged }, t1);
     let _ = descent_advance(&mut e, pid, Some(EntryKind::Dir), t1);
     let t2 = t1 + SETTLE * 2;
     drain_due(&mut e, t2);
@@ -2332,21 +1936,14 @@ fn a_prefix_found_at_once_enumerates_cold() {
     );
     assert_eq!(minted_paths(&out), vec![(sid, "/data/x".to_string())]);
     assert!(
-        out.diagnostics.iter().any(|d| matches!(
-            d,
-            Diagnostic::DiscoveryMinted {
-                entry: MintEntry::Enumerated,
-                ..
-            }
-        )),
+        out.diagnostics
+            .iter()
+            .any(|d| matches!(d, Diagnostic::DiscoveryMinted { entry: MintEntry::Enumerated, .. })),
         "a prefix never seen absent leaves the enumeration open: the mint is cold",
     );
     let mid = *minted_subs_of(&e, sid).values().next().expect("minted");
     let _ = settle_minted(&mut e, mid, None, t2);
-    assert!(
-        !e.subs().get(mid).unwrap().has_fired(),
-        "a first enumeration pins silently",
-    );
+    assert!(!e.subs().get(mid).unwrap().has_fired(), "a first enumeration pins silently");
     let _ = e.cancel_all_in_flight_probes();
 }
 
@@ -2364,19 +1961,10 @@ fn a_prefix_seen_absent_delivers_appearances_to_every_template_on_it() {
     let (alpha, pid, _) = attach(&mut e, "alpha");
     let _ = descent_advance(&mut e, pid, None, now);
     let (beta, joined, _) = attach(&mut e, "beta");
-    assert_eq!(
-        pid, joined,
-        "beta joins the descent after it saw the absence"
-    );
+    assert_eq!(pid, joined, "beta joins the descent after it saw the absence");
 
     let t1 = now + Duration::from_millis(10);
-    let _ = e.step(
-        Input::FsEvent {
-            resource: data,
-            event: FsEvent::StructureChanged,
-        },
-        t1,
-    );
+    let _ = e.step(Input::FsEvent { resource: data, event: FsEvent::StructureChanged }, t1);
     let _ = descent_advance(&mut e, pid, Some(EntryKind::Dir), t1);
     let t2 = t1 + SETTLE * 2;
     drain_due(&mut e, t2);
@@ -2385,9 +1973,7 @@ fn a_prefix_seen_absent_delivers_appearances_to_every_template_on_it() {
         .diagnostics
         .iter()
         .filter_map(|d| match d {
-            Diagnostic::DiscoveryMinted {
-                template, entry, ..
-            } => Some((*template, *entry)),
+            Diagnostic::DiscoveryMinted { template, entry, .. } => Some((*template, *entry)),
             _ => None,
         })
         .collect();
@@ -2400,10 +1986,7 @@ fn a_prefix_seen_absent_delivers_appearances_to_every_template_on_it() {
     for template in [alpha, beta] {
         let mid = minted_under(&e, template, anchor, &["a"]);
         let _ = settle_minted(&mut e, mid, None, t2);
-        assert!(
-            e.subs().get(mid).unwrap().has_fired(),
-            "the delivered match runs"
-        );
+        assert!(e.subs().get(mid).unwrap().has_fired(), "the delivered match runs");
     }
     let _ = e.cancel_all_in_flight_probes();
 }
@@ -2418,10 +2001,7 @@ fn root_pattern_installs_no_parent_edge() {
     let now = Instant::now();
     let (sid, pid) = attach_discovery(&mut e, "disc", "/*", now);
     let p = e.profiles().get(pid).expect("discovery Profile live");
-    assert!(
-        p.watch_root_parent().is_none(),
-        "root anchor has no parent edge",
-    );
+    assert!(p.watch_root_parent().is_none(), "root anchor has no parent edge");
     assert!(
         matches!(p.state(), ProfileState::Active(ActiveBurst::PreFire(_), _)),
         "root always exists — cold Seed, never Pending",
@@ -2434,10 +2014,7 @@ fn root_pattern_installs_no_parent_edge() {
         "terminus path joins at the root without a doubled separator",
     );
     assert_eq!(
-        e.subs()
-            .get(*minted_subs_of(&e, sid).values().next().unwrap())
-            .unwrap()
-            .name,
+        e.subs().get(*minted_subs_of(&e, sid).values().next().unwrap()).unwrap().name,
         "disc@/x",
     );
     let _ = e.cancel_all_in_flight_probes();
@@ -2460,11 +2037,7 @@ fn second_template_detach_leaves_siblings_minted_set_intact() {
     let mid1 = *minted_subs_of(&e, sid1).values().next().expect("minted");
     let mid2 = *minted_subs_of(&e, sid2).values().next().expect("minted");
     let minted_pid = pid_of(&e, mid1);
-    assert_eq!(
-        minted_pid,
-        pid_of(&e, mid2),
-        "identical minted identity shares one minted Profile",
-    );
+    assert_eq!(minted_pid, pid_of(&e, mid2), "identical minted identity shares one minted Profile");
 
     let out = e.step(Input::DetachSub(sid1), now + Duration::from_millis(10));
     assert!(
@@ -2478,10 +2051,7 @@ fn second_template_detach_leaves_siblings_minted_set_intact() {
     );
     assert!(e.subs().get(mid1).is_none());
     assert!(e.subs().get(sid2).is_some(), "sibling template survives");
-    assert!(
-        e.subs().get(mid2).is_some(),
-        "sibling's minted Sub survives"
-    );
+    assert!(e.subs().get(mid2).is_some(), "sibling's minted Sub survives");
     assert!(
         e.profiles().get(pid).is_some(),
         "shared discovery Profile survives on the sibling template",
@@ -2555,10 +2125,7 @@ fn descent_vanish_preserves_co_resident_discovery_contribution() {
         MAX_SETTLE,
         now,
     );
-    assert!(matches!(
-        e.profiles().get(static_pid).unwrap().state(),
-        ProfileState::Pending(_)
-    ));
+    assert!(matches!(e.profiles().get(static_pid).unwrap().state(), ProfileState::Pending(_)));
     assert_eq!(
         e.tree().get(data).unwrap().watch_demand(),
         demand_resident + 1,
@@ -2587,10 +2154,7 @@ fn descent_vanish_preserves_co_resident_discovery_contribution() {
         "only the descent's own contribution released",
     );
     assert!(
-        matches!(
-            e.profiles().get(disc_pid).unwrap().state(),
-            ProfileState::Idle
-        ),
+        matches!(e.profiles().get(disc_pid).unwrap().state(), ProfileState::Idle),
         "discovery Profile untouched by the sibling's rewind",
     );
     assert_eq!(
@@ -2598,10 +2162,7 @@ fn descent_vanish_preserves_co_resident_discovery_contribution() {
         Some("/".into()),
         "descender rewound to the FS root and re-probed",
     );
-    assert!(matches!(
-        e.profiles().get(static_pid).unwrap().state(),
-        ProfileState::Pending(_)
-    ));
+    assert!(matches!(e.profiles().get(static_pid).unwrap().state(), ProfileState::Pending(_)));
     let _ = e.cancel_all_in_flight_probes();
 }
 
@@ -2625,24 +2186,9 @@ fn recovery_cascade_rewinds_through_parent_to_fs_root() {
     // descents (the minted Sub stays attached throughout — reconcile is its removal authority, and
     // the terminus reappears below).
     let t1 = now + Duration::from_millis(10);
-    let _ = e.step(
-        Input::FsEvent {
-            resource: x,
-            event: FsEvent::Removed,
-        },
-        t1,
-    );
-    let loss = e.step(
-        Input::FsEvent {
-            resource: c,
-            event: FsEvent::Removed,
-        },
-        t1,
-    );
-    assert!(
-        e.subs().get(old_mid).is_some(),
-        "minted Sub survives the cascade's terminals",
-    );
+    let _ = e.step(Input::FsEvent { resource: x, event: FsEvent::Removed }, t1);
+    let loss = e.step(Input::FsEvent { resource: c, event: FsEvent::Removed }, t1);
+    assert!(e.subs().get(old_mid).is_some(), "minted Sub survives the cascade's terminals");
 
     // The loss step itself re-enters descent at the watch_root_parent — no entry event needed. /a/b
     // and /a are gone too, so each probe answers Vanished and the descent rewinds one level,
@@ -2662,11 +2208,7 @@ fn recovery_cascade_rewinds_through_parent_to_fs_root() {
     let r1 = vanish(&mut e, t1);
     assert_eq!(last_probe_path(&r1), Some("/a".into()), "first rewind");
     let r2 = vanish(&mut e, t1);
-    assert_eq!(
-        last_probe_path(&r2),
-        Some("/".into()),
-        "second rewind terminates at the FS root",
-    );
+    assert_eq!(last_probe_path(&r2), Some("/".into()), "second rewind terminates at the FS root");
 
     // Forward again: the tree reappears one component per response, the anchor materialises, and
     // the recovery Seed reconciles into a fresh mint.
@@ -2684,14 +2226,7 @@ fn recovery_cascade_rewinds_through_parent_to_fs_root() {
     let t2 = t1 + SETTLE * 2;
     let mut rung = None;
     while let Some(en) = e.pop_expired(t2) {
-        let o = e.step(
-            Input::TimerExpired {
-                profile: en.profile,
-                kind: en.kind,
-                id: en.id,
-            },
-            t2,
-        );
+        let o = e.step(Input::TimerExpired { profile: en.profile, kind: en.kind, id: en.id }, t2);
         if last_probe_path(&o).is_some() {
             rung = Some(o);
         }
@@ -2733,43 +2268,17 @@ fn repeated_loss_recovery_cycles_keep_prefix_parent_refcount_invariant() {
     let mut at = now;
     for cycle in 0..3u64 {
         at += Duration::from_millis(10);
-        let anchor = e
-            .tree()
-            .lookup(Some(root), "data")
-            .expect("anchor slot live this cycle");
+        let anchor = e.tree().lookup(Some(root), "data").expect("anchor slot live this cycle");
         let x = e.tree().lookup(Some(anchor), "x").expect("terminus slot");
-        let _ = e.step(
-            Input::FsEvent {
-                resource: x,
-                event: FsEvent::Removed,
-            },
-            at,
-        );
-        let _ = e.step(
-            Input::FsEvent {
-                resource: anchor,
-                event: FsEvent::Removed,
-            },
-            at,
-        );
-        let _ = e.step(
-            Input::FsEvent {
-                resource: root,
-                event: FsEvent::StructureChanged,
-            },
-            at,
-        );
+        let _ = e.step(Input::FsEvent { resource: x, event: FsEvent::Removed }, at);
+        let _ = e.step(Input::FsEvent { resource: anchor, event: FsEvent::Removed }, at);
+        let _ = e.step(Input::FsEvent { resource: root, event: FsEvent::StructureChanged }, at);
         let _ = descent_advance(&mut e, pid, Some(EntryKind::Dir), at);
         // Witnessed loss re-entry ⇒ triggered Seed, Batching-first: drain the settle window to
         // surface the verify probe.
         at += SETTLE * 2;
         drain_due(&mut e, at);
-        let recovered = respond(
-            &mut e,
-            pid,
-            &dir_snap(&[("x", EntryKind::Dir, 20 + cycle)]),
-            at,
-        );
+        let recovered = respond(&mut e, pid, &dir_snap(&[("x", EntryKind::Dir, 20 + cycle)]), at);
         assert!(
             minted_paths(&recovered).is_empty(),
             "cycle {cycle}: the surviving Sub dedups the mint",

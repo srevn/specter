@@ -53,11 +53,7 @@ impl SpawnSpec {
     #[must_use]
     pub fn new(program: Arc<ActionProgram>, scope: EffectScope) -> Self {
         let needs_diff = scope == EffectScope::PerStableFile || program.references_diff_derived();
-        Self {
-            program,
-            scope,
-            needs_diff,
-        }
+        Self { program, scope, needs_diff }
     }
 
     /// The lowered bytecode IR. Borrowed as the `Arc` so emit sites refcount-bump straight onto each
@@ -100,15 +96,9 @@ impl MintSpec {
     /// and `events`, and the params each Sub it mints runs.
     #[must_use]
     pub fn new(
-        scan: SubtreeScan,
-        max_settle: Duration,
-        events: ClassSet,
-        params: SubParams,
+        scan: SubtreeScan, max_settle: Duration, events: ClassSet, params: SubParams,
     ) -> Self {
-        Self {
-            identity: ProfileIdentity::new(scan, max_settle, events),
-            params,
-        }
+        Self { identity: ProfileIdentity::new(scan, max_settle, events), params }
     }
 
     /// The identity of the Profile each minted Sub fires on.
@@ -207,10 +197,7 @@ pub struct MintState {
 
 impl MintState {
     const fn new() -> Self {
-        Self {
-            miss: MintEntry::Enumerated,
-            narrated: 0,
-        }
+        Self { miss: MintEntry::Enumerated, narrated: 0 }
     }
 
     /// How a terminus this template has not minted enters its set, where the daemon had read the
@@ -521,25 +508,14 @@ impl Sub {
         Self {
             name,
             profile,
-            reaction: Reaction::Spawn {
-                params,
-                minted_by: None,
-                history: FireHistory::default(),
-            },
+            reaction: Reaction::Spawn { params, minted_by: None, history: FireHistory::default() },
         }
     }
 
     /// A template a request declared for a pattern: it mints under `spec`, its enumeration open.
     #[must_use]
     pub const fn template(profile: ProfileId, name: CompactString, spec: MintSpec) -> Self {
-        Self {
-            name,
-            profile,
-            reaction: Reaction::Mint {
-                spec,
-                state: MintState::new(),
-            },
-        }
+        Self { name, profile, reaction: Reaction::Mint { spec, state: MintState::new() } }
     }
 
     /// A Sub `template` minted: it runs the params the template stamps, and starts never fired. The
@@ -547,10 +523,7 @@ impl Sub {
     /// write, never a request's.
     #[must_use]
     pub fn minted(
-        profile: ProfileId,
-        name: CompactString,
-        template: SubId,
-        spec: &MintSpec,
+        profile: ProfileId, name: CompactString, template: SubId, spec: &MintSpec,
     ) -> Self {
         Self {
             name,
@@ -765,11 +738,7 @@ impl SubRegistry {
 
     /// The Subs `template` minted, in id order; empty for a Sub that minted nothing.
     pub fn minted(&self, template: SubId) -> impl ExactSizeIterator<Item = SubId> {
-        self.by_template
-            .get(&template)
-            .map(BTreeSet::iter)
-            .unwrap_or_default()
-            .copied()
+        self.by_template.get(&template).map(BTreeSet::iter).unwrap_or_default().copied()
     }
 
     /// The Sub `template` minted on `profile`, read off the one or two Subs the Profile holds — the
@@ -777,11 +746,10 @@ impl SubRegistry {
     /// answer.
     #[must_use]
     pub fn minted_at(&self, template: SubId, profile: ProfileId) -> Option<SubId> {
-        self.at(profile).iter().copied().find(|&sid| {
-            self.subs
-                .get(sid)
-                .is_some_and(|s| s.minted_by() == Some(template))
-        })
+        self.at(profile)
+            .iter()
+            .copied()
+            .find(|&sid| self.subs.get(sid).is_some_and(|s| s.minted_by() == Some(template)))
     }
 
     /// The Profiles `sub`'s watch fires on, in the minted Subs' id order: a firing Sub's own; for a
@@ -948,9 +916,7 @@ impl SubRegistry {
     /// a `Mint` Sub reports never-fired through [`Sub::has_fired`] — no assert.
     #[must_use]
     pub fn any_fired(&self, profile: ProfileId) -> bool {
-        self.at(profile)
-            .iter()
-            .any(|sid| self.subs.get(*sid).is_some_and(Sub::has_fired))
+        self.at(profile).iter().any(|sid| self.subs.get(*sid).is_some_and(Sub::has_fired))
     }
 
     /// The Subs on `profile` that have fired — the SeedDrift conservative-recovery fire-filter basis.
@@ -978,10 +944,7 @@ impl SubRegistry {
         self.at(profile)
             .iter()
             .map(|&sid| {
-                self.subs
-                    .get(sid)
-                    .expect("by_profile and the slotmap move in lockstep")
-                    .settle()
+                self.subs.get(sid).expect("by_profile and the slotmap move in lockstep").settle()
             })
             .min()
     }
@@ -990,12 +953,11 @@ impl SubRegistry {
     /// and the record are one edge, so a line is made once per template lifetime by construction. A
     /// stale id is `false`.
     pub fn narrate_once(&mut self, template: SubId, what: MintNarration) -> bool {
-        self.mint_state_mut(template, "narrate_once")
-            .is_some_and(|state| {
-                let first = state.narrated & what.bit() == 0;
-                state.narrated |= what.bit();
-                first
-            })
+        self.mint_state_mut(template, "narrate_once").is_some_and(|state| {
+            let first = state.narrated & what.bit() == 0;
+            state.narrated |= what.bit();
+            first
+        })
     }
 
     /// `template` holds a certified set: from now on a miss in a branch the daemon had read is an
@@ -1024,8 +986,7 @@ impl SubRegistry {
     pub fn has_per_stable_file_sub(&self, profile: ProfileId) -> bool {
         self.at(profile).iter().any(|sid| {
             self.subs.get(*sid).is_some_and(|s| {
-                s.spawn_spec()
-                    .is_some_and(|spec| spec.scope() == EffectScope::PerStableFile)
+                s.spawn_spec().is_some_and(|spec| spec.scope() == EffectScope::PerStableFile)
             })
         })
     }
@@ -1070,27 +1031,17 @@ mod tests {
     }
 
     fn program_with(p: Placeholder) -> Arc<ActionProgram> {
-        single_exec_program(ExecAction::new(
-            [ArgTemplate::new([ArgPart::Placeholder(p)])],
-            None,
-        ))
+        single_exec_program(ExecAction::new([ArgTemplate::new([ArgPart::Placeholder(p)])], None))
     }
 
     /// What a fixture Sub runs: `program` at `scope`, debounced at `SETTLE`.
     fn params(program: Arc<ActionProgram>, scope: EffectScope) -> SubParams {
-        SubParams {
-            settle: SETTLE,
-            spawn: SpawnSpec::new(program, scope),
-        }
+        SubParams { settle: SETTLE, spawn: SpawnSpec::new(program, scope) }
     }
 
     /// A Sub a request declared on `profile`, running the fixture program.
     fn declared(profile: ProfileId, name: &str) -> Sub {
-        Sub::declared(
-            profile,
-            name.into(),
-            params(anchor_only_program(), EffectScope::SubtreeRoot),
-        )
+        Sub::declared(profile, name.into(), params(anchor_only_program(), EffectScope::SubtreeRoot))
     }
 
     #[test]
@@ -1179,10 +1130,7 @@ mod tests {
         let h = reg.get(sid).and_then(Sub::fire_history).expect("Sub alive");
         assert_eq!(h.fire_count, 1, "first fire bumps count by 1");
         assert_eq!(h.last_fired_at, Some(t0), "first fire stamps timestamp");
-        assert!(
-            !h.has_fired,
-            "record_fired must NOT touch has_fired (mark_fired owns it)",
-        );
+        assert!(!h.has_fired, "record_fired must NOT touch has_fired (mark_fired owns it)");
 
         // A PerStableFile-style aggregation: count=3 adds to the running total, timestamp advances.
         let t1 = t0 + Duration::from_millis(10);
@@ -1209,10 +1157,7 @@ mod tests {
         let h = reg.get(sid).and_then(Sub::fire_history).expect("Sub alive");
         assert_eq!(h.dedup_suppressed_count, 2);
         assert_eq!(h.fire_count, 0, "suppression does not bump fire_count");
-        assert!(
-            h.last_fired_at.is_none(),
-            "suppression does not stamp last_fired_at",
-        );
+        assert!(h.last_fired_at.is_none(), "suppression does not stamp last_fired_at");
         assert!(!h.has_fired, "suppression does not touch has_fired");
 
         let _ = reg.remove(sid).expect("removed");
@@ -1311,20 +1256,13 @@ mod tests {
         let declared_id = reg.insert(declared(pid, "foo"));
         let minted_id = reg.insert(minted(pid, "p@/tmp/x", SubId::default()));
 
-        assert_eq!(
-            reg.find_by_name("foo"),
-            Some(declared_id),
-            "a declared name resolves",
-        );
+        assert_eq!(reg.find_by_name("foo"), Some(declared_id), "a declared name resolves");
         assert_eq!(
             reg.find_by_name("p@/tmp/x"),
             Some(minted_id),
             "a synthesised minted name resolves",
         );
-        assert!(
-            reg.find_by_name("nope").is_none(),
-            "absent name yields None",
-        );
+        assert!(reg.find_by_name("nope").is_none(), "absent name yields None");
     }
 
     /// `remove` drops a minted Sub's `by_name` entry just like a declared one's — and `by_profile`
@@ -1341,10 +1279,7 @@ mod tests {
             reg.find_by_name("p@/tmp/x").is_none(),
             "the minted Sub's by_name entry dropped on remove",
         );
-        assert!(
-            reg.at(pid).is_empty(),
-            "by_profile bucket dropped when last Sub leaves",
-        );
+        assert!(reg.at(pid).is_empty(), "by_profile bucket dropped when last Sub leaves");
     }
 
     #[test]
@@ -1384,16 +1319,10 @@ mod tests {
             "the template leaves with what it still minted",
         );
         assert_eq!(reg.minted(template).len(), 0);
-        assert!(
-            reg.get(b).is_some(),
-            "an orphan stays registered until its detach"
-        );
+        assert!(reg.get(b).is_some(), "an orphan stays registered until its detach");
 
         let _ = reg.remove(b).expect("live");
-        assert!(
-            reg.by_template.is_empty(),
-            "no entry outlives the Subs it holds"
-        );
+        assert!(reg.by_template.is_empty(), "no entry outlives the Subs it holds");
     }
 
     /// `minted_at` answers with the template's own Sub on a Profile: an operator's Sub or another
@@ -1408,19 +1337,11 @@ mod tests {
         let _ = reg.insert(declared(shared, "build"));
         assert_eq!(reg.minted_at(alpha, shared), None, "an operator's Sub");
         let beta_mint = reg.insert(minted(shared, "beta@/x", beta));
-        assert_eq!(
-            reg.minted_at(alpha, shared),
-            None,
-            "another template's mint"
-        );
+        assert_eq!(reg.minted_at(alpha, shared), None, "another template's mint");
         assert_eq!(reg.minted_at(beta, shared), Some(beta_mint));
         let alpha_mint = reg.insert(minted(shared, "alpha@/x", alpha));
         assert_eq!(reg.minted_at(alpha, shared), Some(alpha_mint));
-        assert_eq!(
-            reg.minted_at(alpha, discovery),
-            None,
-            "nothing minted there"
-        );
+        assert_eq!(reg.minted_at(alpha, discovery), None, "nothing minted there");
     }
 
     /// The spawn program is reference-counted: cloning it bumps the strong count without copying
@@ -1456,10 +1377,7 @@ mod tests {
             params(Arc::clone(&program), EffectScope::SubtreeRoot),
         );
         assert!(
-            std::ptr::eq(
-                before,
-                Arc::as_ptr(sub.spawn_spec().expect("spawn reaction").program()),
-            ),
+            std::ptr::eq(before, Arc::as_ptr(sub.spawn_spec().expect("spawn reaction").program())),
             "Sub::declared must not allocate a new ActionProgram",
         );
     }
@@ -1481,39 +1399,21 @@ mod tests {
         };
 
         for (label, d) in [
-            (
-                "added",
-                SubRegistryDiff {
-                    added: vec![req()],
-                    ..Default::default()
-                },
-            ),
+            ("added", SubRegistryDiff { added: vec![req()], ..Default::default() }),
             (
                 "removed",
-                SubRegistryDiff {
-                    removed: vec![CompactString::from("a")],
-                    ..Default::default()
-                },
+                SubRegistryDiff { removed: vec![CompactString::from("a")], ..Default::default() },
             ),
             (
                 "modified_identity",
-                SubRegistryDiff {
-                    modified_identity: vec![req()],
-                    ..Default::default()
-                },
+                SubRegistryDiff { modified_identity: vec![req()], ..Default::default() },
             ),
             (
                 "modified_params",
-                SubRegistryDiff {
-                    modified_params: vec![req()],
-                    ..Default::default()
-                },
+                SubRegistryDiff { modified_params: vec![req()], ..Default::default() },
             ),
         ] {
-            assert!(
-                !d.is_empty(),
-                "populating `{label}` must flip is_empty to false",
-            );
+            assert!(!d.is_empty(), "populating `{label}` must flip is_empty to false");
         }
     }
 
@@ -1556,20 +1456,14 @@ mod tests {
             "last_fired_at preserved — operator-facing fire history",
         );
         assert_eq!(h.fire_count, 7, "fire_count preserved across rebind");
-        assert_eq!(
-            h.dedup_suppressed_count, 1,
-            "dedup_suppressed_count preserved across rebind",
-        );
+        assert_eq!(h.dedup_suppressed_count, 1, "dedup_suppressed_count preserved across rebind");
         assert_eq!(s.name, "build", "name preserved");
         assert_eq!(s.profile, pid, "profile preserved");
         assert!(s.minted_by().is_none(), "minted_by preserved");
         let spec = s.spawn_spec().expect("spawn reaction carries a spec");
         assert_eq!(spec.scope(), EffectScope::PerStableFile, "scope replaced");
         assert_eq!(s.settle(), new_settle, "settle replaced");
-        assert!(
-            Arc::ptr_eq(spec.program(), &new_program),
-            "program Arc replaced (no rewrap)",
-        );
+        assert!(Arc::ptr_eq(spec.program(), &new_program), "program Arc replaced (no rewrap)");
         assert!(
             spec.needs_diff(),
             "needs_diff travels with the sealed spec — PerStableFile alone sets it true",
@@ -1607,12 +1501,7 @@ mod tests {
 
     /// A Sub `template` minted on `profile`.
     fn minted(profile: ProfileId, name: &str, template: SubId) -> Sub {
-        Sub::minted(
-            profile,
-            name.into(),
-            template,
-            &mint_spec(EffectScope::SubtreeRoot),
-        )
+        Sub::minted(profile, name.into(), template, &mint_spec(EffectScope::SubtreeRoot))
     }
 
     /// Each line is made once per template lifetime, and making one leaves the other unmade.
@@ -1671,17 +1560,12 @@ mod tests {
         let other = reg.insert(template(discovery, "other"));
         let a = reg.insert(minted(at_a, "disc@/a", disc));
         let b = reg.insert(minted(at_b, "disc@/b", disc));
-        let beside = [
-            reg.insert(minted(at_a, "other@/a", other)),
-            reg.insert(declared(at_a, "op")),
-        ];
+        let beside =
+            [reg.insert(minted(at_a, "other@/a", other)), reg.insert(declared(at_a, "op"))];
         reg.mark_fired(a);
         reg.close_enumeration(disc);
         let identity = |reg: &SubRegistry| {
-            let spec = reg
-                .get(disc)
-                .and_then(Sub::mint_spec)
-                .expect("live template");
+            let spec = reg.get(disc).and_then(Sub::mint_spec).expect("live template");
             spec.identity().config_hash()
         };
         let frozen = identity(&reg);
@@ -1695,33 +1579,20 @@ mod tests {
             },
         );
 
-        assert_eq!(
-            prior.map(|p| p.settle),
-            Some(SETTLE),
-            "what the template stamped comes back"
-        );
+        assert_eq!(prior.map(|p| p.settle), Some(SETTLE), "what the template stamped comes back");
         let runs = |sid| {
             reg.get(sid)
                 .and_then(Sub::spawn_spec)
                 .is_some_and(|spec| Arc::ptr_eq(spec.program(), &program))
         };
-        assert!(
-            runs(a) && runs(b),
-            "every Sub it minted runs the new program"
-        );
+        assert!(runs(a) && runs(b), "every Sub it minted runs the new program");
         assert_eq!(
             [a, b].map(|sid| reg.get(sid).map(Sub::settle)),
             [Some(SETTLE * 2); 2],
             "and the new settle",
         );
-        assert!(
-            !beside.into_iter().any(runs),
-            "no other Sub on their Profiles moves"
-        );
-        let stamped = reg
-            .get(disc)
-            .and_then(Sub::mint_spec)
-            .expect("live template");
+        assert!(!beside.into_iter().any(runs), "no other Sub on their Profiles moves");
+        let stamped = reg.get(disc).and_then(Sub::mint_spec).expect("live template");
         assert!(
             Arc::ptr_eq(stamped.params().spawn.program(), &program),
             "the template stamps the new params from now on",
@@ -1732,10 +1603,7 @@ mod tests {
             Some(MintEntry::Appeared),
             "its state stands",
         );
-        assert!(
-            reg.get(a).is_some_and(Sub::has_fired),
-            "a minted Sub's history stands"
-        );
+        assert!(reg.get(a).is_some_and(Sub::has_fired), "a minted Sub's history stands");
     }
 
     /// A per-file scope on a template's *spawn* is minted-reaction payload, not this Profile's
@@ -1745,11 +1613,7 @@ mod tests {
     fn has_per_stable_file_sub_excludes_template_bearing_subs() {
         let mut reg = SubRegistry::new();
         let pid = ProfileId::default();
-        reg.insert(Sub::template(
-            pid,
-            "disc".into(),
-            mint_spec(EffectScope::PerStableFile),
-        ));
+        reg.insert(Sub::template(pid, "disc".into(), mint_spec(EffectScope::PerStableFile)));
         assert!(
             !reg.has_per_stable_file_sub(pid),
             "a template's reaction is minting, never a per-file Effect",
@@ -1759,10 +1623,7 @@ mod tests {
             "fmt".into(),
             params(anchor_only_program(), EffectScope::PerStableFile),
         ));
-        assert!(
-            reg.has_per_stable_file_sub(pid),
-            "a plain per-file Sub still trips the predicate",
-        );
+        assert!(reg.has_per_stable_file_sub(pid), "a plain per-file Sub still trips the predicate");
     }
 }
 
@@ -1781,12 +1642,7 @@ mod class_set_tests {
     fn distinct_bit_positions() {
         // All four named values pairwise distinct: each occupies its own bit position (verifies the
         // constants haven't drifted).
-        let all = [
-            ClassSet::EMPTY,
-            ClassSet::STRUCTURE,
-            ClassSet::CONTENT,
-            ClassSet::METADATA,
-        ];
+        let all = [ClassSet::EMPTY, ClassSet::STRUCTURE, ClassSet::CONTENT, ClassSet::METADATA];
         for (i, a) in all.iter().enumerate() {
             for (j, b) in all.iter().enumerate() {
                 if i != j {
@@ -1873,17 +1729,10 @@ mod class_set_tests {
             (ClassSet::STRUCTURE | ClassSet::CONTENT, 0b011),
             (ClassSet::CONTENT | ClassSet::METADATA, 0b110),
             (ClassSet::STRUCTURE | ClassSet::METADATA, 0b101),
-            (
-                ClassSet::STRUCTURE | ClassSet::CONTENT | ClassSet::METADATA,
-                0b111,
-            ),
+            (ClassSet::STRUCTURE | ClassSet::CONTENT | ClassSet::METADATA, 0b111),
         ];
         for (set, expected) in cases {
-            assert_eq!(
-                set.bits(),
-                expected,
-                "{set:?} must encode as {expected:#05b}"
-            );
+            assert_eq!(set.bits(), expected, "{set:?} must encode as {expected:#05b}");
         }
     }
 

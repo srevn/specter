@@ -79,10 +79,7 @@ use std::sync::Arc;
 ///
 /// `pub(crate)` so every diff-entry-to-Resource resolution agrees with what reconcile produced.
 pub(crate) fn ensure_descendant(
-    tree: &mut Tree,
-    anchor: ResourceId,
-    rel_path: &str,
-    leaf_kind: ResourceKind,
+    tree: &mut Tree, anchor: ResourceId, rel_path: &str, leaf_kind: ResourceKind,
 ) -> Option<ResourceId> {
     let mut comps = rel_path.split('/').filter(|s| !s.is_empty()).peekable();
     comps.peek()?;
@@ -118,9 +115,7 @@ pub(crate) fn ensure_descendant(
 /// try_reap` at the anchor itself — risking anchor reap from a malformed diff entry. The `peek`
 /// short-circuit removes that hazard at the entry gate.
 pub(crate) fn lookup_descendant(
-    tree: &Tree,
-    anchor: ResourceId,
-    rel_path: &str,
+    tree: &Tree, anchor: ResourceId, rel_path: &str,
 ) -> Option<ResourceId> {
     let mut comps = rel_path.split('/').filter(|s| !s.is_empty()).peekable();
     comps.peek()?;
@@ -163,11 +158,7 @@ pub(crate) fn lookup_descendant(
 /// slot forever. The delete entry carries the baseline-side kind — exactly the kind the contribution
 /// was installed under — so keying on it makes release read what install read.
 fn wants_descendant_watch(
-    profile: &Profile,
-    r: ResourceId,
-    kind: EntryKind,
-    tree: &Tree,
-    scratch: &mut PathBuf,
+    profile: &Profile, r: ResourceId, kind: EntryKind, tree: &Tree, scratch: &mut PathBuf,
 ) -> bool {
     match (classify(profile, r, kind.into(), tree, scratch), kind) {
         (CoverageClass::Interior, EntryKind::Dir) => true,
@@ -211,13 +202,8 @@ fn wants_descendant_watch(
 /// — the fire history is per-Sub ([`specter_core::Sub::has_fired`]) and dies with the slotmap entry,
 /// so a reaped leaf has nothing to purge by `ResourceId`.
 pub(crate) fn apply_diff_to_tree(
-    diff: &Diff,
-    profile: &Profile,
-    profile_id: ProfileId,
-    base: ResourceId,
-    tree: &mut Tree,
-    out: &mut StepOutput,
-    scratch: &mut PathBuf,
+    diff: &Diff, profile: &Profile, profile_id: ProfileId, base: ResourceId, tree: &mut Tree,
+    out: &mut StepOutput, scratch: &mut PathBuf,
 ) {
     let key = ContribKey::ProfileDescendant(profile_id);
 
@@ -245,10 +231,7 @@ pub(crate) fn apply_diff_to_tree(
     // owed at reap time (the closing `Unwatch`, if a contribution were ever stranded at the slot)
     // is emitted from inside the terminus rather than the caller — single source per protocol-close
     // edge.
-    let phase_1 = diff
-        .deleted
-        .iter()
-        .chain(diff.renamed.iter().map(|r| &r.from));
+    let phase_1 = diff.deleted.iter().chain(diff.renamed.iter().map(|r| &r.from));
     for entry in phase_1.rev() {
         let Some(resource) = lookup_descendant(tree, base, entry.segment.as_str()) else {
             continue;
@@ -270,10 +253,7 @@ pub(crate) fn apply_diff_to_tree(
     // `ensure_child` (idempotent on existing slots), so any out-of-order entry only triggers extra
     // slot materialisation up front — the eventual `add_watch` for each explicit entry still lands
     // correctly because contributions are per-`(slot, key)` and disjoint between unrelated slots.
-    let phase_2 = diff
-        .created
-        .iter()
-        .chain(diff.renamed.iter().map(|r| &r.to));
+    let phase_2 = diff.created.iter().chain(diff.renamed.iter().map(|r| &r.to));
     for entry in phase_2 {
         let Some(resource) =
             ensure_descendant(tree, base, entry.segment.as_str(), entry.kind.into())
@@ -319,14 +299,9 @@ pub(crate) fn apply_diff_to_tree(
 /// needs. `prior` arrives typed (`Option<Arc<DirSnapshot>>`) — the caller already extracted it under
 /// one Profile borrow, lifting the File-shape detection out of graft's body.
 pub(crate) fn graft(
-    profile_id: ProfileId,
-    target: ResourceId,
-    prior: Option<Arc<DirSnapshot>>,
-    response_arc: Arc<DirSnapshot>,
-    tree: &mut Tree,
-    profiles: &mut ProfileMap,
-    out: &mut StepOutput,
-    scratch: &mut PathBuf,
+    profile_id: ProfileId, target: ResourceId, prior: Option<Arc<DirSnapshot>>,
+    response_arc: Arc<DirSnapshot>, tree: &mut Tree, profiles: &mut ProfileMap,
+    out: &mut StepOutput, scratch: &mut PathBuf,
 ) {
     let anchor = match profiles.get(profile_id) {
         Some(p) => p.resource(),
@@ -338,9 +313,7 @@ pub(crate) fn graft(
     // through the inlined `subtree_at` dispatcher, but without the
     // `TreeSnapshot::Dir(Arc::clone(...))` wrapper allocation the `&TreeSnapshot`-keyed entry point
     // required.
-    let prior_at_target = prior
-        .as_ref()
-        .and_then(|arc| subtree_at_dir(arc, anchor, target, tree));
+    let prior_at_target = prior.as_ref().and_then(|arc| subtree_at_dir(arc, anchor, target, tree));
 
     // O(1) early-out: response equals prior at this target ⇒ no Watch ops, no graft, no allocation.
     if let Some(p) = &prior_at_target
@@ -440,12 +413,7 @@ mod tests {
     }
 
     fn leaf(kind: EntryKind, inode: u64) -> ChildEntry {
-        ChildEntry::Leaf(LeafEntry::synthetic(
-            kind,
-            0,
-            UNIX_EPOCH,
-            FsIdentity::synthetic(inode, 0),
-        ))
+        ChildEntry::Leaf(LeafEntry::synthetic(kind, 0, UNIX_EPOCH, FsIdentity::synthetic(inode, 0)))
     }
 
     fn dir_uncovered(inode: u64) -> ChildEntry {
@@ -471,11 +439,7 @@ mod tests {
         tree.set_kind(r, ResourceKind::Dir);
         // `events` chooses the per-leaf gating: CONTENT (or METADATA) ⇒ `has_per_file_fds = true` ⇒
         // Leaves get watch_demand contributions. STRUCTURE-only ⇒ Dir-only contributions.
-        let events = if per_file {
-            ClassSet::CONTENT
-        } else {
-            ClassSet::STRUCTURE
-        };
+        let events = if per_file { ClassSet::CONTENT } else { ClassSet::STRUCTURE };
         let pid = profiles.attach(
             &mut tree,
             Profile::new(
@@ -493,17 +457,11 @@ mod tests {
     }
 
     fn count_watch(out: &StepOutput) -> usize {
-        out.watch_ops
-            .iter()
-            .filter(|op| matches!(op, WatchOp::Watch { .. }))
-            .count()
+        out.watch_ops.iter().filter(|op| matches!(op, WatchOp::Watch { .. })).count()
     }
 
     fn count_unwatch(out: &StepOutput) -> usize {
-        out.watch_ops
-            .iter()
-            .filter(|op| matches!(op, WatchOp::Unwatch { .. }))
-            .count()
+        out.watch_ops.iter().filter(|op| matches!(op, WatchOp::Unwatch { .. })).count()
     }
 
     // ---------------------------------------------------------------------------
@@ -515,13 +473,8 @@ mod tests {
         // Diff::all_created over a fresh response ⇒ every entry is a creation. Subtree-only Profile
         // (has_per_file_fds=false) ⇒ Dir gets Watch, Leaf does not.
         let (mut tree, profiles, root, pid) = anchor(false);
-        let response = dir_snap(
-            100,
-            vec![
-                ("a.rs", leaf(EntryKind::File, 1)),
-                ("sub", dir_uncovered(2)),
-            ],
-        );
+        let response =
+            dir_snap(100, vec![("a.rs", leaf(EntryKind::File, 1)), ("sub", dir_uncovered(2))]);
         let diff = Diff::all_created(&response);
 
         let mut out = StepOutput::default();
@@ -543,13 +496,8 @@ mod tests {
     fn apply_diff_per_file_profile_emits_watch_for_leaf_create() {
         // has_per_file_fds=true ⇒ Leaf creates *also* get Watch.
         let (mut tree, profiles, root, pid) = anchor(true);
-        let response = dir_snap(
-            100,
-            vec![
-                ("a.rs", leaf(EntryKind::File, 1)),
-                ("sub", dir_uncovered(2)),
-            ],
-        );
+        let response =
+            dir_snap(100, vec![("a.rs", leaf(EntryKind::File, 1)), ("sub", dir_uncovered(2))]);
         let diff = Diff::all_created(&response);
 
         let mut out = StepOutput::default();
@@ -562,11 +510,7 @@ mod tests {
             &mut out,
             &mut PathBuf::new(),
         );
-        assert_eq!(
-            count_watch(&out),
-            2,
-            "Watch for both Dir and Leaf under per-file"
-        );
+        assert_eq!(count_watch(&out), 2, "Watch for both Dir and Leaf under per-file");
     }
 
     // ---------------------------------------------------------------------------
@@ -581,9 +525,7 @@ mod tests {
         // Materialise the Dir slot first so the delete path has something to `sub_watch` against.
         // Pre-populate with the same contribution apply_diff_to_tree will drop on delete (the
         // Profile's events, here STRUCTURE).
-        let sub_id = tree
-            .ensure_child(root, "sub", ResourceRole::User)
-            .expect("test live parent");
+        let sub_id = tree.ensure_child(root, "sub", ResourceRole::User).expect("test live parent");
         tree.set_kind(sub_id, ResourceKind::Dir);
         crate::refcounts::add_watch(
             &mut tree,
@@ -620,9 +562,8 @@ mod tests {
         // PerStableFile Profile (has_per_file_fds=true): covered Leaf carries a Watch contribution;
         // delete should release it (symmetric to create).
         let (mut tree, profiles, root, pid) = anchor(true);
-        let leaf_id = tree
-            .ensure_child(root, "a.rs", ResourceRole::User)
-            .expect("test live parent");
+        let leaf_id =
+            tree.ensure_child(root, "a.rs", ResourceRole::User).expect("test live parent");
         tree.set_kind(leaf_id, ResourceKind::File);
         crate::refcounts::add_watch(
             &mut tree,
@@ -679,9 +620,8 @@ mod tests {
                 None,
             ),
         );
-        let leaf_id = tree
-            .ensure_child(r, "current", ResourceRole::User)
-            .expect("test live parent");
+        let leaf_id =
+            tree.ensure_child(r, "current", ResourceRole::User).expect("test live parent");
         tree.set_kind(leaf_id, ResourceKind::File);
         crate::refcounts::add_watch(
             &mut tree,
@@ -731,9 +671,7 @@ mod tests {
         // Net: one Unwatch + one Watch.
         let (mut tree, profiles, root, pid) = anchor(false);
         // Pre-materialise the prior Dir slot with the matching mask.
-        let foo_id = tree
-            .ensure_child(root, "foo", ResourceRole::User)
-            .expect("test live parent");
+        let foo_id = tree.ensure_child(root, "foo", ResourceRole::User).expect("test live parent");
         tree.set_kind(foo_id, ResourceKind::Dir);
         crate::refcounts::add_watch(
             &mut tree,
@@ -781,10 +719,7 @@ mod tests {
         // ops, current unchanged.
         let (mut tree, mut profiles, root, pid) = anchor(false);
         let snap_a = dir_snap(100, vec![("a.rs", leaf(EntryKind::File, 1))]);
-        profiles
-            .get_mut(pid)
-            .unwrap()
-            .install_dir_current(Arc::clone(&snap_a));
+        profiles.get_mut(pid).unwrap().install_dir_current(Arc::clone(&snap_a));
         let response = dir_snap(100, vec![("a.rs", leaf(EntryKind::File, 1))]);
 
         let prior_arc_count = Arc::strong_count(&snap_a);
@@ -805,10 +740,7 @@ mod tests {
         // current Arc is unchanged (still pointing at snap_a — the early-out bypassed splice's
         // path-rebuild).
         let post_arc_count = Arc::strong_count(&snap_a);
-        assert!(
-            post_arc_count >= prior_arc_count,
-            "graft early-out doesn't drop current's Arc",
-        );
+        assert!(post_arc_count >= prior_arc_count, "graft early-out doesn't drop current's Arc");
     }
 
     #[test]
@@ -853,20 +785,13 @@ mod tests {
         // AND keep the prior `current` unchanged so the anchor-rooted invariant on `Profile.current`
         // is preserved.
         let (mut tree, mut profiles, root, pid) = anchor(false);
-        let a_id = tree
-            .ensure_child(root, "a", ResourceRole::User)
-            .expect("test live parent");
+        let a_id = tree.ensure_child(root, "a", ResourceRole::User).expect("test live parent");
         tree.set_kind(a_id, ResourceKind::Dir);
-        let b_id = tree
-            .ensure_child(a_id, "b", ResourceRole::User)
-            .expect("test live parent");
+        let b_id = tree.ensure_child(a_id, "b", ResourceRole::User).expect("test live parent");
         tree.set_kind(b_id, ResourceKind::Dir);
 
         let prior_current = dir_snap(100, vec![("a", dir_uncovered(2))]);
-        profiles
-            .get_mut(pid)
-            .unwrap()
-            .install_dir_current(Arc::clone(&prior_current));
+        profiles.get_mut(pid).unwrap().install_dir_current(Arc::clone(&prior_current));
 
         let response = dir_snap(200, vec![]);
 
@@ -938,9 +863,8 @@ mod tests {
 
         // Pre-materialise the prior File slot at `(root, "foo")` with a watch contribution matching
         // the per-file Profile's mask.
-        let prior_foo_id = tree
-            .ensure_child(root, "foo", ResourceRole::User)
-            .expect("test live parent");
+        let prior_foo_id =
+            tree.ensure_child(root, "foo", ResourceRole::User).expect("test live parent");
         tree.set_kind(prior_foo_id, ResourceKind::File);
         crate::refcounts::add_watch(
             &mut tree,
@@ -952,10 +876,7 @@ mod tests {
 
         // Prior snapshot: root with covered Leaf `foo` (inode 42).
         let prior_current = dir_snap(100, vec![("foo", leaf(EntryKind::File, 42))]);
-        profiles
-            .get_mut(pid)
-            .unwrap()
-            .install_dir_current(Arc::clone(&prior_current));
+        profiles.get_mut(pid).unwrap().install_dir_current(Arc::clone(&prior_current));
 
         // Build response: root has covered Dir `foo` at the SAME inode (42), with one descendant
         // File `nested.rs` under it. The covered subtree's `root_meta.fs_id` IS the `foo` directory's
@@ -974,14 +895,8 @@ mod tests {
         // pre-condition.
         let prior_foo_child = prior_current.entries().get("foo").unwrap();
         let new_foo_child = response.entries().get("foo").unwrap();
-        assert_eq!(
-            prior_foo_child.fs_id().inode(),
-            new_foo_child.fs_id().inode()
-        );
-        assert_eq!(
-            prior_foo_child.fs_id().device(),
-            new_foo_child.fs_id().device()
-        );
+        assert_eq!(prior_foo_child.fs_id().inode(), new_foo_child.fs_id().inode());
+        assert_eq!(prior_foo_child.fs_id().device(), new_foo_child.fs_id().device());
         assert_ne!(
             prior_foo_child.kind(),
             new_foo_child.kind(),
@@ -1010,10 +925,7 @@ mod tests {
             new_foo_id, prior_foo_id,
             "kind-flip must reap the prior slot and allocate a fresh-generation one",
         );
-        assert!(
-            tree.get(prior_foo_id).is_none(),
-            "prior File slot must be reaped after kind flip",
-        );
+        assert!(tree.get(prior_foo_id).is_none(), "prior File slot must be reaped after kind flip");
 
         // 2. New slot's kind is Dir.
         let kind = tree
@@ -1023,9 +935,7 @@ mod tests {
         assert_eq!(kind, ResourceKind::Dir, "new slot must be re-typed to Dir");
 
         // 3. New slot carries the Profile's descendant contribution.
-        let has_contribution = tree
-            .get(new_foo_id)
-            .is_some_and(specter_core::Resource::is_watched);
+        let has_contribution = tree.get(new_foo_id).is_some_and(specter_core::Resource::is_watched);
         assert!(
             has_contribution,
             "new Dir slot must carry the Profile's descendant contribution \
@@ -1037,19 +947,14 @@ mod tests {
             .watch_ops
             .iter()
             .any(|op| matches!(op, WatchOp::Watch { resource, .. } if *resource == new_foo_id));
-        assert!(
-            watched_new_slot,
-            "out.watch_ops must contain a Watch op at the new Dir slot",
-        );
+        assert!(watched_new_slot, "out.watch_ops must contain a Watch op at the new Dir slot");
 
         // 5. The descendant `nested.rs` was materialised under the new Dir slot. Per-file Profile ⇒
         //    covered Leaf carries a watch contribution too.
         let nested_id = tree
             .lookup(Some(new_foo_id), "nested.rs")
             .expect("descendant `nested.rs` must be materialised");
-        let nested_watched = tree
-            .get(nested_id)
-            .is_some_and(specter_core::Resource::is_watched);
+        let nested_watched = tree.get(nested_id).is_some_and(specter_core::Resource::is_watched);
         assert!(
             nested_watched,
             "covered descendant of the new Dir must carry its own watch \

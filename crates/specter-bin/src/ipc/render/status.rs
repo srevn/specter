@@ -42,12 +42,7 @@ pub(crate) fn render(out: &mut String, resp: &StatusResponse, _wide: bool, sty: 
         label_cell(sty, "uptime", LABEL_WIDTH),
         format_uptime(resp.uptime_secs),
     );
-    let _ = writeln!(
-        out,
-        "{}{}",
-        label_cell(sty, "started", LABEL_WIDTH),
-        resp.start_wall,
-    );
+    let _ = writeln!(out, "{}{}", label_cell(sty, "started", LABEL_WIDTH), resp.start_wall);
     let _ = writeln!(
         out,
         "{}{}",
@@ -80,18 +75,8 @@ pub(crate) fn render(out: &mut String, resp: &StatusResponse, _wide: bool, sty: 
     );
     // `WirePath: Display` writes its inner UTF-8 / lossy-projected string verbatim — zero-alloc into
     // `out`, no intermediate.
-    let _ = writeln!(
-        out,
-        "{}{}",
-        label_cell(sty, "config", LABEL_WIDTH),
-        resp.config_path,
-    );
-    let _ = writeln!(
-        out,
-        "{}{}",
-        label_cell(sty, "socket", LABEL_WIDTH),
-        resp.socket_path,
-    );
+    let _ = writeln!(out, "{}{}", label_cell(sty, "config", LABEL_WIDTH), resp.config_path);
+    let _ = writeln!(out, "{}{}", label_cell(sty, "socket", LABEL_WIDTH), resp.socket_path);
 }
 
 /// Width of the label column. Padded to align all values vertically.
@@ -153,25 +138,15 @@ mod tests {
         let mut s = String::new();
         render(&mut s, &fresh_status(), false, Styler::Plain);
         assert!(s.starts_with("specter status\n"), "header present");
-        for label in [
-            "uptime",
-            "started",
-            "reloads",
-            "subs",
-            "profiles",
-            "discovery",
-            "config",
-            "socket",
-        ] {
+        for label in
+            ["uptime", "started", "reloads", "subs", "profiles", "discovery", "config", "socket"]
+        {
             assert!(s.contains(label), "missing label {label:?} in:\n{s}");
         }
         assert!(s.contains("/tmp/specter-test.sock"), "socket path appears");
         assert!(s.contains("/etc/specter.toml"), "config path appears");
 
-        let one = StatusResponse {
-            discovery_active: 1,
-            ..fresh_status()
-        };
+        let one = StatusResponse { discovery_active: 1, ..fresh_status() };
         let mut s = String::new();
         render(&mut s, &one, false, Styler::Plain);
         assert!(
@@ -203,10 +178,7 @@ mod tests {
             via: WireReloadTrigger::Sighup,
         };
         let line = format_reloads(3, Some(&lr));
-        assert!(
-            line.starts_with("3 (last ") && line.ends_with(" via sighup)"),
-            "got: {line}",
-        );
+        assert!(line.starts_with("3 (last ") && line.ends_with(" via sighup)"), "got: {line}");
     }
 
     /// Color is purely additive: an `Active` render stripped of every SGR escape reproduces the
@@ -221,10 +193,7 @@ mod tests {
         render(&mut active, &resp, false, Styler::Active);
         let mut plain = String::new();
         render(&mut plain, &resp, false, Styler::Plain);
-        assert!(
-            active.contains('\x1b'),
-            "Active emits SGR escapes: {active:?}",
-        );
+        assert!(active.contains('\x1b'), "Active emits SGR escapes: {active:?}");
         assert_eq!(strip_ansi(&active), plain, "stripping Active yields Plain");
     }
 }

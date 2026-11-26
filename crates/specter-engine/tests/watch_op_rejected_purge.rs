@@ -16,11 +16,7 @@ const MAX_SETTLE: Duration = Duration::from_secs(6);
 // ───────────────────────────────────────────────────────────────────────
 
 fn attach_subtree_root(
-    e: &mut Engine,
-    name: &str,
-    resource: ResourceId,
-    max_settle: Duration,
-    now: Instant,
+    e: &mut Engine, name: &str, resource: ResourceId, max_settle: Duration, now: Instant,
 ) -> (SubId, ProfileId) {
     let req = SubAttachRequest::for_anchor(
         name.into(),
@@ -51,33 +47,21 @@ fn anchor_claim_purged_then_detach_no_panic() {
     let t0 = Instant::now();
     let (sid, pid) = attach_subtree_root(&mut e, "build", root, MAX_SETTLE, t0);
     let _ = seed_to_idle(&mut e, pid, &dir_snap(&[]), t0);
-    assert_eq!(
-        e.profiles().get(pid).unwrap().anchor_claim(),
-        AnchorClaim::Held,
-    );
+    assert_eq!(e.profiles().get(pid).unwrap().anchor_claim(), AnchorClaim::Held);
     assert_eq!(e.tree().get(root).unwrap().watch_demand(), 1);
 
     // Reject the kernel watch on the anchor.
     let purge_out = e.step(
-        Input::WatchOpRejected {
-            resource: root,
-            failure: WatchFailure::Pressure { errno: 24 },
-        },
+        Input::WatchOpRejected { resource: root, failure: WatchFailure::Pressure { errno: 24 } },
         Instant::now(),
     );
 
     // Anchor claim cleared; counter zeroed.
-    assert_eq!(
-        e.profiles().get(pid).unwrap().anchor_claim(),
-        AnchorClaim::None,
-    );
+    assert_eq!(e.profiles().get(pid).unwrap().anchor_claim(), AnchorClaim::None);
     assert_eq!(e.tree().get(root).unwrap().watch_demand(), 0);
     // ProfileClaimPurged{Anchor} surfaces.
     assert!(
-        purge_out
-            .diagnostics
-            .iter()
-            .any(|d| matches!(d, Diagnostic::ProfileClaimPurged {
+        purge_out.diagnostics.iter().any(|d| matches!(d, Diagnostic::ProfileClaimPurged {
                 profile, claim, resource, ..
             } if *profile == pid
                 && *claim == ClaimKind::Anchor
@@ -114,20 +98,11 @@ fn anchor_claim_purged_for_two_profiles_clears_kind_on_both() {
     let _ = seed_to_idle(&mut e, pid_q, &dir_snap(&[]), t_q);
 
     // Pre-condition: both Profiles cache the anchor's kind.
-    assert_eq!(
-        e.profiles().get(pid_p).unwrap().kind(),
-        Some(ResourceKind::Dir),
-    );
-    assert_eq!(
-        e.profiles().get(pid_q).unwrap().kind(),
-        Some(ResourceKind::Dir),
-    );
+    assert_eq!(e.profiles().get(pid_p).unwrap().kind(), Some(ResourceKind::Dir));
+    assert_eq!(e.profiles().get(pid_q).unwrap().kind(), Some(ResourceKind::Dir));
 
     let _ = e.step(
-        Input::WatchOpRejected {
-            resource: root,
-            failure: WatchFailure::Pressure { errno: 24 },
-        },
+        Input::WatchOpRejected { resource: root, failure: WatchFailure::Pressure { errno: 24 } },
         Instant::now(),
     );
 
@@ -141,14 +116,8 @@ fn anchor_claim_purged_for_two_profiles_clears_kind_on_both() {
     );
     // Sibling assertion that the existing claim-side discipline is also intact — both anchor claims
     // released, counter zeroed.
-    assert_eq!(
-        e.profiles().get(pid_p).unwrap().anchor_claim(),
-        AnchorClaim::None,
-    );
-    assert_eq!(
-        e.profiles().get(pid_q).unwrap().anchor_claim(),
-        AnchorClaim::None,
-    );
+    assert_eq!(e.profiles().get(pid_p).unwrap().anchor_claim(), AnchorClaim::None);
+    assert_eq!(e.profiles().get(pid_q).unwrap().anchor_claim(), AnchorClaim::None);
     assert_eq!(e.tree().get(root).unwrap().watch_demand(), 0);
 }
 
@@ -170,22 +139,13 @@ fn anchor_claim_purged_for_two_profiles_each_no_panic() {
 
     // Reject the kernel watch.
     let purge_out = e.step(
-        Input::WatchOpRejected {
-            resource: root,
-            failure: WatchFailure::Pressure { errno: 24 },
-        },
+        Input::WatchOpRejected { resource: root, failure: WatchFailure::Pressure { errno: 24 } },
         Instant::now(),
     );
 
     // Both claims cleared.
-    assert_eq!(
-        e.profiles().get(pid_p).unwrap().anchor_claim(),
-        AnchorClaim::None,
-    );
-    assert_eq!(
-        e.profiles().get(pid_q).unwrap().anchor_claim(),
-        AnchorClaim::None,
-    );
+    assert_eq!(e.profiles().get(pid_p).unwrap().anchor_claim(), AnchorClaim::None);
+    assert_eq!(e.profiles().get(pid_q).unwrap().anchor_claim(), AnchorClaim::None);
     assert_eq!(e.tree().get(root).unwrap().watch_demand(), 0);
 
     // Two anchor purge diagnostics surface.
@@ -200,13 +160,8 @@ fn anchor_claim_purged_for_two_profiles_each_no_panic() {
         .count();
     assert_eq!(anchor_purge_count, 2, "one purge per Profile");
 
-    let p_seed_vanished = e.step(
-        Input::FsEvent {
-            resource: root,
-            event: FsEvent::Removed,
-        },
-        Instant::now(),
-    );
+    let p_seed_vanished =
+        e.step(Input::FsEvent { resource: root, event: FsEvent::Removed }, Instant::now());
     // No panic. Profile P (Idle, anchor_claim=None) is left alone by covering_profiles' filter
     // (P.state is Idle, not Pending, so it would normally route through finalize_anchor_lost). But
     // wait — covering_profiles still includes Idle Profiles. The route is finalize_anchor_lost(P)
@@ -231,48 +186,32 @@ fn watch_root_parent_claim_purged_then_reap_no_panic() {
     // Build a parent / anchor pair.
     let parent = e.tree_mut().ensure_root("var", ResourceRole::User);
     e.tree_mut().set_kind(parent, ResourceKind::Dir);
-    let anchor = e
-        .tree_mut()
-        .ensure_child(parent, "log", ResourceRole::User)
-        .expect("test live parent");
+    let anchor =
+        e.tree_mut().ensure_child(parent, "log", ResourceRole::User).expect("test live parent");
     e.tree_mut().set_kind(anchor, ResourceKind::Dir);
 
     let t0 = Instant::now();
     let (sid, pid) = attach_subtree_root(&mut e, "watch", anchor, MAX_SETTLE, t0);
     let _ = seed_to_idle(&mut e, pid, &dir_snap(&[]), t0);
     // The attach installed the watch-root parent claim; parent has +1 STRUCTURE.
-    assert_eq!(
-        e.profiles().get(pid).unwrap().watch_root_parent(),
-        Some(parent),
-    );
+    assert_eq!(e.profiles().get(pid).unwrap().watch_root_parent(), Some(parent));
     assert_eq!(e.tree().get(parent).unwrap().watch_demand(), 1);
     assert_eq!(e.tree().get(anchor).unwrap().watch_demand(), 1);
 
     // Reject the kernel watch on the parent (not the anchor).
     let purge_out = e.step(
-        Input::WatchOpRejected {
-            resource: parent,
-            failure: WatchFailure::Pressure { errno: 24 },
-        },
+        Input::WatchOpRejected { resource: parent, failure: WatchFailure::Pressure { errno: 24 } },
         Instant::now(),
     );
 
     // Parent's flag cleared on the Profile; anchor stays watched.
     assert_eq!(e.profiles().get(pid).unwrap().watch_root_parent(), None);
-    assert_eq!(
-        e.tree()
-            .get(parent)
-            .map_or(0, specter_core::Resource::watch_demand),
-        0
-    );
+    assert_eq!(e.tree().get(parent).map_or(0, specter_core::Resource::watch_demand), 0);
     assert_eq!(e.tree().get(anchor).unwrap().watch_demand(), 1);
 
     // Diagnostic surfaces.
     assert!(
-        purge_out
-            .diagnostics
-            .iter()
-            .any(|d| matches!(d, Diagnostic::ProfileClaimPurged {
+        purge_out.diagnostics.iter().any(|d| matches!(d, Diagnostic::ProfileClaimPurged {
                 profile, claim, resource, ..
             } if *profile == pid
                 && *claim == ClaimKind::WatchRootParent
@@ -294,10 +233,8 @@ fn descent_prefix_claim_purged_then_anchor_appears_no_recovery() {
     // (`ProfileState::Parked`); operator restart is required to recover (no automatic recovery via
     // parent's StructureChanged because the parent watch failed).
     let mut e = Engine::new();
-    let foo = e
-        .tree_mut()
-        .ensure_path(&["/", "foo"], ResourceRole::User)
-        .expect("non-empty fixture");
+    let foo =
+        e.tree_mut().ensure_path(&["/", "foo"], ResourceRole::User).expect("non-empty fixture");
     e.tree_mut().set_kind(foo, ResourceKind::Dir);
 
     let req = SubAttachRequest::for_anchor(
@@ -314,25 +251,16 @@ fn descent_prefix_claim_purged_then_anchor_appears_no_recovery() {
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile();
     let initial_corr = first_probe_correlation(&attach_out).expect("descent probe");
-    assert!(matches!(
-        e.profiles().get(pid).unwrap().state(),
-        ProfileState::Pending(_),
-    ));
+    assert!(matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Pending(_)));
 
     // Reject the kernel watch on the descent prefix.
     let purge_out = e.step(
-        Input::WatchOpRejected {
-            resource: foo,
-            failure: WatchFailure::Pressure { errno: 24 },
-        },
+        Input::WatchOpRejected { resource: foo, failure: WatchFailure::Pressure { errno: 24 } },
         Instant::now(),
     );
 
     // Descent vacated — the purge parks the Profile (no recovery channel).
-    assert!(matches!(
-        e.profiles().get(pid).unwrap().state(),
-        ProfileState::Parked,
-    ));
+    assert!(matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Parked));
     // Cancel + ProfileClaimPurged{DescentPrefix} surface.
     assert!(
         purge_out
@@ -342,10 +270,7 @@ fn descent_prefix_claim_purged_then_anchor_appears_no_recovery() {
         "in-flight descent probe cancelled",
     );
     assert!(
-        purge_out
-            .diagnostics
-            .iter()
-            .any(|d| matches!(d, Diagnostic::ProfileClaimPurged {
+        purge_out.diagnostics.iter().any(|d| matches!(d, Diagnostic::ProfileClaimPurged {
                 profile, claim, resource, ..
             } if *profile == pid
                 && *claim == ClaimKind::DescentPrefix
@@ -362,9 +287,5 @@ fn descent_prefix_claim_purged_then_anchor_appears_no_recovery() {
         }),
         Instant::now(),
     );
-    assert!(
-        late.diagnostics
-            .iter()
-            .any(|d| matches!(d, Diagnostic::StaleProbeResponse { .. })),
-    );
+    assert!(late.diagnostics.iter().any(|d| matches!(d, Diagnostic::StaleProbeResponse { .. })));
 }

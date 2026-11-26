@@ -72,10 +72,7 @@ where
     S: AsRef<OsStr>,
 {
     let bin = env!("CARGO_BIN_EXE_specter");
-    let socket = cfg
-        .parent()
-        .expect("config path lives in a sandbox tempdir")
-        .join("specter.sock");
+    let socket = cfg.parent().expect("config path lives in a sandbox tempdir").join("specter.sock");
     Command::new(bin)
         .arg("run")
         .arg("--config")
@@ -122,10 +119,7 @@ fn await_exit(child: &mut Child) -> io::Result<std::process::ExitStatus> {
     let pid = Pid::from_raw(child.id().cast_signed());
     let _ = kill(pid, Signal::SIGKILL);
     let _ = child.wait();
-    Err(io::Error::new(
-        io::ErrorKind::TimedOut,
-        "child did not exit on SIGTERM",
-    ))
+    Err(io::Error::new(io::ErrorKind::TimedOut, "child did not exit on SIGTERM"))
 }
 
 /// Send SIGTERM to `child`, then wait for exit.
@@ -158,12 +152,7 @@ impl Sandbox {
         let log = tmp.path().join("specter.log");
         let watched = tmp.path().join("watched");
         fs::create_dir_all(&watched).expect("mkdir watched");
-        Self {
-            _tmp: tmp,
-            cfg,
-            log,
-            watched,
-        }
+        Self { _tmp: tmp, cfg, log, watched }
     }
 
     /// Write a single-`[[watch]]` config bound to `name`, watching `self.watched`. `actions =
@@ -210,12 +199,8 @@ fn edit_triggers_reload() {
 
     sb.write_two_watches("a", "b");
 
-    wait_for_log(
-        &sb.log,
-        |s| s.contains("config reload applied"),
-        LOG_DEADLINE,
-    )
-    .expect("auto-reload triggered on edit");
+    wait_for_log(&sb.log, |s| s.contains("config reload applied"), LOG_DEADLINE)
+        .expect("auto-reload triggered on edit");
 
     let status = terminate(child);
     assert!(status.success(), "clean exit; got {status:?}");
@@ -240,12 +225,8 @@ fn sighup_still_works_with_auto_reload_on() {
     sb.write_two_watches("a", "b");
     send_sighup(&child);
 
-    wait_for_log(
-        &sb.log,
-        |s| s.contains("config reload applied"),
-        LOG_DEADLINE,
-    )
-    .expect("SIGHUP+edit produced a reload");
+    wait_for_log(&sb.log, |s| s.contains("config reload applied"), LOG_DEADLINE)
+        .expect("SIGHUP+edit produced a reload");
 
     let status = terminate(child);
     assert!(status.success(), "clean exit; got {status:?}");
@@ -273,25 +254,14 @@ fn disabled_via_flag_doesnt_pulse_on_edit() {
     sb.write_two_watches("a", "b");
 
     // No reload within the absorption window.
-    let observed = wait_for_log(
-        &sb.log,
-        |s| s.contains("config reload applied"),
-        NO_RELOAD_WINDOW,
-    );
-    assert!(
-        observed.is_none(),
-        "auto-reload fired despite --no-config-watch: {observed:?}"
-    );
+    let observed = wait_for_log(&sb.log, |s| s.contains("config reload applied"), NO_RELOAD_WINDOW);
+    assert!(observed.is_none(), "auto-reload fired despite --no-config-watch: {observed:?}");
 
     // SIGHUP still triggers reload — proves the disable applies only to the auto-reload watcher,
     // not the SIGHUP pipeline.
     send_sighup(&child);
-    wait_for_log(
-        &sb.log,
-        |s| s.contains("config reload applied"),
-        LOG_DEADLINE,
-    )
-    .expect("SIGHUP-driven reload still works");
+    wait_for_log(&sb.log, |s| s.contains("config reload applied"), LOG_DEADLINE)
+        .expect("SIGHUP-driven reload still works");
 
     let status = terminate(child);
     assert!(status.success(), "clean exit; got {status:?}");
@@ -321,12 +291,8 @@ fn parse_failure_keeps_config_after_auto_pulse() {
 
     // Step 2: write a valid two-watch config; expect a clean reload.
     sb.write_two_watches("a", "b");
-    wait_for_log(
-        &sb.log,
-        |s| s.contains("config reload applied"),
-        LOG_DEADLINE,
-    )
-    .expect("subsequent valid edit still reloads");
+    wait_for_log(&sb.log, |s| s.contains("config reload applied"), LOG_DEADLINE)
+        .expect("subsequent valid edit still reloads");
 
     let status = terminate(child);
     assert!(status.success(), "clean exit; got {status:?}");
@@ -351,12 +317,8 @@ fn concurrent_sighup_and_edit_coalesces() {
     send_sighup(&child);
 
     // Wait for at least one reload.
-    wait_for_log(
-        &sb.log,
-        |s| s.contains("config reload applied"),
-        LOG_DEADLINE,
-    )
-    .expect("at least one reload");
+    wait_for_log(&sb.log, |s| s.contains("config reload applied"), LOG_DEADLINE)
+        .expect("at least one reload");
 
     // Sleep through the settle window so any second-pulse path has time to either fire or get
     // coalesced. Then bound the count.
@@ -407,12 +369,8 @@ fn startup_toctou_edit_triggers_reload() {
         .expect("startup logged (TOCTOU window now open)");
     sb.write_two_watches("a", "b");
 
-    wait_for_log(
-        &sb.log,
-        |s| s.contains("config reload applied"),
-        LOG_DEADLINE,
-    )
-    .expect("startup-window edit produced a reload");
+    wait_for_log(&sb.log, |s| s.contains("config reload applied"), LOG_DEADLINE)
+        .expect("startup-window edit produced a reload");
 
     let status = terminate(child);
     assert!(status.success(), "clean exit; got {status:?}");
@@ -487,12 +445,8 @@ fn chmod_triggers_empty_reload() {
     // chmod: 0o644 → 0o600. Same content; mode moves; mtime unchanged.
     fs::set_permissions(&sb.cfg, fs::Permissions::from_mode(0o600)).expect("chmod test config");
 
-    wait_for_log(
-        &sb.log,
-        |s| s.contains("config reload: no watch changes"),
-        LOG_DEADLINE,
-    )
-    .expect("empty reload via mode delta");
+    wait_for_log(&sb.log, |s| s.contains("config reload: no watch changes"), LOG_DEADLINE)
+        .expect("empty reload via mode delta");
 
     let status = terminate(child);
     assert!(status.success(), "clean exit; got {status:?}");

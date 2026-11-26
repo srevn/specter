@@ -93,14 +93,8 @@ impl ProgramBuilder {
         // both in one path.
         let index =
             u32::try_from(self.pending.len()).expect("program length cannot exceed u32::MAX");
-        index
-            .checked_add(1)
-            .expect("emit would grow pending past u32::MAX");
-        self.pending.push(PendingOp {
-            body,
-            on_ok: None,
-            on_failed: None,
-        });
+        index.checked_add(1).expect("emit would grow pending past u32::MAX");
+        self.pending.push(PendingOp { body, on_ok: None, on_failed: None });
         OpHandle(index)
     }
 
@@ -113,9 +107,7 @@ impl ProgramBuilder {
     /// Patch the `on_failed` edge of `h`. The internal `patch_target_check` helper enforces the
     /// patch-time invariants.
     pub fn patch_on_failed(
-        &mut self,
-        h: OpHandle,
-        target: BranchTarget,
+        &mut self, h: OpHandle, target: BranchTarget,
     ) -> Result<(), ProgramError> {
         self.patch(h, Edge::OnFailed, target)
     }
@@ -138,10 +130,7 @@ impl ProgramBuilder {
     /// to it would leave `pending[h.0]` to panic on those targets (release-mode: silent
     /// out-of-bounds).
     pub fn patch(
-        &mut self,
-        h: OpHandle,
-        edge: Edge,
-        target: BranchTarget,
+        &mut self, h: OpHandle, edge: Edge, target: BranchTarget,
     ) -> Result<(), ProgramError> {
         let len = u32::try_from(self.pending.len())
             .expect("program length cannot exceed u32::MAX; emit() enforces this");
@@ -184,22 +173,18 @@ impl ProgramBuilder {
         for (idx, pending_op) in self.pending.into_iter().enumerate() {
             // `idx < pending.len()`, which fit `u32` above.
             let origin = u32::try_from(idx).expect("idx < pending.len() <= u32::MAX");
-            let on_ok = pending_op.on_ok.ok_or(ProgramError::UnpatchedEdge {
-                op_index: origin,
-                edge: Edge::OnOk,
-            })?;
-            let on_failed = pending_op.on_failed.ok_or(ProgramError::UnpatchedEdge {
-                op_index: origin,
-                edge: Edge::OnFailed,
-            })?;
+            let on_ok = pending_op
+                .on_ok
+                .ok_or(ProgramError::UnpatchedEdge { op_index: origin, edge: Edge::OnOk })?;
+            let on_failed = pending_op
+                .on_failed
+                .ok_or(ProgramError::UnpatchedEdge { op_index: origin, edge: Edge::OnFailed })?;
             // Build-time strict in-bounds check — catches the "continue_to_next never filled" case.
             check_final_in_bounds(origin, on_ok, final_len)?;
             check_final_in_bounds(origin, on_failed, final_len)?;
             ops.push(ProgramOp::new(pending_op.body, on_ok, on_failed));
         }
-        Ok(ActionProgram {
-            ops: ops.into_boxed_slice(),
-        })
+        Ok(ActionProgram { ops: ops.into_boxed_slice() })
     }
 
     /// Patch-time invariant check for a `Continue` target: forward of origin AND within the loose
@@ -213,10 +198,7 @@ impl ProgramBuilder {
         };
         let target_idx = idx.get();
         if target_idx <= origin {
-            return Err(ProgramError::BackwardEdge {
-                origin,
-                target: target_idx,
-            });
+            return Err(ProgramError::BackwardEdge { origin, target: target_idx });
         }
         // `pending.len()` is the loose bound — equal-to is the deferred future slot; greater-than
         // is unambiguously out of range.
@@ -234,20 +216,14 @@ impl ProgramBuilder {
 }
 
 const fn check_final_in_bounds(
-    origin: u32,
-    target: BranchTarget,
-    final_len: u32,
+    origin: u32, target: BranchTarget, final_len: u32,
 ) -> Result<(), ProgramError> {
     let BranchTarget::Continue(idx) = target else {
         return Ok(());
     };
     let target_idx = idx.get();
     if target_idx >= final_len {
-        return Err(ProgramError::OutOfBoundsEdge {
-            origin,
-            target: target_idx,
-            len: final_len,
-        });
+        return Err(ProgramError::OutOfBoundsEdge { origin, target: target_idx, len: final_len });
     }
     Ok(())
 }
@@ -259,10 +235,7 @@ mod tests {
     use crate::program::op::{BranchIndex, BranchTarget, SpawnBody};
 
     fn exec_body() -> SpawnBody {
-        SpawnBody::Exec(ExecAction::new(
-            [ArgTemplate::new([ArgPart::literal("/bin/true")])],
-            None,
-        ))
+        SpawnBody::Exec(ExecAction::new([ArgTemplate::new([ArgPart::literal("/bin/true")])], None))
     }
 
     /// Empty builder → `EmptyProgram` on build.
@@ -277,20 +250,11 @@ mod tests {
     #[test]
     fn continue_to_next_returns_pending_emission_position() {
         let mut b = ProgramBuilder::new();
-        assert_eq!(
-            b.continue_to_next(),
-            BranchTarget::Continue(BranchIndex::new(0))
-        );
+        assert_eq!(b.continue_to_next(), BranchTarget::Continue(BranchIndex::new(0)));
         let _h = b.emit(exec_body());
-        assert_eq!(
-            b.continue_to_next(),
-            BranchTarget::Continue(BranchIndex::new(1))
-        );
+        assert_eq!(b.continue_to_next(), BranchTarget::Continue(BranchIndex::new(1)));
         let _h2 = b.emit(exec_body());
-        assert_eq!(
-            b.continue_to_next(),
-            BranchTarget::Continue(BranchIndex::new(2))
-        );
+        assert_eq!(b.continue_to_next(), BranchTarget::Continue(BranchIndex::new(2)));
     }
 
     /// Forward-only-in-bounds patches succeed and build produces a program of matching length with
@@ -307,17 +271,13 @@ mod tests {
         b.patch_on_failed(h0, BranchTarget::Terminate)
             .expect("Terminate target needs no bounds check");
 
-        b.patch_on_ok(h1, BranchTarget::Escape)
-            .expect("Escape target needs no bounds check");
+        b.patch_on_ok(h1, BranchTarget::Escape).expect("Escape target needs no bounds check");
         b.patch_on_failed(h1, BranchTarget::Terminate)
             .expect("Terminate target needs no bounds check");
 
         let program = b.build().expect("all edges patched, all targets in bounds");
         assert_eq!(program.ops.len(), 2);
-        assert_eq!(
-            program.ops[0].on_ok(),
-            BranchTarget::Continue(BranchIndex::new(1))
-        );
+        assert_eq!(program.ops[0].on_ok(), BranchTarget::Continue(BranchIndex::new(1)));
         assert_eq!(program.ops[0].on_failed(), BranchTarget::Terminate);
         assert_eq!(program.ops[1].on_ok(), BranchTarget::Escape);
         assert_eq!(program.ops[1].on_failed(), BranchTarget::Terminate);
@@ -335,26 +295,14 @@ mod tests {
         let err = b
             .patch_on_ok(h0, BranchTarget::Continue(BranchIndex::new(0)))
             .expect_err("self-loop must be rejected");
-        assert_eq!(
-            err,
-            ProgramError::BackwardEdge {
-                origin: 0,
-                target: 0
-            }
-        );
+        assert_eq!(err, ProgramError::BackwardEdge { origin: 0, target: 0 });
 
         // target < origin: strictly backward.
         let h2 = b.emit(exec_body());
         let err = b
             .patch_on_ok(h2, BranchTarget::Continue(BranchIndex::new(1)))
             .expect_err("backward edge must be rejected");
-        assert_eq!(
-            err,
-            ProgramError::BackwardEdge {
-                origin: 2,
-                target: 1
-            }
-        );
+        assert_eq!(err, ProgramError::BackwardEdge { origin: 2, target: 1 });
     }
 
     /// `patch_on_failed` validates the same way as `patch_on_ok` — both route through
@@ -367,13 +315,7 @@ mod tests {
         let err = b
             .patch_on_failed(h0, BranchTarget::Continue(BranchIndex::new(0)))
             .expect_err("on_failed self-loop must be rejected");
-        assert_eq!(
-            err,
-            ProgramError::BackwardEdge {
-                origin: 0,
-                target: 0
-            }
-        );
+        assert_eq!(err, ProgramError::BackwardEdge { origin: 0, target: 0 });
     }
 
     /// `patch_on_ok` with a target past `pending.len() + 0` (the loose patch-time bound — `==` is
@@ -387,14 +329,7 @@ mod tests {
         let err = b
             .patch_on_ok(h0, BranchTarget::Continue(BranchIndex::new(2)))
             .expect_err("target beyond pending.len() must be rejected");
-        assert_eq!(
-            err,
-            ProgramError::OutOfBoundsEdge {
-                origin: 0,
-                target: 2,
-                len: 1,
-            }
-        );
+        assert_eq!(err, ProgramError::OutOfBoundsEdge { origin: 0, target: 2, len: 1 });
     }
 
     /// At patch time, `target == pending.len()` is the *deferred future slot* — accepted by the
@@ -408,21 +343,11 @@ mod tests {
         // Patch to the deferred slot (target == 1, pending.len() == 1).
         b.patch_on_ok(h0, BranchTarget::Continue(BranchIndex::new(1)))
             .expect("deferred future-slot is accepted at patch time");
-        b.patch_on_failed(h0, BranchTarget::Terminate)
-            .expect("Terminate target is unconditional");
+        b.patch_on_failed(h0, BranchTarget::Terminate).expect("Terminate target is unconditional");
 
         // No follow-up emit. Build catches the unfilled promise.
-        let err = b
-            .build()
-            .expect_err("unfilled deferred slot must be caught at build");
-        assert_eq!(
-            err,
-            ProgramError::OutOfBoundsEdge {
-                origin: 0,
-                target: 1,
-                len: 1,
-            }
-        );
+        let err = b.build().expect_err("unfilled deferred slot must be caught at build");
+        assert_eq!(err, ProgramError::OutOfBoundsEdge { origin: 0, target: 1, len: 1 });
     }
 
     /// When the deferred slot IS filled by a follow-up emit, the program builds successfully.
@@ -432,22 +357,16 @@ mod tests {
         let h0 = b.emit(exec_body());
         // Defer h0.on_ok to the next slot.
         let after = b.continue_to_next();
-        b.patch_on_ok(h0, after)
-            .expect("deferred slot accepted at patch time");
-        b.patch_on_failed(h0, BranchTarget::Terminate)
-            .expect("Terminate is unconditional");
+        b.patch_on_ok(h0, after).expect("deferred slot accepted at patch time");
+        b.patch_on_failed(h0, BranchTarget::Terminate).expect("Terminate is unconditional");
 
         let h1 = b.emit(exec_body());
         b.patch_on_ok(h1, BranchTarget::Escape).expect("Escape ok");
-        b.patch_on_failed(h1, BranchTarget::Terminate)
-            .expect("Terminate ok");
+        b.patch_on_failed(h1, BranchTarget::Terminate).expect("Terminate ok");
 
         let program = b.build().expect("deferred slot filled by follow-up emit");
         assert_eq!(program.ops.len(), 2);
-        assert_eq!(
-            program.ops[0].on_ok(),
-            BranchTarget::Continue(BranchIndex::new(1))
-        );
+        assert_eq!(program.ops[0].on_ok(), BranchTarget::Continue(BranchIndex::new(1)));
     }
 
     /// An emitted op with one (or both) edge unpatched → `UnpatchedEdge` at build, with the edge
@@ -456,17 +375,10 @@ mod tests {
     fn unpatched_on_ok_at_build_reports_edge_identity() {
         let mut b = ProgramBuilder::new();
         let h0 = b.emit(exec_body());
-        b.patch_on_failed(h0, BranchTarget::Terminate)
-            .expect("Terminate ok");
+        b.patch_on_failed(h0, BranchTarget::Terminate).expect("Terminate ok");
         // on_ok is unpatched.
         let err = b.build().expect_err("unpatched on_ok must be caught");
-        assert_eq!(
-            err,
-            ProgramError::UnpatchedEdge {
-                op_index: 0,
-                edge: Edge::OnOk,
-            }
-        );
+        assert_eq!(err, ProgramError::UnpatchedEdge { op_index: 0, edge: Edge::OnOk });
     }
 
     #[test]
@@ -476,13 +388,7 @@ mod tests {
         b.patch_on_ok(h0, BranchTarget::Escape).expect("Escape ok");
         // on_failed is unpatched.
         let err = b.build().expect_err("unpatched on_failed must be caught");
-        assert_eq!(
-            err,
-            ProgramError::UnpatchedEdge {
-                op_index: 0,
-                edge: Edge::OnFailed,
-            }
-        );
+        assert_eq!(err, ProgramError::UnpatchedEdge { op_index: 0, edge: Edge::OnFailed });
     }
 
     /// When both edges are unpatched, `on_ok` is reported first (deterministic — UnpatchedEdge
@@ -493,13 +399,7 @@ mod tests {
         let _h = b.emit(exec_body());
         let err = b.build().expect_err("both edges unpatched");
         // The implementation checks on_ok first within each op.
-        assert_eq!(
-            err,
-            ProgramError::UnpatchedEdge {
-                op_index: 0,
-                edge: Edge::OnOk,
-            }
-        );
+        assert_eq!(err, ProgramError::UnpatchedEdge { op_index: 0, edge: Edge::OnOk });
     }
 
     /// The earliest-op rule: with two unpatched ops, op 0 surfaces first.
@@ -509,17 +409,10 @@ mod tests {
         let h0 = b.emit(exec_body());
         let _h1 = b.emit(exec_body());
         // Patch h0 fully, leave h1 unpatched.
-        b.patch_on_ok(h0, BranchTarget::Continue(BranchIndex::new(1)))
-            .unwrap();
+        b.patch_on_ok(h0, BranchTarget::Continue(BranchIndex::new(1))).unwrap();
         b.patch_on_failed(h0, BranchTarget::Terminate).unwrap();
         let err = b.build().expect_err("h1 unpatched");
-        assert_eq!(
-            err,
-            ProgramError::UnpatchedEdge {
-                op_index: 1,
-                edge: Edge::OnOk,
-            }
-        );
+        assert_eq!(err, ProgramError::UnpatchedEdge { op_index: 1, edge: Edge::OnOk });
     }
 
     /// `Terminate` and `Escape` skip every bounds check — they carry no payload that needs
@@ -546,8 +439,7 @@ mod tests {
 
         b.patch_on_ok(h0, BranchTarget::Terminate).unwrap();
         // Overwrite with a Continue target.
-        b.patch_on_ok(h0, BranchTarget::Continue(BranchIndex::new(1)))
-            .unwrap();
+        b.patch_on_ok(h0, BranchTarget::Continue(BranchIndex::new(1))).unwrap();
         b.patch_on_failed(h0, BranchTarget::Terminate).unwrap();
 
         // Finish h1 so build succeeds.
@@ -555,10 +447,7 @@ mod tests {
         b.patch_on_failed(h1, BranchTarget::Terminate).unwrap();
 
         let program = b.build().expect("re-patch resolves to final value");
-        assert_eq!(
-            program.ops[0].on_ok(),
-            BranchTarget::Continue(BranchIndex::new(1))
-        );
+        assert_eq!(program.ops[0].on_ok(), BranchTarget::Continue(BranchIndex::new(1)));
     }
 
     /// A handle minted by one builder used against a smaller one is *guaranteed* detected — the

@@ -87,10 +87,7 @@ impl KqueueWatcher {
     /// are the only cases — the bin should treat startup failures as fatal).
     pub fn new() -> io::Result<Self> {
         let kq = ffi::kqueue_new()?;
-        Ok(Self {
-            by_resource: SecondaryMap::new(),
-            kq,
-        })
+        Ok(Self { by_resource: SecondaryMap::new(), kq })
     }
 
     /// Internal `watch` body — dispatches by entry presence. The trait wrapper maps the inner
@@ -106,11 +103,7 @@ impl KqueueWatcher {
     /// kernel-side registration). The split makes this explicit at the call boundary —
     /// [`Self::rewatch_inner`] does not take `kind` or `path` (it reuses the cached fd).
     fn watch_inner(
-        &mut self,
-        r: ResourceId,
-        path: &Path,
-        kind: ResourceKind,
-        events: ClassSet,
+        &mut self, r: ResourceId, path: &Path, kind: ResourceKind, events: ClassSet,
     ) -> io::Result<()> {
         if self.by_resource.contains_key(r) {
             self.rewatch_inner(r, events)
@@ -132,10 +125,7 @@ impl KqueueWatcher {
     /// `by_resource[r]` must be populated. The dispatcher [`Self::watch_inner`] enforces this;
     /// calling this directly with an empty entry panics.
     fn rewatch_inner(&mut self, r: ResourceId, events: ClassSet) -> io::Result<()> {
-        let prior = self
-            .by_resource
-            .get(r)
-            .expect("rewatch_inner invoked without existing entry");
+        let prior = self.by_resource.get(r).expect("rewatch_inner invoked without existing entry");
         let cached_kind = prior.kind;
         let cached_fflags = prior.fflags;
         let install_fflags = translate::class_set_to_fflags(events, cached_kind);
@@ -151,10 +141,8 @@ impl KqueueWatcher {
         ffi::register_vnode(&self.kq, &prior.fd, r.data().as_ffi(), install_fflags)?;
         // NLL: `prior`'s immutable borrow ends here — its final use was `&prior.fd` above. Now safe
         // to mutate.
-        self.by_resource
-            .get_mut(r)
-            .expect("entry was just observed via `get`")
-            .fflags = install_fflags;
+        self.by_resource.get_mut(r).expect("entry was just observed via `get`").fflags =
+            install_fflags;
         tracing::debug!(
             ?r,
             ?events,
@@ -180,11 +168,7 @@ impl KqueueWatcher {
     ///
     /// `by_resource[r]` must be empty. The dispatcher [`Self::watch_inner`] enforces this.
     fn fresh_watch_inner(
-        &mut self,
-        r: ResourceId,
-        path: &Path,
-        kind: ResourceKind,
-        events: ClassSet,
+        &mut self, r: ResourceId, path: &Path, kind: ResourceKind, events: ClassSet,
     ) -> io::Result<()> {
         let fd = ffi::open_for_watch(path)?;
         let observed_kind = ffi::stat_kind(&fd)?;
@@ -205,14 +189,7 @@ impl KqueueWatcher {
         ffi::register_vnode(&self.kq, &fd, r.data().as_ffi(), install_fflags)?;
         // Commit the (fd, fflags, kind) triple atomically. The fd moves into the entry; subsequent
         // `register_vnode` calls on re-watch reuse `&prior.fd`.
-        self.by_resource.insert(
-            r,
-            KqueueEntry {
-                fd,
-                fflags: install_fflags,
-                kind: observed_kind,
-            },
-        );
+        self.by_resource.insert(r, KqueueEntry { fd, fflags: install_fflags, kind: observed_kind });
         tracing::debug!(
             ?r,
             ?path,
@@ -230,14 +207,9 @@ impl FsWatcher for KqueueWatcher {
     /// [`WatchFailure`] at the boundary so the engine demuxes on the variant rather than on raw errno
     /// values.
     fn watch(
-        &mut self,
-        r: ResourceId,
-        path: &Path,
-        kind: ResourceKind,
-        events: ClassSet,
+        &mut self, r: ResourceId, path: &Path, kind: ResourceKind, events: ClassSet,
     ) -> Result<(), WatchFailure> {
-        self.watch_inner(r, path, kind, events)
-            .map_err(|e| WatchFailure::from_io(&e))
+        self.watch_inner(r, path, kind, events).map_err(|e| WatchFailure::from_io(&e))
     }
 
     fn unwatch(&mut self, r: ResourceId) {
@@ -284,10 +256,7 @@ impl FsWatcher for KqueueWatcher {
                 // Kind cache miss is possible if the resource was unwatched between the kernel's
                 // queue-add and our drain; default to `Unknown` and let `normalize` apply its
                 // defensive map.
-                let kind = self
-                    .by_resource
-                    .get(r)
-                    .map_or(ResourceKind::Unknown, |e| e.kind);
+                let kind = self.by_resource.get(r).map_or(ResourceKind::Unknown, |e| e.kind);
                 let Some(fs_event) = normalize::kevent_to_fs_event(ev.flags(), ev.fflags(), kind)
                 else {
                     continue;
@@ -295,10 +264,7 @@ impl FsWatcher for KqueueWatcher {
                 // Stale-event passthrough: `r` may already have been removed from `by_resource`
                 // between kernel queue-up and our drain. Emit anyway — engine's
                 // `EventOnUnwatchedResource` Diagnostic handles the race.
-                out.push(WatcherEvent::Fs {
-                    resource: r,
-                    event: fs_event,
-                });
+                out.push(WatcherEvent::Fs { resource: r, event: fs_event });
                 total_emitted += 1;
             }
         }

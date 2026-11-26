@@ -35,10 +35,7 @@ impl ExecAction {
     /// separate setter and no partial-construction window.
     #[must_use]
     pub fn new(argv: impl IntoIterator<Item = ArgTemplate>, timeout: Option<Duration>) -> Self {
-        Self {
-            argv: argv.into_iter().collect::<Vec<_>>().into_boxed_slice(),
-            timeout,
-        }
+        Self { argv: argv.into_iter().collect::<Vec<_>>().into_boxed_slice(), timeout }
     }
 
     /// The argv template slice. `Box<[…]>`-backed: the shape is frozen at construction, so there is
@@ -57,9 +54,7 @@ impl ExecAction {
     /// `true` iff any argv part references a diff-derived placeholder.
     #[must_use]
     pub fn references_diff_derived(&self) -> bool {
-        self.argv
-            .iter()
-            .any(|arg| arg.parts().iter().any(ArgPart::is_diff_derived))
+        self.argv.iter().any(|arg| arg.parts().iter().any(ArgPart::is_diff_derived))
     }
 }
 
@@ -82,9 +77,7 @@ pub struct ArgTemplate {
 impl ArgTemplate {
     #[must_use]
     pub fn new(parts: impl IntoIterator<Item = ArgPart>) -> Self {
-        Self {
-            parts: parts.into_iter().collect(),
-        }
+        Self { parts: parts.into_iter().collect() }
     }
 
     /// The ordered part slice.
@@ -222,10 +215,7 @@ mod tests {
     /// ratcheting `Sub.needs_diff` on env-only argv.
     #[test]
     fn env_var_arg_part_is_not_diff_derived() {
-        let part = ArgPart::EnvVar {
-            name: "HOME".into(),
-            default: None,
-        };
+        let part = ArgPart::EnvVar { name: "HOME".into(), default: None };
         assert!(!part.is_diff_derived());
         assert!(!part.is_multivalue());
     }
