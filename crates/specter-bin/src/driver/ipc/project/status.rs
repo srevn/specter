@@ -13,10 +13,9 @@ use std::path::Path;
 /// response is a fresh allocation (mostly `WireTime` strings; `WirePath` lossy projections for the
 /// two filesystem paths).
 ///
-/// **`sub_total` semantics** — every Sub currently in the engine registry, *including*
-/// discovery-minted Subs. An operator wanting "only static, only attached" derives it from `list`.
-/// The minimal `status` shape avoids carrying multiple counts that would skew interpretation at a
-/// glance.
+/// **`sub_total` semantics** — every Sub currently in the engine registry, *including* minted Subs.
+/// An operator wanting "only declared, only attached" derives it from `list`. The minimal `status`
+/// shape avoids carrying multiple counts that would skew interpretation at a glance.
 pub(crate) fn status(
     engine: &Engine,
     ds: &DriverState,
@@ -215,9 +214,9 @@ mod tests {
         assert_eq!(r.sub_disabled_toml, 1, "one TOML-disabled watch");
     }
 
-    /// `discovery_active` counts template-bearing Subs — the operator's "how many patterns" view.
-    /// Two dynamic blocks and one static watch attach; the count is exactly the template count
-    /// while `sub_total` carries all three.
+    /// `discovery_active` counts templates — the operator's "how many patterns" view. Two dynamic
+    /// blocks and one static watch attach; the count is exactly the template count while
+    /// `sub_total` carries all three.
     #[test]
     fn status_discovery_active_counts_templates() {
         use specter_core::Input;
@@ -256,7 +255,7 @@ mod tests {
             &config,
             &PathBuf::from("/etc/specter.toml"),
         );
-        assert_eq!(r.discovery_active, 2, "one per template-bearing Sub");
+        assert_eq!(r.discovery_active, 2, "one per template");
         assert_eq!(r.sub_total, 3, "templates count in the registry total too");
     }
 

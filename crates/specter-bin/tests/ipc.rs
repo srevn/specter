@@ -1639,11 +1639,11 @@ fn disable_client_unknown_name_exits_one() {
 
 /// `disable foo@/some/path` against a daemon with no such Sub returns `Err { code: "unknown_sub" }`
 /// — a typo (an `@`-bearing name the registry doesn't index) reports the structural truth (the name
-/// does not resolve), not a misleading dynamic-sub classification. The dynamic-vs-static
-/// discrimination is a property of the resolved Sub; this case never reaches that gate because the
-/// lookup is empty. The genuine dynamic-Sub gate is exercised at the driver-handler layer.
+/// does not resolve), not a misleading minted-Sub classification. Whether a Sub is minted is a
+/// property of the resolved Sub; this case never reaches that gate because the lookup is empty. The
+/// genuine minted-Sub gate is exercised at the driver-handler layer.
 #[test]
-fn disable_unknown_dynamic_shape_name_returns_unknown_sub() {
+fn disable_unknown_minted_shape_name_returns_unknown_sub() {
     let sb = Sandbox::new();
     let child = spawn_specter(&sb, std::iter::empty::<&str>());
     assert!(wait_for_socket(&sb.socket, STARTUP_DEADLINE));

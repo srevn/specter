@@ -378,7 +378,7 @@ pub(crate) struct StatusResponse {
     pub(crate) sub_disabled_runtime: usize,
     /// `engine.profiles().active_count()` — Profiles not in `ProfileState::Idle`.
     pub(crate) profile_active: usize,
-    /// Count of template-bearing Subs — the operator's "how many dynamic patterns are live" view.
+    /// Count of templates — the operator's "how many dynamic watches are live" view.
     pub(crate) discovery_active: usize,
     /// Currently-loaded config's source path. Every code path through `App::run` resolves one; a
     /// future stdin-TOML / ephemeral-config mode would widen this to `Option<WirePath>` honestly.
@@ -462,7 +462,7 @@ pub(crate) struct ListRow {
     pub(crate) sub: Option<WireId>,
     /// `ProfileId` projection of the Sub's hosting Profile. `None` for non-attached rows.
     pub(crate) profile: Option<WireId>,
-    /// `Sub::minted_by()` projection — `Some(_)` iff the Sub is discovery-minted, `None` for
+    /// `Sub::minted_by()` projection — `Some(_)` iff a template minted the Sub, `None` for
     /// operator-declared Subs (templates included) and for non-attached rows.
     pub(crate) minted_by: Option<WireId>,
 }
@@ -544,10 +544,9 @@ pub(crate) struct SubDetails {
     /// `Sub::settle().as_millis()` — this Sub's own debounce. On a `mint` row this is the discovery
     /// walk's debounce, distinct from the template knob `minted_settle_ms` the minted Subs inherit.
     pub(crate) settle_ms: u64,
-    /// `Sub::minted_by()` projection — `Some(_)` iff the Sub was minted by a discovery template.
-    /// Distinct from a TOML-declared Sub with the same anchor: the source id locates which template
-    /// produced the entry. Top-level rather than `spawn` payload: it is Sub identity, not reaction
-    /// state.
+    /// `Sub::minted_by()` projection — `Some(_)` iff a template minted the Sub, naming it apart
+    /// from a declared Sub on the same anchor. Top-level rather than `spawn` payload: it is Sub
+    /// identity, not reaction state.
     pub(crate) minted_by: Option<WireId>,
     /// Per-reaction payload, flattened — see [`WireReaction`].
     #[serde(flatten)]
@@ -583,7 +582,7 @@ pub(crate) enum WireReaction {
     },
     Mint {
         /// Minted Subs' debounce — the template's `settle` knob (the `[[watch]].settle` the
-        /// operator declared; the discovery Sub's own debounce is the top-level `settle_ms`).
+        /// operator declared; the template's own debounce is the top-level `settle_ms`).
         minted_settle_ms: u64,
         /// Minted Subs' effect scope.
         minted_scope: WireEffectScope,

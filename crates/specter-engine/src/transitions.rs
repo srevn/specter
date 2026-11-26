@@ -1635,7 +1635,7 @@ impl Engine {
     /// the Seed-flag machinery below is never consulted for discovery. The early return also
     /// bypasses the fold override *structurally* rather than by assertion: an operator `absorb`
     /// window suppresses Effects, discovery emits none, so minting proceeds under absorb and the
-    /// latch stays unconsumed — disabling the discovery Sub is the lever to stop minting.
+    /// latch stays unconsumed — disabling the template is the lever to stop minting.
     ///
     /// A Standard burst always fires the Standard consequence. A Seed burst splits three disjoint
     /// ways: a fresh Profile that witnessed activity owes a *first* fire (the Standard consequence
@@ -2823,7 +2823,7 @@ impl Engine {
                         spawn.log_output(),
                         history.has_fired,
                     ),
-                    // A Mint Sub never fires — discovery's "fire" is the reconcile's batch of
+                    // A template never fires — discovery's "fire" is the reconcile's batch of
                     // attachments, and the verdict floor classifies its Profile to Reconcile before
                     // the fire fork. Reaching here is a routing breach; the skip is the
                     // semantically correct degrade (a Mint must not fire), loud in dev so the
@@ -2831,7 +2831,7 @@ impl Engine {
                     Reaction::Mint { .. } => {
                         debug_assert!(
                             false,
-                            "emit_effects reached a Mint Sub \
+                            "emit_effects reached a template \
                              (sub = {sub_id:?}, profile = {profile_id:?})",
                         );
                         continue;
@@ -3262,13 +3262,13 @@ enum Consequence {
     /// Draining-gated** — like `SilentPin`, no Effect to defer.
     AbsorbFold,
     /// The discovery consequence — the Profile's scan shape is `MatchChain`, so a stable verdict
-    /// reconciles the match set ([`Engine::reconcile_matches`]: mint a dynamic Sub per chain
-    /// terminus × template) instead of firing Effects. Reached by the *shape pre-check* for any
-    /// intent, before the intent fork and the fold override run: reconcile is idempotent via the
-    /// registry dedup query, so first enumeration and re-reconcile are the same operation, and a
-    /// forced ceiling reconciles from the forced graft identically (`forced` is ignored — fresh
-    /// data, same consequence). Non-firing: never Draining-gated, never absorb-folded (structural —
-    /// the early return precedes the override), exits through the silent seal after the mints.
+    /// reconciles the match set ([`Engine::reconcile_matches`]: mint a Sub per chain terminus ×
+    /// template) instead of firing Effects. Reached by the *shape pre-check* for any intent, before
+    /// the intent fork and the fold override run: reconcile is idempotent via the registry dedup
+    /// query, so first enumeration and re-reconcile are the same operation, and a forced ceiling
+    /// reconciles from the forced graft identically (`forced` is ignored — fresh data, same
+    /// consequence). Non-firing: never Draining-gated, never absorb-folded (structural — the early
+    /// return precedes the override), exits through the silent seal after the mints.
     Reconcile,
 }
 

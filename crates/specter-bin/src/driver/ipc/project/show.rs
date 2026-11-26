@@ -2,10 +2,10 @@
 //! runtime-disabled, TOML-disabled, and Unknown.
 //!
 //! Resolution order matches the `disable` resolver in [`crate::driver::ipc`] so an operator who can
-//! `show foo` can also `disable foo`. Dynamic Subs are addressed through `list -o json`, not
-//! `show`: a synthesised name resolves through `SubRegistry::find_by_name` to a live id, but a
-//! local guard at the lookup site returns `Unknown` for any discovery-minted Sub. The verb's
-//! contract lives at its own callsite, not inside the index.
+//! `show foo` can also `disable foo`. Minted Subs are addressed through `list -o json`, not `show`:
+//! a synthesised name resolves through `SubRegistry::find_by_name` to a live id, but a local guard
+//! at the lookup site returns `Unknown` for any minted Sub. The verb's contract lives at its own
+//! callsite, not inside the index.
 
 use std::collections::BTreeSet;
 use std::time::Instant;
@@ -109,8 +109,8 @@ fn project_details(
             mode: WireAbsorbMode::from(w.mode),
         });
     // Honest render across the reaction sum: a Spawn Sub reports its own payload and history; a
-    // Mint Sub (discovery template) reports the knobs its minted Subs inherit plus the live minted
-    // count — never fire stats, which a template has none of.
+    // template reports the knobs its minted Subs inherit plus the live minted count — never fire
+    // stats, which a template has none of.
     let reaction = match sub.reaction() {
         Reaction::Spawn {
             params: SubParams { spawn, .. },
@@ -433,7 +433,7 @@ mod tests {
     /// but the verb's local guard maps its `minted_by` back to `Unknown` — preserving the operator
     /// contract that minted Subs are addressed through `list`, not `show`.
     #[test]
-    fn show_dynamic_sub_name_resolves_unknown() {
+    fn show_minted_sub_name_resolves_unknown() {
         let mut engine = Engine::new();
         let minted = mint_one(&mut engine);
         let name = engine.subs().get(minted).expect("live").name.to_string();
@@ -455,7 +455,7 @@ mod tests {
 
     /// A discovery **template** is operator-declared (no `minted_by`), so `show` resolves it
     /// `Active` like any static watch — only the minted set maps to `Unknown`. The fixture goes
-    /// through the real config lowering: a glob-bearing path lowers to a template-bearing Sub.
+    /// through the real config lowering: a glob-bearing path lowers to a template.
     #[test]
     fn show_discovery_template_returns_active() {
         let tmp = tempfile::TempDir::new().unwrap();

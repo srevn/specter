@@ -621,8 +621,7 @@ mod tests {
     }
 
     /// `SubAttached.minted_by = Some(_)` renders an extra `minted_by=N` field; `None` omits it
-    /// entirely. Operators distinguishing operator-declared vs discovery-minted Subs read the
-    /// presence/absence of the field.
+    /// entirely. Operators tell a declared Sub from a minted one by the field's presence.
     #[test]
     fn render_sub_attached_discovery_field_optional() {
         let mut static_attach = String::new();
@@ -642,9 +641,9 @@ mod tests {
             "None must omit minted_by: {static_attach:?}",
         );
 
-        let mut dynamic_attach = String::new();
+        let mut minted_attach = String::new();
         render(
-            &mut dynamic_attach,
+            &mut minted_attach,
             &WireDiagnostic::SubAttached {
                 at: WireTime::from(UNIX_EPOCH),
                 sub: WireId(2),
@@ -653,7 +652,7 @@ mod tests {
             },
             Styler::Plain,
         );
-        assert!(dynamic_attach.contains("minted_by=99"));
+        assert!(minted_attach.contains("minted_by=99"));
     }
 
     /// `SubDetached.reason` renders through the typed [`WireDetachReason`] label table

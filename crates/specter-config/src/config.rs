@@ -2479,8 +2479,8 @@ mod tests {
         assert_eq!(errors.len(), 5, "got {errors:?}");
     }
 
-    /// FS-root pattern `/*` lowers to a discovery Sub anchored at `/` — the bare-root anchor with
-    /// no parent edge.
+    /// FS-root pattern `/*` lowers to a template anchored at `/` — the bare-root anchor with no
+    /// parent edge.
     #[test]
     fn fs_root_glob_pattern_accepted() {
         let toml = "[[watch]]\nname = \"root\"\npath = \"/*\"\nactions = [{ exec = [\"echo\"] }]";

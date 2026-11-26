@@ -559,17 +559,16 @@ pub enum Diagnostic {
     /// Informational — running the per-file command for every file in the initial tree is never the
     /// intent; per-file reactions begin from the post-command baseline the fire establishes.
     PerFileFireSkippedOnFreshSeed { profile: ProfileId },
-    /// A Sub has been registered with the engine and assigned `sub`. Emitted by `attach_sub_inner`
-    /// on every successful insert — static (operator-declared) attaches and discovery-minted
-    /// dynamic attaches alike.
+    /// A Sub has been registered with the engine and assigned `sub`, on every insert — a declared
+    /// Sub's and a minted one's alike.
     ///
-    /// Pure operator narration: the bin logs it (INFO for static, DEBUG for dynamic). Hot-reload
-    /// identity resolution does *not* route through this stream — name → `SubId` is the engine's
-    /// own authoritative `by_name` index, resolved registry-side. Tests read it via
+    /// Pure operator narration: the bin logs it (INFO for a declared Sub, DEBUG for a minted one).
+    /// Hot-reload identity resolution does *not* route through this stream — name → `SubId` is the
+    /// engine's own authoritative `by_name` index, resolved registry-side. Tests read it via
     /// `testkit::first_attached_sub` to capture the minted id.
     ///
-    /// `name` carries the Sub's user-facing name verbatim — for static Subs the operator's
-    /// `[[watch]].name`; for dynamic Subs the engine's synthesized `<template_name>@<matched_path>`
+    /// `name` carries the Sub's user-facing name verbatim — for a declared Sub the operator's
+    /// `[[watch]].name`; for a minted one the engine's synthesized `<template_name>@<matched_path>`
     /// shape. `minted_by` distinguishes the two.
     SubAttached {
         sub: SubId,

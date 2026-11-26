@@ -23,7 +23,7 @@ use super::{project_wall, settle_ms};
 ///
 /// Order of insertion mirrors the engine-wins conflict-resolution rule (a name in the engine *and*
 /// the runtime-disabled set can only race during an in-flight IPC `disable`):
-/// 1. Engine-attached rows first (every Sub in the registry — static AND dynamic).
+/// 1. Engine-attached rows first (every Sub in the registry — declared AND minted).
 ///    [`BTreeMap::insert`] semantics overwrite by key, but no other insertion follows for the same
 ///    name; the engine row is the authoritative one.
 /// 2. Runtime-disabled rows — <code>[BTreeMap::entry].or_insert_with</code> skips when the engine
@@ -73,8 +73,8 @@ fn project_attached(sid: SubId, sub: &Sub, engine: &Engine, ds: &DriverState) ->
     let anchor = profile
         .and_then(|p| engine.tree().path_of(p.resource()))
         .map(|arc| WirePath::from(&arc));
-    // Honest render across the reaction sum: a Mint Sub (discovery template) has no fire history —
-    // its stat columns stay `None`, attributed by the `reaction` discriminator.
+    // Honest render across the reaction sum: a template has no fire history — its stat columns stay
+    // `None`, attributed by the `reaction` discriminator.
     let history = sub.fire_history();
     let last_fired_at = history
         .and_then(|h| h.last_fired_at)
@@ -338,7 +338,7 @@ mod tests {
 
     /// A minted Sub's row names its template.
     #[test]
-    fn list_dynamic_sub_carries_minted_by() {
+    fn list_minted_sub_carries_minted_by() {
         let mut engine = Engine::new();
         let minted = mint_one(&mut engine);
         let template = engine

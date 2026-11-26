@@ -4,10 +4,10 @@
 //! watched tree settles. A request ([`SubAttachRequest`]) is addressed to one anchor or to every
 //! match of a pattern ([`SubAttachTarget`]) and says a watch's knobs once. At rest the reaction is
 //! a two-variant sum ([`Reaction`]): `Spawn` runs a program (a CFG-shaped op IR — [`ActionProgram`]
-//! holds a `Box<[ProgramOp]>` walked by a `u32` cursor at the actuator), `Mint` attaches a dynamic
-//! Sub per matched chain terminus (discovery). The surface syntax (validation-side `Action` tree,
-//! lives in `specter-config`) folds into the program at validation time; the engine and actuator
-//! see only the lowered form.
+//! holds a `Box<[ProgramOp]>` walked by a `u32` cursor at the actuator), `Mint` mints a Sub per
+//! matched chain terminus (discovery). The surface syntax (validation-side `Action` tree, lives in
+//! `specter-config`) folds into the program at validation time; the engine and actuator see only
+//! the lowered form.
 //!
 //! v1 surface is argv-only — no shell variant.
 
@@ -826,7 +826,7 @@ impl SubRegistry {
     /// The `Spawn` arm's mutable fire history for `sub` — the shared body of the four fire-history
     /// edges. Two misses, two loudnesses: a stale id is a silent `None` (the history already died
     /// with the slotmap entry — a benign detach race), while a `Mint` hit is a **debug-loud**
-    /// `None` (a fire-history write on a discovery Sub is a routing logic error — discovery fires
+    /// `None` (a fire-history write on a template is a routing logic error — discovery fires
     /// attachments, never Effects). `edge` names the calling edge in the assert.
     fn spawn_history_mut(&mut self, sub: SubId, edge: &str) -> Option<&mut FireHistory> {
         match &mut self.subs.get_mut(sub)?.reaction {
@@ -834,7 +834,7 @@ impl SubRegistry {
             Reaction::Mint { .. } => {
                 debug_assert!(
                     false,
-                    "{edge} reached a Mint Sub — discovery fires attachments, never Effects \
+                    "{edge} reached a template — discovery fires attachments, never Effects \
                      (sub = {sub:?})",
                 );
                 None
@@ -1303,25 +1303,25 @@ mod tests {
         assert!(reg.find_by_name("build").is_none());
     }
 
-    /// `by_name` indexes every Sub regardless of provenance — both a static operator name and a
-    /// minted `<template_name>@<matched_path>` resolve through `find_by_name`. The two populations
-    /// are disjoint by the config validator's `@`-byte reservation, so their indexed union is unique.
+    /// `by_name` indexes every Sub regardless of provenance — both an operator's name and a minted
+    /// `<template_name>@<matched_path>` resolve through `find_by_name`. The two populations are
+    /// disjoint by the config validator's `@`-byte reservation, so their indexed union is unique.
     #[test]
-    fn by_name_indexes_static_and_dynamic_subs() {
+    fn by_name_indexes_declared_and_minted_subs() {
         let mut reg = SubRegistry::new();
         let pid = ProfileId::default();
-        let static_id = reg.insert(declared(pid, "foo"));
-        let dynamic_id = reg.insert(minted(pid, "p@/tmp/x", SubId::default()));
+        let declared_id = reg.insert(declared(pid, "foo"));
+        let minted_id = reg.insert(minted(pid, "p@/tmp/x", SubId::default()));
 
         assert_eq!(
             reg.find_by_name("foo"),
-            Some(static_id),
-            "static name resolves",
+            Some(declared_id),
+            "a declared name resolves",
         );
         assert_eq!(
             reg.find_by_name("p@/tmp/x"),
-            Some(dynamic_id),
-            "synthesised dynamic name resolves",
+            Some(minted_id),
+            "a synthesised minted name resolves",
         );
         assert!(
             reg.find_by_name("nope").is_none(),
@@ -1329,19 +1329,19 @@ mod tests {
         );
     }
 
-    /// `remove` drops the dynamic Sub's `by_name` entry just like a static one — and `by_profile`
-    /// accounting is symmetric across the static/dynamic axis.
+    /// `remove` drops a minted Sub's `by_name` entry just like a declared one's — and `by_profile`
+    /// accounting is symmetric across the two.
     #[test]
-    fn remove_clears_by_name_for_dynamic_sub() {
+    fn remove_clears_by_name_for_minted_sub() {
         let mut reg = SubRegistry::new();
         let pid = ProfileId::default();
-        let dynamic_id = reg.insert(minted(pid, "p@/tmp/x", SubId::default()));
-        assert_eq!(reg.find_by_name("p@/tmp/x"), Some(dynamic_id));
+        let minted_id = reg.insert(minted(pid, "p@/tmp/x", SubId::default()));
+        assert_eq!(reg.find_by_name("p@/tmp/x"), Some(minted_id));
 
-        let _ = reg.remove(dynamic_id).expect("dynamic removed");
+        let _ = reg.remove(minted_id).expect("minted removed");
         assert!(
             reg.find_by_name("p@/tmp/x").is_none(),
-            "dynamic Sub's by_name entry dropped on remove",
+            "the minted Sub's by_name entry dropped on remove",
         );
         assert!(
             reg.at(pid).is_empty(),
@@ -1754,7 +1754,7 @@ mod tests {
         ));
         assert!(
             !reg.has_per_stable_file_sub(pid),
-            "a discovery Sub's reaction is minting, never a per-file Effect",
+            "a template's reaction is minting, never a per-file Effect",
         );
         reg.insert(Sub::declared(
             pid,

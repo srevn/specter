@@ -221,7 +221,7 @@ impl PatternSpec {
     }
 
     /// The literal-prefix anchor path: `/` plus the leading consecutive `Literal` segments — where
-    /// a discovery Sub for this pattern attaches. Total by the parse invariant
+    /// a template for this pattern attaches. Total by the parse invariant
     /// (`components[0..literal_prefix_len]` are all `Literal`, root included), so the fold is
     /// always absolute; a `Glob` inside the prefix is an invariant breach (`debug_assert!`),
     /// skipped rather than rendered in release.

@@ -705,8 +705,7 @@ fn run_initial_attach_attaches_static_only_config() {
     let _ = rig.driver.begin_shutdown();
 }
 
-/// A config with a dynamic `[[watch]]` lowers to a discovery Sub — a template-bearing Sub in the
-/// one registry.
+/// A config with a dynamic `[[watch]]` lowers to a template in the one registry.
 #[test]
 fn run_initial_attach_registers_discovery_sub_for_dynamic_watch() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -721,7 +720,7 @@ fn run_initial_attach_registers_discovery_sub_for_dynamic_watch() {
         .engine
         .subs()
         .find_by_name("logs")
-        .expect("discovery Sub 'logs' registered");
+        .expect("template 'logs' registered");
     let sub = rig.driver.engine.subs().get(sid).expect("live Sub");
     assert!(sub.is_template(), "dynamic watch lowers to a template");
 
@@ -976,9 +975,9 @@ actions   = [{{ exec = ["true"] }}]
     let _ = rig.driver.begin_shutdown();
 }
 
-/// Reload that adds a dynamic [[watch]] attaches a discovery Sub.
+/// Reload that adds a dynamic [[watch]] attaches its template.
 #[test]
-fn reload_added_dynamic_watch_attaches_discovery_sub() {
+fn reload_added_dynamic_watch_attaches_its_template() {
     let tmp = tempfile::TempDir::new().unwrap();
     let initial_text = String::new();
     let new_text = format!(
@@ -1008,16 +1007,16 @@ actions   = [{{ exec = ["true"] }}]
         .engine
         .subs()
         .find_by_name("logs")
-        .expect("discovery Sub 'logs' attached on reload");
+        .expect("template 'logs' attached on reload");
     let sub = rig.driver.engine.subs().get(sid).expect("live Sub");
     assert!(sub.is_template());
 
     let _ = rig.driver.begin_shutdown();
 }
 
-/// Reload that removes a dynamic [[watch]] detaches the discovery Sub.
+/// Reload that removes a dynamic [[watch]] detaches its template.
 #[test]
-fn reload_removed_dynamic_watch_detaches_discovery_sub() {
+fn reload_removed_dynamic_watch_detaches_its_template() {
     let tmp = tempfile::TempDir::new().unwrap();
     let initial_text = format!(
         r#"
@@ -1129,9 +1128,8 @@ actions   = [{{ exec = ["{exec}"] }}]
     let _ = rig.driver.begin_shutdown();
 }
 
-/// Static→dynamic migration via path edit. Template presence differs across the pair, so the diff
-/// classifies `modified_identity`; the engine swaps the static Sub for a discovery Sub under the
-/// same name.
+/// Static→dynamic migration via path edit. The target differs across the pair, so the diff classifies
+/// `modified_identity`; the engine swaps the static Sub for a template under the same name.
 #[test]
 fn reload_static_to_dynamic_migration_swaps_sub_kind() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -1184,7 +1182,7 @@ actions   = [{{ exec = ["true"] }}]
         .engine
         .subs()
         .find_by_name("foo")
-        .expect("discovery Sub 'foo' attached post-migration");
+        .expect("template 'foo' attached post-migration");
     assert_ne!(dyn_sid, static_sid, "wholesale replace, not a rebind");
     assert!(
         rig.driver
@@ -1231,7 +1229,7 @@ actions   = [{{ exec = ["true"] }}]
         .engine
         .subs()
         .find_by_name("foo")
-        .expect("discovery Sub 'foo' attached");
+        .expect("template 'foo' attached");
     assert!(
         rig.driver
             .engine
@@ -1820,9 +1818,8 @@ fn dispatch_reload_does_not_bump_counters_on_parse_fail() {
 /// `by_name` insert.
 ///
 /// The test exercises both watch kinds in one pass: the initial config holds one static Sub; the
-/// on-disk drift adds another static Sub AND a dynamic `[[watch]]` (a discovery Sub). The
-/// `last_reload_via = Startup` assertion is the secondary behavioural pin on the `Startup`
-/// attribution.
+/// on-disk drift adds another static Sub AND a dynamic `[[watch]]` (a template). The `last_reload_via
+/// = Startup` assertion is the secondary behavioural pin on the `Startup` attribution.
 #[test]
 fn startup_drift_after_initial_attach_does_not_double_attach() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -1840,9 +1837,8 @@ actions   = [{{ exec = ["true"] }}]
     );
     let boot_config = Config::from_str(&boot_text).expect("boot config parses");
 
-    // On-disk config — TOCTOU drift adds a static Sub `bar` AND a dynamic `[[watch]]` `logs`
-    // (lowered to a discovery Sub). Both kinds exercise the registry `debug_assert!` site under a
-    // buggy boot order.
+    // On-disk config — TOCTOU drift adds a static Sub `bar` AND a dynamic `[[watch]]` `logs` (lowered
+    // to a template). Both kinds exercise the registry `debug_assert!` site under a buggy boot order.
     let drift_text = format!(
         r#"
 [[watch]]
@@ -1885,7 +1881,7 @@ actions   = [{{ exec = ["true"] }}]
         .engine
         .subs()
         .find_by_name("logs")
-        .expect("discovery Sub 'logs' attached exactly once");
+        .expect("template 'logs' attached exactly once");
     assert!(
         rig.driver
             .engine
@@ -3015,8 +3011,8 @@ fn ipc_disable_minted_sub_returns_minted_sub_no_op() {
 
 /// A discovery **template** is an operator-declared Sub and carries the full disable/enable surface
 /// — only the minted set is the refusal class. Disable detaches it (cascading any minted Subs
-/// engine-side) and records the override; enable clears the override and re-attaches a
-/// template-bearing Sub through the same lowering the initial attach used.
+/// engine-side) and records the override; enable clears the override and re-attaches a template
+/// through the same lowering the initial attach used.
 #[test]
 fn ipc_disable_and_enable_discovery_template_round_trip() {
     let tmp = tempfile::TempDir::new().unwrap();
