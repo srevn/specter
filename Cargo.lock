@@ -795,6 +795,7 @@ dependencies = [
  "nix",
  "slotmap",
  "smallvec",
+ "specter-actuator",
  "specter-core",
  "tempfile",
  "tracing",

@@ -20,6 +20,7 @@
 mod state;
 use crate::EffectCompleteSender;
 use crate::env::EnvSnapshot;
+use crate::os::OsSpawner;
 use crate::spawner::Spawner;
 use crossbeam::channel::{Receiver, Sender};
 use specter_core::{EffectCompletion, EffectOp};
@@ -50,8 +51,7 @@ pub fn default_concurrency() -> NonZeroUsize {
 /// - [`SubprocessActuator::shutdown`] (the SIGTERM → grace → SIGKILL sequence).
 /// - [`crate::timer::arm_timer`] (per-step deadline enforcement).
 ///
-/// Default for production; tests may override via `SubprocessActuator::new_with_grace` /
-/// `SubprocessActuator::new_with_grace_and_env`.
+/// Default for production; tests override it through `SubprocessActuator::new_with_grace_and_env`.
 pub(crate) const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
 /// Channels the actuator's controller owns for the lifetime of [`SubprocessActuator::run`].
@@ -137,11 +137,7 @@ impl SubprocessActuator {
     /// rendering, etc.) without depending on the ambient process env. For tests that *also* need to
     /// override the tmp directory (the tmp-dir-from-state fence), see
     /// [`Self::new_with_grace_and_env_and_tmp`].
-    ///
-    /// Gated to match the test module (`cfg(all(test, feature = "testkit"))`) — without `testkit`,
-    /// the test module that consumes this constructor is excluded too, so the function would
-    /// otherwise be flagged as dead code under `cargo test --lib` (no features).
-    #[cfg(all(test, feature = "testkit"))]
+    #[cfg(test)]
     pub(crate) fn new_with_grace_and_env(
         concurrency: NonZeroUsize, grace: Duration, env: Arc<EnvSnapshot>,
     ) -> Self {
@@ -157,7 +153,7 @@ impl SubprocessActuator {
     /// Test-only constructor that lets callers override every piece of startup-immutable state —
     /// `temp_dir` and `actuator_pid` alongside the env and grace. The single use is the fence that
     /// asserts `DiffTmpFile::create` reads from `ActuatorState.temp_dir`, not `std::env::temp_dir()`.
-    #[cfg(all(test, feature = "testkit"))]
+    #[cfg(test)]
     pub(crate) fn new_with_grace_and_env_and_tmp(
         concurrency: NonZeroUsize, grace: Duration, env: Arc<EnvSnapshot>,
         temp_dir: Arc<std::path::Path>, actuator_pid: u32,
@@ -186,19 +182,22 @@ impl SubprocessActuator {
     /// parent never aborts mid-fanout and leaves orphans on PID 1.
     ///
     /// `engine_in` is `&dyn` — the controller borrows the sink for the duration of [`Self::run`]
-    /// without owning it. The closure surrounding the spawn site in the bin keeps the `Box<dyn
-    /// EffectCompleteSender>` owned for the call's lifetime and passes `&*box` here, symmetric with
-    /// the `&dyn Spawner` calling convention this function already uses. Wait threads send
-    /// [`EffectCompletion`] envelopes through `self.reap_tx`; only the controller calls
-    /// `engine_in.send(...)`, so a single-threaded `&dyn` is sufficient.
+    /// without owning it; the bin's spawn-site closure keeps the `Box<dyn EffectCompleteSender>`
+    /// owned for the call's lifetime. Wait threads send [`EffectCompletion`] envelopes through
+    /// `self.reap_tx`; only the controller calls `engine_in.send(...)`, so a single-threaded `&dyn`
+    /// is sufficient.
+    pub fn run(&mut self, wiring: RunWiring, engine_in: &dyn EffectCompleteSender) {
+        self.run_with(wiring, engine_in, &OsSpawner);
+    }
+
+    /// [`Self::run`] over `spawner` — the entry the pool's tests reach with their mock.
     ///
-    /// `wiring` is taken by value: the controller owns the channels for the lifetime of
-    /// [`Self::run`], so the caller hands off and is freed from any borrow-tracking. The `select!`
-    /// block borrows channels by reference per-iteration, which is what trips clippy's
-    /// `needless_pass_by_value` — keep the allow to express "owned by run, used by-ref inside the
-    /// body" honestly.
+    /// `wiring` is taken by value: the controller owns the channels for the lifetime of the run, so
+    /// the caller hands off and is freed from any borrow-tracking. The `select!` block borrows
+    /// channels by reference per-iteration, which is what trips clippy's `needless_pass_by_value` —
+    /// keep the allow to express "owned by the run, used by-ref inside the body" honestly.
     #[allow(clippy::needless_pass_by_value)]
-    pub fn run(
+    pub(crate) fn run_with(
         &mut self, wiring: RunWiring, engine_in: &dyn EffectCompleteSender, spawner: &dyn Spawner,
     ) {
         let RunWiring { effects_rx, shutdown_rx, hard_shutdown_rx, hard_shutdown_done_tx } = wiring;
@@ -352,7 +351,7 @@ impl Drop for SubprocessActuator {
     }
 }
 
-#[cfg(all(test, feature = "testkit"))]
+#[cfg(test)]
 #[allow(
     clippy::items_after_statements,
     clippy::missing_const_for_fn,
@@ -559,7 +558,7 @@ mod tests {
                         hard_shutdown_rx,
                         hard_shutdown_done_tx,
                     };
-                    a.run(wiring, &*engine_in, spawner_clone.as_ref());
+                    a.run_with(wiring, &*engine_in, spawner_clone.as_ref());
                 })
                 .expect("spawn controller");
             Self {

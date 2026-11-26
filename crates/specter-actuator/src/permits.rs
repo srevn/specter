@@ -17,7 +17,7 @@ use std::num::NonZeroUsize;
 /// type system; the public boundary ([`crate::SubprocessActuator::new`]) takes [`NonZeroUsize`]
 /// directly, so the invariant flows in by typing rather than by runtime sentinel.
 #[derive(Debug)]
-pub struct Permits {
+pub(crate) struct Permits {
     /// Receiver side: acquiring a token consumes one.
     rx: Receiver<()>,
     /// Sender side: releasing a token (via [`Permit::drop`]) returns one. Cloned into each [`Permit`]
@@ -51,7 +51,7 @@ impl Permits {
 /// RAII permit guard. Releases on drop.
 #[must_use]
 #[derive(Debug)]
-pub struct Permit {
+pub(crate) struct Permit {
     tx: Sender<()>,
 }
 

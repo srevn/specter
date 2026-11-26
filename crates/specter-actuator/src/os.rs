@@ -31,15 +31,8 @@ use std::sync::Arc;
 ///
 /// cwd is passed to `Command::current_dir` and validated at spawn time: a cwd the child cannot enter
 /// fails the spawn with an `io::Error`.
-#[derive(Debug, Default)]
-pub struct OsSpawner;
-
-impl OsSpawner {
-    #[must_use]
-    pub const fn new() -> Self {
-        Self
-    }
-}
+#[derive(Debug)]
+pub(crate) struct OsSpawner;
 
 impl Spawner for OsSpawner {
     fn spawn(&self, stages: &[StageSpec<'_>], cwd: &Path) -> io::Result<Vec<SpawnHandles>> {
@@ -329,7 +322,7 @@ mod recovery_tests {
     /// (the pid is gone or has been recycled — either way, the zombie has been drained).
     #[test]
     fn signaler_reap_blocking_drains_orphan_after_dropped_waiter() {
-        let spawner = OsSpawner::new();
+        let spawner = OsSpawner;
         // `/bin/sleep 30` keeps the child alive long enough that the SIGKILL + reap exercises the
         // actual zombie-cleanup path (not a child that exited before we got around to reaping).
         let sleeper = stage(&["/bin/sleep", "30"]);
@@ -368,7 +361,7 @@ mod recovery_tests {
     /// `/bin/sleep`.
     #[test]
     fn signaler_reap_blocking_is_idempotent_after_first_reap() {
-        let spawner = OsSpawner::new();
+        let spawner = OsSpawner;
         let cwd = Path::new("/tmp");
 
         let handles =
@@ -406,7 +399,7 @@ mod pipe_tests {
     #[test]
     fn pipe_echo_then_cat_completes_ok() {
         let stages = [stage(&["/bin/echo", "hello"]), stage(&["/bin/cat"])];
-        let children = OsSpawner::new().spawn(&stages, Path::new("/tmp")).expect("spawn");
+        let children = OsSpawner.spawn(&stages, Path::new("/tmp")).expect("spawn");
         assert_eq!(children.len(), 2);
         let cat = children[1].pid;
 
@@ -427,8 +420,7 @@ mod pipe_tests {
                 "for fd in 3 4 5 6 7 8 9; do [ -e /dev/fd/$fd ] && exit 1; done; cat >/dev/null",
             ])
         });
-        let handles =
-            pipe::join(OsSpawner::new().spawn(&stages, Path::new("/tmp")).expect("spawn"));
+        let handles = pipe::join(OsSpawner.spawn(&stages, Path::new("/tmp")).expect("spawn"));
         assert_eq!(handles.waiter.wait().expect("wait"), EffectOutcome::Ok);
     }
 
@@ -444,7 +436,7 @@ mod pipe_tests {
     /// verify the kernel-level disposition).
     #[test]
     fn pipe_partial_spawn_failure_rolls_back_prior_stages() {
-        let spawner = OsSpawner::new();
+        let spawner = OsSpawner;
         let sleeper = stage(&["/bin/sleep", "30"]);
         // ENOENT — exec(2) returns ENOENT, std::process::Command surfaces it as io::Error with kind
         // NotFound. Use a path that's guaranteed not to exist on any sane host.
@@ -495,8 +487,7 @@ mod stdio_tests {
         stdin_from_pipe();
         let check = sh("[ /dev/stdin -ef /dev/null ] && [ /dev/stdout -ef /dev/null ] \
              && [ /dev/stderr -ef /dev/null ]");
-        let handles =
-            pipe::join(OsSpawner::new().spawn(&[check], Path::new("/tmp")).expect("spawn"));
+        let handles = pipe::join(OsSpawner.spawn(&[check], Path::new("/tmp")).expect("spawn"));
         assert_eq!(handles.waiter.wait().expect("wait"), EffectOutcome::Ok);
     }
 
@@ -514,8 +505,7 @@ mod stdio_tests {
             sh("read l && [ \"$l\" = specter-link ] && [ /dev/stdout -ef /dev/null ] \
                 && [ /dev/stderr -ef /dev/null ]"),
         ];
-        let handles =
-            pipe::join(OsSpawner::new().spawn(&stages, Path::new("/tmp")).expect("spawn"));
+        let handles = pipe::join(OsSpawner.spawn(&stages, Path::new("/tmp")).expect("spawn"));
         assert_eq!(handles.waiter.wait().expect("wait"), EffectOutcome::Ok);
     }
 }
@@ -591,7 +581,7 @@ mod tests {
         // The actual assertion: `OsSpawner::spawn` must succeed. Without the `pre_exec` hook, Rust
         // std would route through posix_spawn and fail with EBADF here. With the hook, fork+exec is
         // used and succeeds.
-        let spawner = OsSpawner::new();
+        let spawner = OsSpawner;
         let cwd = Path::new("/tmp");
         let handles = pipe::join(
             spawner

@@ -27,7 +27,7 @@ use std::sync::Arc;
 /// The lifetime `'a` ties the borrow to the source data — the [`specter_core::Effect`] and the
 /// optional diff-tmp path, both of which outlive the synchronous [`Spawner`] call.
 #[derive(Clone, Debug)]
-pub struct EnvVar<'a> {
+pub(crate) struct EnvVar<'a> {
     pub key: &'static str,
     pub value: Cow<'a, str>,
 }
@@ -39,11 +39,10 @@ pub struct EnvVar<'a> {
 /// the pool — each stage's timer, a pipe joined into one job ([`crate::pipe::join`]) — is decided
 /// above it, the same for every implementation.
 ///
-/// Production = [`super::OsSpawner`] (`std::process::Command`); tests = `testkit::MockSpawner`. The
-/// actuator controller is single-threaded and is the sole caller — `Send` lets the bin's `Box<dyn
-/// Spawner>` move into the actuator thread (see `specter-bin`'s `spawn_actuator_thread`); no caller
-/// ever shares `&dyn Spawner` across threads, so `Sync` is not part of the contract.
-pub trait Spawner: Send {
+/// Production = [`crate::os::OsSpawner`] (`std::process::Command`); tests = `testkit::MockSpawner`.
+/// The controller thread is the sole caller and never hands its `&dyn Spawner` to another thread,
+/// so the trait asks for neither `Send` nor `Sync`.
+pub(crate) trait Spawner {
     /// Spawns one process per stage, each stage's stdout the next stage's stdin, and returns each
     /// stage's handles in stage order; an exec is one stage. Where stage K fails to spawn,
     /// implementations SIGKILL and reap every stage before K and close every link before returning
@@ -54,7 +53,7 @@ pub trait Spawner: Send {
 /// One stage's command as the resolver rendered it: the program, its arguments, and the env it adds
 /// to the daemon's own.
 #[derive(Debug)]
-pub struct StageSpec<'a> {
+pub(crate) struct StageSpec<'a> {
     pub program: String,
     pub args: Vec<String>,
     pub env: Vec<EnvVar<'a>>,
@@ -72,7 +71,7 @@ pub struct StageSpec<'a> {
 /// `signaler` is `Arc<dyn>` because its co-owners outlive each other independently: the job's
 /// `RunningJob::signaler`, the wait thread's backstop, a timed stage's timer thread, and a joined
 /// pipe's waiter and combined signaler.
-pub struct SpawnHandles {
+pub(crate) struct SpawnHandles {
     pub pid: u32,
     pub waiter: Box<dyn ChildWaiter>,
     pub signaler: Arc<dyn ChildSignaler>,
@@ -85,7 +84,7 @@ impl std::fmt::Debug for SpawnHandles {
 }
 
 /// Owned by the wait thread; consumed via `Box<Self>` at wait time. Single-use.
-pub trait ChildWaiter: Send {
+pub(crate) trait ChildWaiter: Send {
     /// Block until the child exits; return the outcome. `io::Error` on system-level wait failure
     /// (rare; e.g. ECHILD from external reaping); the wait thread treats this as
     /// `Failed(Termination::Internal)`.
@@ -112,7 +111,7 @@ pub trait ChildWaiter: Send {
 /// but live on systems with high pid pressure; v2 may switch to process descriptors (pidfd / pdfork).
 ///
 /// `OsChildWaiter::wait` lives in the crate-private `super::os`.
-pub trait ChildSignaler: Send + Sync {
+pub(crate) trait ChildSignaler: Send + Sync {
     /// Send SIGTERM. ESRCH (child already gone) is collapsed to `Ok(())`. Short-circuits to `Ok(())`
     /// if the paired waiter has already reported completion.
     fn signal_term(&self) -> io::Result<()>;

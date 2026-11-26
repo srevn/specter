@@ -1,4 +1,5 @@
-//! Shared test fixtures for the integration suite. Real subprocesses via [`OsSpawner`].
+//! Shared test fixtures for the integration suite: the actuator as the bin runs it, real subprocesses
+//! and all.
 
 #![allow(
     dead_code,
@@ -14,7 +15,7 @@
 use compact_str::CompactString;
 use crossbeam::channel::{Receiver, Sender, bounded, unbounded};
 use specter_actuator::{
-    EffectCompleteSender, OsSpawner, RunWiring, SendError as ActSendError, SubprocessActuator,
+    EffectCompleteSender, RunWiring, SendError as ActSendError, SubprocessActuator,
 };
 use specter_core::program::{BranchTarget, ProgramBuilder, SpawnBody};
 use specter_core::testkit::single_exec_program;
@@ -29,9 +30,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-/// Test adapter that lifts the actuator's `(sub, key, outcome)` triple into the engine-side
-/// `Input::EffectComplete` envelope so the test's `Receiver<Input>` continues to observe completions
-/// in the pre-trait shape. Mirrors the bin's `DriverEffectSender` without dragging in the bin's
+/// Test adapter that lifts the actuator's [`EffectCompletion`] into the engine-side
+/// `Input::EffectComplete` envelope, so the test's `Receiver<Input>` observes completions in the
+/// engine's vocabulary. Mirrors the bin's `WakingEffectCompleteSender` without dragging in the bin's
 /// transport identity.
 struct TestEngineIn(Sender<Input>);
 
@@ -89,12 +90,10 @@ impl Harness {
         let join = thread::Builder::new()
             .name("test-actuator-controller".into())
             .spawn(move || {
-                let spawner = Arc::new(OsSpawner::new());
                 let mut a = SubprocessActuator::new(concurrency);
                 a.run(
                     RunWiring { effects_rx, shutdown_rx, hard_shutdown_rx, hard_shutdown_done_tx },
                     &engine_in,
-                    spawner.as_ref(),
                 );
             })
             .expect("spawn controller");

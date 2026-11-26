@@ -1,6 +1,6 @@
 //! Test fixtures behind the `testkit` Cargo feature.
 //!
-//! [`MockSpawner`] is a pure-Rust [`crate::spawner::Spawner`] that records every stage it spawns
+//! [`MockSpawner`] is a pure-Rust stand-in for the crate's spawner that records every stage it spawns
 //! into a `Mutex<Vec<SpawnRecord>>` and returns handles whose `wait` blocks on a per-stage channel
 //! until the test signals [`MockSpawner::complete`]. The signaler records `signal_term` /
 //! `signal_kill` calls. This lets coalescing, concurrency, and shutdown logic be tested
@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// One recorded stage — what the controller passed to [`Spawner::spawn`], a stage at a time.
+/// One recorded stage — what the controller passed to `Spawner::spawn`, a stage at a time.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SpawnRecord {
     pub pid: u32,
@@ -34,7 +34,7 @@ pub enum SignalRecord {
     Reap(u32),
 }
 
-/// Pure-Rust [`Spawner`] test fixture.
+/// Pure-Rust `Spawner` test fixture.
 #[derive(Debug)]
 pub struct MockSpawner {
     next_pid: AtomicU32,
@@ -64,11 +64,6 @@ impl MockSpawner {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Drain and return the recorded spawn calls.
-    pub fn take_spawns(&self) -> Vec<SpawnRecord> {
-        std::mem::take(&mut self.spawns.lock().unwrap())
     }
 
     /// Snapshot the recorded spawn calls without draining.

@@ -12,11 +12,11 @@
 //! [`specter_core::EffectOutcome::Failed`]; the engine refuses to re-baseline on Failed. Shutdown
 //! sequences SIGTERM → 5s grace → SIGKILL.
 //!
-//! Process I/O is abstracted behind three small traits — [`Spawner`], [`ChildWaiter`],
-//! [`ChildSignaler`] — so coalescing / concurrency / shutdown logic is testable without forking real
-//! children. The engine-facing completion sink is similarly behind a trait ([`EffectCompleteSender`])
-//! so the actuator never names the engine's `Input` vocabulary. Production impls are [`OsSpawner`]
-//! and the bin-side `DriverEffectSender`; the `testkit` Cargo feature exposes `testkit::MockSpawner`.
+//! Process I/O sits behind a seam of the crate's own — a spawner, and each child's waiter and
+//! signaler — so the coalescing, concurrency and shutdown logic is tested without forking real
+//! children, against the `testkit` Cargo feature's `testkit::MockSpawner`. The engine-facing
+//! completion sink is a trait ([`EffectCompleteSender`]), so the actuator never names the engine's
+//! `Input` vocabulary; the bin's `WakingEffectCompleteSender` implements it.
 
 // Actuator needs `unsafe` for process control on Unix; `warn` is the looser-than-workspace setting,
 // with per-call-site allows at FFI sites.
@@ -25,9 +25,7 @@
 // The actuator's production surface (fork+exec, pipe(2), waitpid, signal delivery) is unix-only;
 // every internal module would otherwise carry `#[cfg(unix)]`. A single crate-root gate is the honest
 // expression of the target constraint and removes drift: a new module added later cannot silently
-// lose its `#[cfg(unix)]` marker, because the crate fails to compile on non-unix outright. The `bin`
-// already fails to link on non-unix (it calls `default_spawner`), so this is a transparent failure
-// shift — not a new constraint.
+// lose its `#[cfg(unix)]` marker, because the crate fails to compile on non-unix outright.
 #[cfg(not(unix))]
 compile_error!("specter-actuator requires a unix target (linux / macOS / freebsd)");
 
@@ -45,10 +43,7 @@ mod tmp;
 #[cfg(feature = "testkit")]
 pub mod testkit;
 
-pub use os::OsSpawner;
-pub use permits::{Permit, Permits};
 pub use pool::{RunWiring, SubprocessActuator, default_concurrency};
-pub use spawner::{ChildSignaler, ChildWaiter, EnvVar, SpawnHandles, Spawner};
 
 // The actuator's completion envelope and sender-error vocabulary both live on `specter-core`
 // (`EffectCompletion` is the engine-facing envelope; `SendError` is the workspace-shared sender
@@ -82,14 +77,4 @@ pub trait EffectCompleteSender: Send + Sync + 'static {
     /// Deliver one effect completion. Returns `Ok(())` on enqueue; `Err(SendError::Disconnected)`
     /// if the engine-side consumer is gone.
     fn send(&self, completion: EffectCompletion) -> Result<(), SendError>;
-}
-
-/// Construct the platform's default spawner as a `Box<dyn Spawner>`.
-///
-/// `Box<dyn>` matches the existing `&dyn Spawner` calling convention in the actuator's state machine
-/// — one vtable hop per spawn, on a rare (op/sec scale) hot path. A future non-Unix backend slots
-/// in by providing an alternative spawner constructor here.
-#[must_use]
-pub fn default_spawner() -> Box<dyn Spawner> {
-    Box::new(OsSpawner::new())
 }

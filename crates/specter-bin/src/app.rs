@@ -58,7 +58,7 @@ use crate::ipc::{resolve, sockpath};
 use crate::loader::Loader;
 use crate::observability;
 use crate::signals;
-use specter_actuator::{EffectCompleteSender, RunWiring, SubprocessActuator, default_spawner};
+use specter_actuator::{EffectCompleteSender, RunWiring, SubprocessActuator};
 use specter_config::{Config, DaemonArgs, FileMeta};
 use specter_core::{EffectCompletion, Input, SendError};
 use specter_engine::Engine;
@@ -546,14 +546,13 @@ fn spawn_actuator_thread(
     concurrency: NonZeroUsize, wiring: RunWiring, engine_in: Box<dyn EffectCompleteSender>,
 ) -> io::Result<JoinHandle<()>> {
     thread::Builder::new().name("specter-actuator".into()).spawn(move || {
-        let spawner = default_spawner();
         let mut act = SubprocessActuator::new(concurrency);
         // No `catch_unwind` wrapper: on panic, the closure unwinds, `SubprocessActuator::drop` runs
         // the SIGTERM + SIGKILL fanout safety net, and the thread exits with the panic payload
         // intact. The caller's `actuator_handle.join()` becomes the load-bearing observation point
         // — its `Err(payload)` arm extracts the panic message for operator logs (see `run`'s
         // teardown).
-        act.run(wiring, &*engine_in, spawner.as_ref());
+        act.run(wiring, &*engine_in);
     })
 }
 
