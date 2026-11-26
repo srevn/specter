@@ -1,29 +1,17 @@
-//! Per-step deadline timer threads.
+//! A stage's `timeout`: a detached thread sends the stage's process SIGTERM at the deadline and
+//! SIGKILL a grace later, and logs each.
 //!
-//! When an [`specter_core::ExecAction`] carries `timeout: Some(d)`, the actuator spawns a one-shot
-//! timer thread alongside the wait thread. The timer thread shares the child's
-//! [`crate::spawner::ChildSignaler`] via `Arc<dyn ChildSignaler>` and enforces the deadline:
+//! The thread shares the stage's [`crate::spawner::ChildSignaler`] and nothing else — no join handle,
+//! no cancellation channel. Before each signal it reads the dead flag the stage's waiter sets when
+//! it reaps, so a stage that ended in time is never signalled: its pid may be another process's by
+//! then. A stage that ends between that read and the signal is caught by the signaler, which reads
+//! the same flag, and a pid already gone collapses `ESRCH`.
 //!
-//! 1. Sleep `deadline`.
-//! 2. If the child completed naturally (the wait thread set the shared `dead` flag), exit silently
-//!    — the SIGTERM/SIGKILL pair would race a pid-reusing process.
-//! 3. Otherwise send SIGTERM.
-//! 4. Sleep `grace` (the actuator's `shutdown_grace`).
-//! 5. If still alive, send SIGKILL.
+//! # Why one thread per timed stage
 //!
-//! The thread is **detached**: there is no join handle, no shared cancellation channel. Natural
-//! completion is observed via the same `dead` flag the wait thread sets before sending `Reaped`;
-//! that flag is the single seam between the two threads. Worst case (child runs exactly to its
-//! deadline, then dies of natural causes between the `is_dead` check and the syscall) the kernel
-//! SIGTERMs an already-reaped pid — the production signaler short-circuits via the same flag, plus
-//! the syscall layer ESRCH-collapses. Either path makes the signal a no-op.
-//!
-//! # Why one thread per step
-//!
-//! v1 uses a thread-per-step to mirror the existing wait-thread shape: same lifetime, same ownership
-//! model, same `Arc<dyn ChildSignaler>` sharing pattern. A consolidated timer heap would amortise
-//! OS thread cost at high pid volumes but reintroduces a single coordination point that v1 doesn't
-//! need.
+//! It mirrors the wait thread: same lifetime, same ownership, the same `Arc<dyn ChildSignaler>`
+//! shared. A consolidated timer heap would amortise OS thread cost at high pid volumes but adds a
+//! coordination point nothing else needs.
 //!
 //! # Spawn-failure policy
 //!
@@ -54,15 +42,10 @@ pub(crate) struct TimerContext {
     pub pid: u32,
 }
 
-/// Arm a detached one-shot timer thread that enforces `deadline` against the stage `signaler`
-/// signals. See module docs for the algorithm, the spawn-failure policy and the thread's name.
+/// Arms the timer for the stage `signaler` signals: SIGTERM at `deadline`, SIGKILL `grace` later.
 ///
-/// No return value: the thread is detached (nothing useful to await), and a failed
-/// `thread::Builder::spawn` is logged at `tracing::error!` — with the deadline, so an operator
-/// triaging "this step ran past its declared timeout" can correlate — and otherwise ignored.
-///
-/// `deadline > Duration::ZERO` is upheld by config validation (`IssueKind::TimeoutZero`); the
-/// `debug_assert!` is defense-in-depth for a future regression in that layer.
+/// `deadline > Duration::ZERO` is config validation's to uphold (`IssueKind::TimeoutZero`); the
+/// `debug_assert!` catches a regression there.
 pub(crate) fn arm_timer(
     deadline: Duration, grace: Duration, signaler: Arc<dyn ChildSignaler>, ctx: TimerContext,
 ) {
@@ -70,11 +53,11 @@ pub(crate) fn arm_timer(
         deadline > Duration::ZERO,
         "arm_timer requires deadline > 0; config validation must reject zero",
     );
-    let TimerContext { key, cursor, stage, pid } = ctx;
     if let Err(e) = thread::Builder::new()
-        .name(format!("act-tmr-{pid}"))
-        .spawn(move || run_timer(deadline, grace, &*signaler))
+        .name(format!("act-tmr-{}", ctx.pid))
+        .spawn(move || run_timer(deadline, grace, &*signaler, ctx))
     {
+        let TimerContext { key, cursor, stage, pid } = ctx;
         tracing::error!(
             ?key,
             cursor,
@@ -87,39 +70,36 @@ pub(crate) fn arm_timer(
     }
 }
 
-/// Timer-thread body. Extracted for direct unit testing without standing up a
-/// `thread::Builder::spawn` call (the spawned variant would race the test's polling).
+/// The timer thread's body, apart from its spawn so the tests run it on their own thread.
 ///
-/// Takes the signaler as `&dyn` rather than `Arc<dyn>` so the unit test can construct it on the stack
-/// against a custom impl. The production caller [`arm_timer`] passes `&*signaler` (the `Arc::deref`)
-/// into this function from the spawned closure.
-///
-/// Signal-failure logs at `tracing::warn!`: the production [`crate::spawner::ChildSignaler`] impl
-/// ESRCH-collapses and re-checks `is_dead` internally, so a `signal_term`/`signal_kill` `Err`
-/// surfacing here is a non-ESRCH, non-already-dead kernel boundary error (e.g. EPERM after PID-reuse
-/// landing on another user's process). An operator triaging "child never terminated despite SIGKILL"
-/// needs this surfaced.
-fn run_timer(deadline: Duration, grace: Duration, signaler: &dyn ChildSignaler) {
+/// Every line is a `warn`: the deadline and the grace are bounds the operator set, and a signal that
+/// fails is a kernel error past the signaler's own collapse of a reaped or vanished child (an `EPERM`
+/// on a recycled pid), which an operator triaging a stage that outlived its SIGKILL needs.
+fn run_timer(deadline: Duration, grace: Duration, signaler: &dyn ChildSignaler, ctx: TimerContext) {
+    let TimerContext { key, cursor, stage, pid } = ctx;
     thread::sleep(deadline);
     if signaler.is_dead() {
         return;
     }
+    tracing::warn!(?key, cursor, stage, pid, ?deadline, "timeout elapsed; SIGTERM");
     if let Err(e) = signaler.signal_term() {
-        tracing::warn!(?e, "per-step timer SIGTERM failed");
+        tracing::warn!(?key, cursor, stage, pid, ?e, "timeout's SIGTERM failed");
     }
     thread::sleep(grace);
     if signaler.is_dead() {
         return;
     }
+    tracing::warn!(?key, cursor, stage, pid, ?grace, "grace elapsed; SIGKILL");
     if let Err(e) = signaler.signal_kill() {
-        tracing::warn!(?e, "per-step timer SIGKILL failed");
+        tracing::warn!(?key, cursor, stage, pid, ?e, "timeout's SIGKILL failed");
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::run_timer;
+    use super::{TimerContext, run_timer};
     use crate::spawner::ChildSignaler;
+    use specter_core::DedupKey;
     use std::io;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -176,13 +156,17 @@ mod tests {
         }
     }
 
+    fn ctx() -> TimerContext {
+        TimerContext { key: DedupKey::default(), cursor: 0, stage: 0, pid: 0 }
+    }
+
     /// Natural completion before the deadline: timer wakes, sees `dead == true`, exits without
     /// signalling.
     #[test]
     fn timer_short_circuits_on_natural_completion() {
         let probe = Probe::new();
         probe.mark_dead();
-        run_timer(Duration::from_millis(5), Duration::from_millis(5), &probe);
+        run_timer(Duration::from_millis(5), Duration::from_millis(5), &probe, ctx());
         assert_eq!(probe.term_calls(), 0, "no SIGTERM after natural completion");
         assert_eq!(probe.kill_calls(), 0, "no SIGKILL after natural completion");
     }
@@ -191,7 +175,7 @@ mod tests {
     #[test]
     fn timer_sigterms_then_sigkills_when_child_stays_alive() {
         let probe = Probe::new();
-        run_timer(Duration::from_millis(10), Duration::from_millis(10), &probe);
+        run_timer(Duration::from_millis(10), Duration::from_millis(10), &probe, ctx());
         assert_eq!(probe.term_calls(), 1, "SIGTERM at deadline");
         assert_eq!(probe.kill_calls(), 1, "SIGKILL after grace");
     }
@@ -210,7 +194,7 @@ mod tests {
                 }
                 probe.mark_dead();
             });
-            run_timer(Duration::from_millis(5), Duration::from_millis(50), &probe);
+            run_timer(Duration::from_millis(5), Duration::from_millis(50), &probe, ctx());
         });
         assert_eq!(probe.term_calls(), 1, "SIGTERM fired");
         assert_eq!(probe.kill_calls(), 0, "SIGKILL skipped — child died in grace");

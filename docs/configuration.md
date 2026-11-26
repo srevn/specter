@@ -160,6 +160,11 @@ exec = ["./scripts/deploy.sh"]
 Each `exec` slot is argv-only — no shell expansion. For shell semantics,
 wrap with `sh -c`.
 
+An `exec` may set a `timeout`, a duration such as `"5m"`. If its process
+is still running when the timeout elapses, the daemon sends it SIGTERM,
+then SIGKILL if it is still running 5s later, and logs a warning at
+each.
+
 ### Pipes
 
 A `pipe` action wires `N` processes stdout→stdin (shell `a | b | c`).
@@ -185,8 +190,8 @@ pipe = [
   failure.
 - Pipes require **at least two stages** — `pipe = [{...}]` is rejected
   as `single-stage-pipe`; use top-level `exec` directly.
-- Top-level `timeout` on a pipe is rejected — deadline per-stage on the
-  nested `exec`.
+- A stage's `timeout` stops that stage; a `timeout` on the pipe itself
+  is rejected.
 
 ### Conditionals
 
