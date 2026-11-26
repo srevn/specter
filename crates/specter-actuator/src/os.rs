@@ -521,6 +521,26 @@ mod pipe_tests {
         assert_eq!(outcome, EffectOutcome::Ok);
     }
 
+    /// Every stage of a three-stage pipe finds fds 3–9 closed: a link's ends close on exec, so a
+    /// stage inherits only its own stdin and stdout. A stage holding another link's write end would
+    /// keep that link's reader from ever seeing end of input.
+    #[test]
+    fn pipe_stage_inherits_no_other_link() {
+        let argv: Vec<String> = vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            "for fd in 3 4 5 6 7 8 9; do [ -e /dev/fd/$fd ] && exit 1; done; cat >/dev/null".into(),
+        ];
+        let stages: [StageSpec<'_>; 3] = std::array::from_fn(|_| StageSpec {
+            argv: &argv,
+            env: &[],
+        });
+        let handles = OsSpawner::new()
+            .spawn_pipe(&stages, Path::new("/tmp"))
+            .expect("spawn_pipe");
+        assert_eq!(handles.waiter.wait().expect("wait"), EffectOutcome::Ok);
+    }
+
     /// Partial-spawn rollback: stage 0 spawns a long-running `/bin/sleep 30`; stage 1's argv points
     /// at a nonexistent binary so `Command::spawn` returns ENOENT. The pipe must roll back: SIGKILL
     /// + `reap_blocking` against stage 0 so no zombie remains.
