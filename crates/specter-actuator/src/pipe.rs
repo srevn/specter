@@ -595,12 +595,11 @@ mod tests {
         }
     }
 
-    /// N=3 pipe with stage 1's waiter panicking. The per-stage `catch_unwind` inside
-    /// [`super::PipeWaiter::wait`] must publish `mark_dead` on stage 1's signaler even though the
-    /// panicking waiter never reached its own self-mark. Without the backstop a racing controller
-    /// signal could land on a recycled PID.
+    /// Stage 1's waiter panics before its own self-mark. Its stage thread's catch ends the stage
+    /// `Internal`, the rightmost failure here, and marks the stage dead: without that mark a racing
+    /// controller signal could land on a recycled pid.
     #[test]
-    fn pipe_per_stage_marks_dead_on_panicking_stage_waiter() {
+    fn a_stage_whose_wait_panics_ends_internal_and_is_marked_dead() {
         let p0 = Arc::new(Probe::new());
         let p1 = Arc::new(Probe::new());
         let p2 = Arc::new(Probe::new());
@@ -611,13 +610,27 @@ mod tests {
             Box::new(PanickingWaiter),
             Box::new(StaticWaiter { outcome: Ok(EffectOutcome::Ok), dead: Arc::clone(&p2) }),
         ];
-        let _ = pipe(waiters, &signalers).wait().unwrap();
+        let outcome = pipe(waiters, &signalers).wait().unwrap();
 
-        assert!(
-            p1.is_dead(),
-            "stage 1's signaler must be marked dead by the per-stage \
-             `catch_unwind` backstop even though `PanickingWaiter` panicked \
-             before any self-mark",
-        );
+        assert_eq!(outcome, failed(Termination::Internal));
+        assert!(p1.is_dead(), "stage 1's thread marks it dead though its waiter panicked first");
+    }
+
+    /// Stage 1's wait fails, as an `ECHILD` would: its ending is unknown, so the stage ends
+    /// `Internal`, the rightmost failure here, and never passes for one that succeeded.
+    #[test]
+    fn a_stage_whose_wait_fails_ends_internal() {
+        let p0 = Arc::new(Probe::new());
+        let p1 = Arc::new(Probe::new());
+        let signalers = probes_into_signalers(&[p0.clone(), p1.clone()]);
+
+        let waiters: Vec<Box<dyn ChildWaiter>> = vec![
+            Box::new(StaticWaiter { outcome: Ok(EffectOutcome::Ok), dead: Arc::clone(&p0) }),
+            Box::new(StaticWaiter {
+                outcome: Err(io::Error::from(io::ErrorKind::Other)),
+                dead: Arc::clone(&p1),
+            }),
+        ];
+        assert_eq!(pipe(waiters, &signalers).wait().unwrap(), failed(Termination::Internal));
     }
 }
