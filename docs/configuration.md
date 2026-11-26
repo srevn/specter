@@ -31,7 +31,7 @@ everything else has a default.
 | Field        | Default              | Purpose                                            |
 |--------------|----------------------|----------------------------------------------------|
 | `name`       | —                    | Identifies the watch in logs and IPC verbs. Unique.|
-| `path`       | —                    | Absolute. Pending paths supported.                 |
+| `path`       | —                    | Absolute. Pending paths supported. A glob makes the watch dynamic — see below. |
 | `actions`    | —                    | What runs when the watch settles. See below.       |
 | `enabled`    | `true`               | `false` ⇒ inert at runtime; toggle without deleting.|
 | `settle`     | `200ms`              | Quiet window after the last event.                 |
@@ -69,12 +69,67 @@ Per-event-class mask. Default depends on scope:
 
 | Class       | Meaning                                                 |
 |-------------|---------------------------------------------------------|
-| `structure` | Creates, deletes, renames, attribute changes.           |
+| `structure` | Entries created, deleted or renamed in a watched directory. |
 | `content`   | File content (writes / appends).                        |
-| `metadata`  | mtime / size / fs_id changes without content writes.    |
+| `metadata`  | A file's attributes: permissions, owner, link count, timestamps. A size change is `content`. |
+
+Whatever the mask, a watched file or directory reports its own deletion or
+rename.
 
 `subtree-root` defaults to `["structure", "content"]`; `per-stable-file`
 adds `metadata` implicitly (the scope needs per-file FDs).
+
+## Dynamic watches
+
+A `path` holding a glob character — `*`, `?`, `[` or `{` — makes the watch
+dynamic: it holds one watch per match of the pattern, each match a
+directory or a regular file.
+
+```toml
+[[watch]]
+name    = "logs"
+path    = "/srv/*/logs"
+actions = [{ exec = ["rotate", "${specter.path}"] }]
+```
+
+- **The pattern.** Absolute; a glob matches within one segment, so `**` is
+  refused, as are `.` and `..` segments. The literal segments before the
+  first glob are the prefix the watch anchors at (`/srv` above), symlinks
+  resolved. A prefix that does not exist yet is waited for, as a pending
+  static path is.
+- **What the knobs describe.** `actions`, `settle`, `max_settle`, `scope`,
+  `events`, `log_output` and the scan knobs (`pattern`, `exclude`, `hidden`,
+  `recursive`, `max_depth`) describe each match's watch, as they would a
+  static watch at that path. The walk that finds the matches is the
+  daemon's own: it watches entries come and go (`structure`) and debounces
+  at a fixed 150ms, with a 2s ceiling.
+- **What runs.** Matches present when the watch attaches — at start, at the
+  reload that adds or replaces it, at `enable` — do not run its actions. A
+  match that appears later runs them once it settles. A prefix the daemon
+  saw absent delivers what it holds, when it appears, as matches that
+  appeared: they run.
+- **What is skipped.** A match that is a symlink or a special file anchors
+  nothing; the first one is named (`discovery_unsupported_anchor_kind`).
+- **A directory the daemon may not read** on the way to the matches is
+  retried until the walk's 2s ceiling, then named (`discovery_denied`) and
+  gone on without: its matches stay unknown until it can be read, and those
+  already matched beneath it are kept. A directory never read is named
+  once; one that was readable before is named again at each walk that has
+  cause to read it — an event naming it, its parent listed after its own
+  listing moved, or a walk of the whole pattern.
+- **Matches come and go.** A match that vanishes leaves with its watch
+  (`discovery_sub_reaped`); one replaced at its path keeps its watch, as a
+  static watch keeps its own across a replace. Past 1000 matches the watch
+  warns, once (`discovery_fanout_threshold`).
+- **The control surface** lists each match as `<name>@<path>`. `disable`,
+  `absorb` and `show` take the watch's own name and reach every match it
+  holds; a match's own name is refused (`minted_sub_no_op`), or unknown to
+  `show`. See [control.md](control.md).
+- **An edit** of `actions`, `log_output` or `settle` — or of `scope` with
+  `events` written out — applies in place, to every match. An edit of the
+  pattern, a scan knob, `events`, `max_settle`, or `scope` with `events`
+  omitted (the default mask moves with it) replaces the watch: its matches
+  are found again, and, present when it attaches, do not run.
 
 ## Actions
 
