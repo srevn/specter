@@ -65,22 +65,24 @@ impl Drop for EngineGuard {
     }
 }
 
-/// Mint one Sub the way the daemon does: a template `disc` on `/srv/*` attaches at a pre-placed
-/// `/srv`, and its Seed's walk lists one match, which the pass mints as `disc@/srv/a`. Returns the
-/// minted Sub; its own Seed is left in flight.
-pub(crate) fn mint_one(engine: &mut Engine) -> SubId {
+/// Mint a Sub per match the way the daemon does: a template `disc` on `/srv/*` attaches at a
+/// pre-placed `/srv`, and its Seed's walk lists `matches`, each of which the pass mints as
+/// `disc@/srv/<match>`. Returns the minted Subs in `matches`' order; their own Seeds are left in
+/// flight.
+pub(crate) fn mint<const N: usize>(engine: &mut Engine, matches: [&str; N]) -> [SubId; N] {
     let now = Instant::now();
     pre_place_dir(engine, &["srv"]);
-    let (template, discovery) = attach_discovery(engine, "disc", "/srv/*", now);
-    let _ = seed_to_idle(
-        engine,
-        discovery,
-        &dir_snap(&[("a", EntryKind::Dir, 1)]),
-        now,
-    );
-    engine
-        .subs()
-        .minted(template)
-        .next()
-        .expect("the pass mints the one match")
+    let (_, discovery) = attach_discovery(engine, "disc", "/srv/*", now);
+    let listing: Vec<_> = matches
+        .iter()
+        .zip(1..)
+        .map(|(&name, inode)| (name, EntryKind::Dir, inode))
+        .collect();
+    let _ = seed_to_idle(engine, discovery, &dir_snap(&listing), now);
+    matches.map(|name| {
+        engine
+            .subs()
+            .find_by_name(&format!("disc@/srv/{name}"))
+            .expect("the pass mints every match")
+    })
 }

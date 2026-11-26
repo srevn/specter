@@ -19,7 +19,7 @@ use crate::app::CliLogOverrides;
 use crate::ipc::protocol::{ResponsePayload, WireErrorCode, WireId, WireRequest};
 use crate::ipc::wire::WireTime;
 use crate::loader::Loader;
-use crate::testkit::mint_one;
+use crate::testkit::mint;
 use compact_str::CompactString;
 use crossbeam::channel::Sender;
 use specter_actuator::RunWiring;
@@ -2977,7 +2977,7 @@ fn ipc_disable_minted_sub_returns_minted_sub_no_op() {
     let cfg_path = tmp.path().join("specter.toml");
     let config = Config::from_str("").expect("empty config parses");
     let mut rig = rig_for(config, cfg_path);
-    let minted = mint_one(&mut rig.driver.engine);
+    let [minted] = mint(&mut rig.driver.engine, ["a"]);
     let name = rig
         .driver
         .engine
@@ -3224,7 +3224,7 @@ fn ipc_absorb_minted_sub_returns_minted_sub_no_op() {
     let cfg_path = tmp.path().join("specter.toml");
     let config = Config::from_str("").expect("empty config parses");
     let mut rig = rig_for(config, cfg_path);
-    let minted = mint_one(&mut rig.driver.engine);
+    let [minted] = mint(&mut rig.driver.engine, ["a"]);
     let name = rig
         .driver
         .engine

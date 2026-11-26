@@ -2053,14 +2053,28 @@ impl std::fmt::Display for WireAbsorbMode {
 /// through a `From`: the window's expiry is an engine-monotonic [`std::time::Instant`] with no
 /// wall-clock of its own, so the projection threads it through the driver's startup-anchor pair
 /// (`project_wall`) to reach a [`WireTime`]. The projection is live-gated at the call site — an
-/// inert window (`expiry <= now`) projects to `None`, never a stale `Some`. Surfaces in
-/// [`crate::ipc::protocol::SubDetails::absorb`].
+/// inert window (`expiry <= now`) projects to `None`, never a stale `Some`. Surfaces as a spawn
+/// row's `absorb` ([`crate::ipc::protocol::WireReaction::Spawn`]) and, as the window that lapses
+/// last, in [`WireMintedAbsorbing`].
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct WireAbsorbWindow {
     /// Wall-clock projection of the window's expiry instant.
     pub(crate) expiry: WireTime,
     /// Retirement discipline — see [`WireAbsorbMode`].
     pub(crate) mode: WireAbsorbMode,
+}
+
+/// The live `absorb` windows across a template's matches: how many, and the one that lapses last —
+/// its expiry says when absorbing ends, and its mode is that window's own. A mint row's
+/// `minted_absorbing` ([`crate::ipc::protocol::WireReaction::Mint`]), beside the `minted_live` that
+/// bounds `armed`.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct WireMintedAbsorbing {
+    /// Matches whose Profile holds a live window.
+    pub(crate) armed: usize,
+    /// The window that lapses last, its keys inline beside `armed`.
+    #[serde(flatten)]
+    pub(crate) last: WireAbsorbWindow,
 }
 
 /// Reload-trigger projection of [`crate::driver::ReloadTrigger`]. The enum lives here to keep every

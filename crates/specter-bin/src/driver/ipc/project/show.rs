@@ -12,13 +12,14 @@ use std::time::Instant;
 
 use compact_str::CompactString;
 use specter_config::Config;
-use specter_core::{Profile, Reaction, Sub, SubId, SubParams};
+use specter_core::{AbsorbWindow, Profile, Reaction, Sub, SubId, SubParams};
 use specter_engine::Engine;
 
 use crate::driver::DriverState;
 use crate::ipc::protocol::{DisabledSource, ShowResponse, SubDetails, WireId, WireReaction};
 use crate::ipc::wire::{
-    WireAbsorbMode, WireAbsorbWindow, WireEffectScope, WirePath, WireStateLabel,
+    WireAbsorbMode, WireAbsorbWindow, WireEffectScope, WireMintedAbsorbing, WirePath,
+    WireStateLabel,
 };
 
 use super::{program, project_wall, settle_ms};
@@ -98,19 +99,6 @@ fn project_details(
     let anchor = profile
         .and_then(|p| engine.tree().path_of(p.resource()))
         .map(|arc| WirePath::from(&arc));
-    // Live-gate via the engine's own predicate: lazy expiry leaves an inert window resident in
-    // Profile state, and `absorb_window_if_live` is the single owner of the `now < expiry` rule, so
-    // the projection drops an inert window without re-stating the liveness test. The wall-clock
-    // projection runs only for the live `Some` the operator sees.
-    let absorb = profile
-        .and_then(|p| p.absorb_window_if_live(now))
-        .map(|w| WireAbsorbWindow {
-            expiry: project_wall(ds, w.expiry),
-            mode: WireAbsorbMode::from(w.mode),
-        });
-    // Honest render across the reaction sum: a Spawn Sub reports its own payload and history; a
-    // template reports the knobs its minted Subs inherit plus the live minted count — never fire
-    // stats, which a template has none of.
     let reaction = match sub.reaction() {
         Reaction::Spawn {
             params: SubParams { spawn, .. },
@@ -122,12 +110,17 @@ fn project_details(
             last_fired_at: history.last_fired_at.map(|t| project_wall(ds, t)),
             fire_count: history.fire_count,
             dedup_suppressed_count: history.dedup_suppressed_count,
+            absorb: profile
+                .and_then(|p| p.absorb_window_if_live(now))
+                .map(|w| wire_window(ds, w)),
+            absorb_count: profile.map_or(0, Profile::absorb_count),
         },
         Reaction::Mint { spec, .. } => WireReaction::Mint {
             minted_settle_ms: settle_ms(spec.params().settle),
             minted_scope: WireEffectScope::from(spec.params().spawn.scope()),
             minted_program: program::render(spec.params().spawn.program()),
             minted_live: engine.subs().minted(sid).len(),
+            minted_absorbing: minted_absorbing(engine, sid, ds, now),
         },
     };
     SubDetails {
@@ -136,19 +129,47 @@ fn project_details(
         profile: WireId::from(sub.profile()),
         state,
         anchor,
-        absorb,
-        absorb_count: profile.map_or(0, Profile::absorb_count),
         settle_ms: settle_ms(sub.settle()),
         minted_by: sub.minted_by().map(WireId::from),
         reaction,
     }
 }
 
+/// How many of `template`'s matches hold a live `absorb` window
+/// ([`specter_core::SubRegistry::firing_profiles`]), and the window that lapses last; `None` while
+/// none does.
+fn minted_absorbing(
+    engine: &Engine,
+    template: SubId,
+    ds: &DriverState,
+    now: Instant,
+) -> Option<WireMintedAbsorbing> {
+    let live = || {
+        engine
+            .subs()
+            .firing_profiles(template)
+            .filter_map(|p| engine.profiles().get(p)?.absorb_window_if_live(now))
+    };
+    let last = live().max_by_key(|w| w.expiry)?;
+    Some(WireMintedAbsorbing {
+        armed: live().count(),
+        last: wire_window(ds, last),
+    })
+}
+
+fn wire_window(ds: &DriverState, window: &AbsorbWindow) -> WireAbsorbWindow {
+    WireAbsorbWindow {
+        expiry: project_wall(ds, window.expiry),
+        mode: WireAbsorbMode::from(window.mode),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::show;
-    use crate::ipc::protocol::{DisabledSource, ShowResponse, WireReaction};
-    use crate::testkit::{EngineGuard, config_from_watches, engine_with, fresh_state, mint_one};
+    use super::{project_wall, show};
+    use crate::ipc::protocol::{DisabledSource, ShowResponse, SubDetails, WireReaction};
+    use crate::ipc::wire::{WireAbsorbMode, WireAbsorbWindow};
+    use crate::testkit::{EngineGuard, config_from_watches, engine_with, fresh_state, mint};
     use compact_str::CompactString;
     use specter_config::Config;
     use specter_core::Input;
@@ -297,11 +318,11 @@ mod tests {
         );
     }
 
-    /// An armed-and-live `absorb` window projects to `SubDetails.absorb = Some(..)` with the
-    /// matching mode, and an inert (expired) window projects to `None` — the projection's `expiry >
-    /// now` live-gate. `absorb_count` projects independently (0 here — arming does not fold).
-    /// Arming with `Some(duration)` yields `PersistUntil`; the window's `expiry` is `arm_now +
-    /// duration`, so a `now` before it is live and a `now` past it is inert.
+    /// An armed-and-live `absorb` window projects to the spawn payload's `absorb = Some(..)` with
+    /// the matching mode, and an inert (expired) window projects to `None` — the projection's
+    /// `expiry > now` live-gate. `absorb_count` projects independently (0 here — arming does not
+    /// fold). Arming with `Some(duration)` yields `PersistUntil`; the window's `expiry` is `arm_now
+    /// + duration`, so a `now` before it is live and a `now` past it is inert.
     #[test]
     fn show_absorb_window_live_gated_by_now() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -323,46 +344,93 @@ mod tests {
         );
 
         let guard = EngineGuard::wrap(engine);
+        let spawn_absorb = |now| match show(
+            guard.engine(),
+            &fresh_state(),
+            &BTreeSet::new(),
+            &config,
+            "watched",
+            now,
+        ) {
+            ShowResponse::Active(SubDetails {
+                reaction:
+                    WireReaction::Spawn {
+                        absorb,
+                        absorb_count,
+                        ..
+                    },
+                ..
+            }) => (absorb, absorb_count),
+            other => panic!("expected a spawn row, got {other:?}"),
+        };
 
         // Before expiry ⇒ Some(PersistUntil).
-        let live = show(
-            guard.engine(),
-            &fresh_state(),
-            &BTreeSet::new(),
-            &config,
-            "watched",
-            arm_now,
+        let (absorb, absorb_count) = spawn_absorb(arm_now);
+        assert_eq!(
+            absorb.expect("live window projects Some").mode,
+            WireAbsorbMode::PersistUntil,
+            "Some(duration) ⇒ PersistUntil",
         );
-        match live {
-            ShowResponse::Active(d) => {
-                let w = d.absorb.as_ref().expect("live window projects Some");
-                assert_eq!(
-                    w.mode,
-                    crate::ipc::wire::WireAbsorbMode::PersistUntil,
-                    "Some(duration) ⇒ PersistUntil",
-                );
-                assert_eq!(d.absorb_count, 0, "arming folds nothing");
-            }
-            other => panic!("expected Active, got {other:?}"),
-        }
+        assert_eq!(absorb_count, 0, "arming folds nothing");
 
         // Past expiry ⇒ None (the projection drops the inert window).
-        let inert = show(
-            guard.engine(),
-            &fresh_state(),
-            &BTreeSet::new(),
-            &config,
-            "watched",
-            arm_now + window + Duration::from_secs(1),
+        let (inert, _) = spawn_absorb(arm_now + window + Duration::from_secs(1));
+        assert!(
+            inert.is_none(),
+            "inert window (expiry <= now) projects None: {inert:?}"
         );
-        match inert {
-            ShowResponse::Active(d) => assert!(
-                d.absorb.is_none(),
-                "inert window (expiry <= now) projects None: {:?}",
-                d.absorb,
-            ),
-            other => panic!("expected Active, got {other:?}"),
+    }
+
+    /// A template's row sums up the live windows across its matches: of three windows, one past its
+    /// expiry, two are counted and the one that lapses last is shown; past every expiry there is no
+    /// summary.
+    #[test]
+    fn show_template_sums_up_its_matches_live_windows() {
+        let mut engine = Engine::new();
+        let [a, b, c] = mint(&mut engine, ["a", "b", "c"]);
+        let armed_at = Instant::now();
+        for (sub, window) in [
+            (a, Duration::from_mins(1)),
+            (b, Duration::from_mins(2)),
+            (c, Duration::from_secs(1)),
+        ] {
+            let _ = engine.step(
+                Input::ArmAbsorb {
+                    sub,
+                    duration: Some(window),
+                },
+                armed_at,
+            );
         }
+        let guard = EngineGuard::wrap(engine);
+        let ds = fresh_state();
+        let empty = Config::from_str("").expect("empty");
+        let minted_absorbing =
+            |now| match show(guard.engine(), &ds, &BTreeSet::new(), &empty, "disc", now) {
+                ShowResponse::Active(SubDetails {
+                    reaction:
+                        WireReaction::Mint {
+                            minted_absorbing, ..
+                        },
+                    ..
+                }) => minted_absorbing,
+                other => panic!("expected a mint row, got {other:?}"),
+            };
+
+        let summary = minted_absorbing(armed_at + Duration::from_secs(2)).expect("two are live");
+        assert_eq!(summary.armed, 2, "a window past its expiry is not counted");
+        assert_eq!(
+            summary.last,
+            WireAbsorbWindow {
+                expiry: project_wall(&ds, armed_at + Duration::from_mins(2)),
+                mode: WireAbsorbMode::PersistUntil,
+            },
+            "the window that lapses last",
+        );
+        assert!(
+            minted_absorbing(armed_at + Duration::from_mins(3)).is_none(),
+            "no summary once every window has lapsed",
+        );
     }
 
     /// A minted Sub's synthesised name resolves through `SubRegistry::find_by_name` to a live id,
@@ -371,7 +439,7 @@ mod tests {
     #[test]
     fn show_minted_sub_name_resolves_unknown() {
         let mut engine = Engine::new();
-        let minted = mint_one(&mut engine);
+        let [minted] = mint(&mut engine, ["a"]);
         let name = engine.subs().get(minted).expect("live").name.to_string();
         let guard = EngineGuard::wrap(engine);
 
@@ -453,7 +521,7 @@ mod tests {
     #[test]
     fn show_template_minted_live_counts_its_minted_subs() {
         let mut engine = Engine::new();
-        let _ = mint_one(&mut engine);
+        let _ = mint(&mut engine, ["a"]);
         let guard = EngineGuard::wrap(engine);
 
         let r = show(

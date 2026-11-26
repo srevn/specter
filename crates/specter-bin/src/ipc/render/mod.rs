@@ -20,7 +20,7 @@
 //! Every export is `pub(crate)`. The client verb handlers reach `status::render` etc. directly;
 //! nothing here is part of a published API surface.
 
-use std::fmt::Display;
+use std::fmt::{self, Display};
 
 use self::style::{PadRight, Styler};
 
@@ -37,4 +37,10 @@ pub(crate) mod style;
 #[must_use]
 pub(crate) fn label_cell(sty: Styler, label: &str, width: usize) -> impl Display + '_ {
     sty.paint(style::LABEL, PadRight(label, width))
+}
+
+/// `n`, then the noun for it: `one` for exactly one, `many` otherwise — `1 match`, `3 matches`.
+#[must_use]
+pub(crate) fn counted(n: usize, one: &'static str, many: &'static str) -> impl Display {
+    fmt::from_fn(move |f| write!(f, "{n} {}", if n == 1 { one } else { many }))
 }

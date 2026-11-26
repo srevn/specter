@@ -119,7 +119,7 @@ mod tests {
     use super::list;
     use crate::ipc::protocol::{DisabledSource, WireId};
     use crate::ipc::wire::WireReactionKind;
-    use crate::testkit::{EngineGuard, config_from_watches, engine_with, fresh_state, mint_one};
+    use crate::testkit::{EngineGuard, config_from_watches, engine_with, fresh_state, mint};
     use compact_str::CompactString;
     use specter_config::Config;
     use specter_engine::Engine;
@@ -268,7 +268,7 @@ mod tests {
     #[test]
     fn list_minted_sub_carries_minted_by() {
         let mut engine = Engine::new();
-        let minted = mint_one(&mut engine);
+        let [minted] = mint(&mut engine, ["a"]);
         let template = engine
             .subs()
             .find_by_name("disc")

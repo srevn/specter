@@ -12,12 +12,12 @@
 //! [`style::OFF`] and the `Unknown` arm is [`style::ERR`]. Under `Styler::Plain` the output is
 //! byte-identical to the pre-color view.
 
-use std::fmt::Write as _;
+use std::fmt::{Display, Write as _};
 
 use crate::ipc::protocol::{ShowResponse, SubDetails, WireReaction};
-use crate::ipc::render::label_cell;
 use crate::ipc::render::style::{self, Rule, Styler};
-use crate::ipc::wire::{WireAbsorbMode, WireEffectScope, WireReactionKind};
+use crate::ipc::render::{counted, label_cell};
+use crate::ipc::wire::{WireAbsorbMode, WireAbsorbWindow, WireEffectScope, WireReactionKind};
 
 /// Render the response as one operator-readable block into the caller's buffer. `sty` gates ANSI
 /// styling on the resolved stdout stream.
@@ -82,6 +82,7 @@ const LABEL_WIDTH: usize = 16;
 /// minted live     3
 /// minted settle   500ms
 /// minted scope    subtree-root
+/// absorbing       2 of 3 matches, until 2026-05-23T11:50:00Z (persist)
 /// sub_id          1234
 /// profile_id      4321
 ///
@@ -133,6 +134,8 @@ fn render_active(out: &mut String, d: &SubDetails, sty: Styler) {
             last_fired_at,
             fire_count,
             dedup_suppressed_count,
+            absorb,
+            absorb_count,
         } => {
             let _ = writeln!(
                 out,
@@ -152,13 +155,16 @@ fn render_active(out: &mut String, d: &SubDetails, sty: Styler) {
                 label_cell(sty, "fires", LABEL_WIDTH),
                 fire_count,
                 dedup_suppressed_count,
-                d.absorb_count,
+                absorb_count,
             );
             match last_fired_at.as_ref() {
                 Some(t) => {
                     let _ = writeln!(out, "{}{}", label_cell(sty, "last fired", LABEL_WIDTH), t);
                 }
                 None => missing_line(out, sty, "last fired"),
+            }
+            if let Some(window) = absorb {
+                absorbing_line(out, sty, "", window);
             }
             (program, "program")
         }
@@ -167,6 +173,7 @@ fn render_active(out: &mut String, d: &SubDetails, sty: Styler) {
             minted_scope,
             minted_program,
             minted_live,
+            minted_absorbing,
         } => {
             let _ = writeln!(
                 out,
@@ -192,20 +199,14 @@ fn render_active(out: &mut String, d: &SubDetails, sty: Styler) {
                 label_cell(sty, "minted scope", LABEL_WIDTH),
                 effect_scope_str(*minted_scope),
             );
+            if let Some(absorbing) = minted_absorbing {
+                let matches = counted(*minted_live, "match", "matches");
+                let lead = format_args!("{} of {matches}, ", absorbing.armed);
+                absorbing_line(out, sty, lead, &absorbing.last);
+            }
             (minted_program, "minted program")
         }
     };
-    // Only an armed, live window renders — the projection drops an inert one, so a present `absorb`
-    // is always operator-meaningful (on a mint row it flags an arm the discovery shape makes inert).
-    if let Some(w) = d.absorb.as_ref() {
-        let _ = writeln!(
-            out,
-            "{}until {} ({})",
-            label_cell(sty, "absorbing", LABEL_WIDTH),
-            w.expiry,
-            absorb_mode_str(w.mode),
-        );
-    }
     // Label matches the wire key, so an operator correlating `-o human` with `-o json` reads one
     // vocabulary.
     if let Some(src) = d.minted_by {
@@ -237,6 +238,18 @@ fn render_active(out: &mut String, d: &SubDetails, sty: Styler) {
     for line in program {
         let _ = writeln!(out, "  {line}");
     }
+}
+
+/// Write the `absorbing` line for a live window — the projection drops an inert one: `lead` (a mint
+/// row's count of its matches), then when the window ends and how it retires.
+fn absorbing_line(out: &mut String, sty: Styler, lead: impl Display, window: &WireAbsorbWindow) {
+    let _ = writeln!(
+        out,
+        "{}{lead}until {} ({})",
+        label_cell(sty, "absorbing", LABEL_WIDTH),
+        window.expiry,
+        absorb_mode_str(window.mode),
+    );
 }
 
 /// Write a `label   -` line for a value the projection surfaced as
@@ -278,7 +291,8 @@ mod tests {
     use crate::ipc::protocol::{DisabledSource, ShowResponse, SubDetails, WireId, WireReaction};
     use crate::ipc::render::style::Styler;
     use crate::ipc::wire::{
-        WireAbsorbMode, WireAbsorbWindow, WireEffectScope, WirePath, WireStateLabel, WireTime,
+        WireAbsorbMode, WireAbsorbWindow, WireEffectScope, WireMintedAbsorbing, WirePath,
+        WireStateLabel, WireTime,
     };
     use std::time::UNIX_EPOCH;
 
@@ -303,8 +317,6 @@ mod tests {
             profile: WireId(2),
             state: Some(WireStateLabel::Idle),
             anchor,
-            absorb,
-            absorb_count,
             settle_ms: 500,
             minted_by: None,
             reaction: WireReaction::Spawn {
@@ -313,11 +325,14 @@ mod tests {
                 last_fired_at: None,
                 fire_count: 0,
                 dedup_suppressed_count: 0,
+                absorb,
+                absorb_count,
             },
         }
     }
 
-    /// A discovery template's detail block — the `mint` payload the honest-render test reads.
+    /// A template's detail block over three matches, none absorbing — the `mint` payload the
+    /// honest-render tests read.
     fn mint_details(name: &str, minted_program: Vec<String>) -> SubDetails {
         SubDetails {
             name: name.to_string(),
@@ -325,8 +340,6 @@ mod tests {
             profile: WireId(2),
             state: Some(WireStateLabel::Idle),
             anchor: None,
-            absorb: None,
-            absorb_count: 0,
             settle_ms: 150,
             minted_by: None,
             reaction: WireReaction::Mint {
@@ -334,6 +347,7 @@ mod tests {
                 minted_scope: WireEffectScope::SubtreeRoot,
                 minted_program,
                 minted_live: 3,
+                minted_absorbing: None,
             },
         }
     }
@@ -410,6 +424,45 @@ mod tests {
             !out.lines()
                 .any(|l| l.starts_with("fires") || l.starts_with("last fired")),
             "a template renders no fire lines at all: {out}",
+        );
+    }
+
+    /// A template whose matches hold live windows renders one `absorbing` line: how many of its
+    /// matches, then when the last window ends and its mode — the noun counted in the number its
+    /// matches call for.
+    #[test]
+    fn show_human_mint_renders_its_matches_absorbing() {
+        let absorbing = |live: usize, armed: usize| {
+            let mut d = mint_details("disc", vec![]);
+            let WireReaction::Mint {
+                minted_live,
+                minted_absorbing,
+                ..
+            } = &mut d.reaction
+            else {
+                unreachable!("mint_details builds a mint row")
+            };
+            *minted_live = live;
+            *minted_absorbing = Some(WireMintedAbsorbing {
+                armed,
+                last: WireAbsorbWindow {
+                    expiry: WireTime::from(UNIX_EPOCH),
+                    mode: WireAbsorbMode::PersistUntil,
+                },
+            });
+            let mut out = String::new();
+            render(&mut out, &ShowResponse::Active(d), Styler::Plain);
+            out.lines()
+                .find(|l| l.starts_with("absorbing"))
+                .map(str::to_owned)
+        };
+        assert_eq!(
+            absorbing(3, 2).as_deref(),
+            Some("absorbing       2 of 3 matches, until 1970-01-01T00:00:00Z (persist)"),
+        );
+        assert!(
+            absorbing(1, 1).is_some_and(|l| l.contains("1 of 1 match, until")),
+            "one match is counted as one",
         );
     }
 

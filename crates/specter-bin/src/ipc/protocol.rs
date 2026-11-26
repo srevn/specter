@@ -33,8 +33,8 @@ use specter_core::{ProfileId, ResourceId, SubId};
 
 use super::framing::InfallibleSerialize;
 use super::wire::{
-    WireAbsorbWindow, WireEffectScope, WirePath, WireReactionKind, WireReloadTrigger,
-    WireStateLabel, WireTime,
+    WireAbsorbWindow, WireEffectScope, WireMintedAbsorbing, WirePath, WireReactionKind,
+    WireReloadTrigger, WireStateLabel, WireTime,
 };
 
 /// Operator-facing wire request — the shape the daemon parses from the socket and the client
@@ -500,20 +500,20 @@ impl InfallibleSerialize for WireRequest {}
 /// structs ([`StatusResponse`], [`ListResponse`], [`ShowResponse`], [`SubDetails`]) whose fields
 /// are primitives, [`String`], [`Option`], [`Vec`], [`WireId`], [`WireTime`] (manual
 /// `serialize_str` over an invariant-by- construction RFC-3339 token), [`WirePath`] (transparent
-/// `String`), or other `Wire*` enums (closed-set derives). [`SubDetails`]'s flattened
-/// [`WireReaction`] keeps the property: internally-tagged serialization can fail only for variant
-/// payloads that cannot carry an inline tag (newtype/tuple variants), and both its variants are
-/// struct-shaped over the same plain-data field set. Marks the daemon-side response paths
-/// ([`crate::driver::Hub::enqueue_response`] + [`crate::driver::Hub::drain_accept`]'s cap-arm
-/// best-effort Busy write) safe for the wrapper.
+/// `String`), or other `Wire*` enums and structs built from them (closed-set derives).
+/// [`SubDetails`]'s flattened [`WireReaction`] keeps the property: internally-tagged serialization
+/// can fail only for variant payloads that cannot carry an inline tag (newtype/tuple variants), and
+/// both its variants are struct-shaped over the same plain-data field set. Marks the daemon-side
+/// response paths ([`crate::driver::Hub::enqueue_response`] +
+/// [`crate::driver::Hub::drain_accept`]'s cap-arm best-effort Busy write) safe for the wrapper.
 impl InfallibleSerialize for ResponsePayload {}
 
 /// `specter show <name>` detail block for an attached Sub.
 ///
-/// The per-reaction payload (`scope` / `program` / fire stats, or the mint knobs) lives on the
-/// flattened [`WireReaction`], internally tagged `reaction` — a third inline tag alongside `kind`
-/// and `status`, same one-flat-object discipline. The top-level fields are exactly the ones that
-/// hold for *any* attached Sub.
+/// The per-reaction payload (`scope` / `program` / fire and absorb stats, or the mint knobs and the
+/// matches' windows) lives on the flattened [`WireReaction`], internally tagged `reaction` — a
+/// third inline tag alongside `kind` and `status`, same one-flat-object discipline. The top-level
+/// fields are exactly the ones that hold for *any* attached Sub.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct SubDetails {
     /// Operator-facing name.
@@ -533,16 +533,6 @@ pub(crate) struct SubDetails {
     /// not yet resolved" — symmetric with [`ListRow::anchor`], so operators reading `list -o json`
     /// and `show -o json` decode vanish identically (`null`).
     pub(crate) anchor: Option<WirePath>,
-    /// Armed `absorb` window, live-gated: `Some` iff a window is armed AND not yet inert (`expiry >
-    /// now`) at projection time. The engine's lazy expiry leaves an inert window resident in
-    /// Profile state; this projection hides it (renders absent) rather than surfacing a stale
-    /// `Some`. Per-Profile by construction — every Sub on the Profile shares one window. Truthful
-    /// on a `mint` row too: the window is genuinely armed even though a discovery Profile's
-    /// reconcile consequence makes the fold structurally unreachable.
-    pub(crate) absorb: Option<WireAbsorbWindow>,
-    /// `Profile.absorb_count` — folds this Profile has absorbed. The fold counterpart of the
-    /// `spawn` payload's `fire_count`; per-Profile (a fold is per-Profile), projected here per-Sub.
-    pub(crate) absorb_count: u64,
     /// `Sub::settle().as_millis()` — this Sub's own debounce. On a `mint` row this is the discovery
     /// walk's debounce, distinct from the template knob `minted_settle_ms` the minted Subs inherit.
     pub(crate) settle_ms: u64,
@@ -555,10 +545,11 @@ pub(crate) struct SubDetails {
     pub(crate) reaction: WireReaction,
 }
 
-/// Per-reaction `show` payload — the wire projection of `specter_core::Reaction`, honest per variant:
-/// a `spawn` row reports its own program and fire history; a `mint` row (discovery template) reports
-/// the knobs its minted Subs inherit and the live minted count, and carries no fire stats at all — a
-/// template fires attachments, never Effects, so there is no history whose counters could ever move.
+/// Per-reaction `show` payload — the wire projection of `specter_core::Reaction`, honest per
+/// variant: a `spawn` row reports its own program, fire history and absorb window; a `mint` row (a
+/// template) reports the knobs its minted Subs inherit, how many it holds and the absorb windows
+/// across them, and carries no fire or fold stats of its own — a template fires attachments, never
+/// Effects, and its own Profile, which reconciles, is never armed.
 ///
 /// Internally tagged `reaction` and flattened into [`SubDetails`], so every payload key lands in
 /// the same flat JSON object as the rest of the detail block. The `spawn` keys are bare (they
@@ -581,6 +572,13 @@ pub(crate) enum WireReaction {
         fire_count: u64,
         /// Cumulative B1-dedup suppressions.
         dedup_suppressed_count: u64,
+        /// The Profile's armed `absorb` window, live-gated: `None` once its expiry has passed,
+        /// though the engine's lazy expiry leaves it resident. Per Profile — every Sub on the
+        /// Profile shares one window.
+        absorb: Option<WireAbsorbWindow>,
+        /// Folds the Profile has absorbed — the fold counterpart of `fire_count`, per Profile (a
+        /// fold is), projected per Sub.
+        absorb_count: u64,
     },
     Mint {
         /// Minted Subs' debounce — the template's `settle` knob (the `[[watch]].settle` the
@@ -590,9 +588,10 @@ pub(crate) enum WireReaction {
         minted_scope: WireEffectScope,
         /// Minted Subs' program, rendered like the `spawn` payload's `program`.
         minted_program: Vec<String>,
-        /// Live minted-Sub count for this template, registry-derived at projection time — the same
-        /// scan the discovery fan-out warning runs; O(total Subs), fine at IPC cadence.
+        /// The length of the template's minted set (`SubRegistry::minted`) at projection time.
         minted_live: usize,
+        /// The live `absorb` windows across the matches; `None` while none is.
+        minted_absorbing: Option<WireMintedAbsorbing>,
     },
 }
 
@@ -615,7 +614,8 @@ mod tests {
     };
     use crate::ipc::framing::parse_strict;
     use crate::ipc::wire::{
-        WireEffectScope, WirePath, WireReactionKind, WireReloadTrigger, WireTime,
+        WireAbsorbMode, WireAbsorbWindow, WireEffectScope, WireMintedAbsorbing, WirePath,
+        WireReactionKind, WireReloadTrigger, WireTime,
     };
     use compact_str::CompactString;
     use slotmap::KeyData;
@@ -1003,6 +1003,8 @@ mod tests {
             last_fired_at: None,
             fire_count: 3,
             dedup_suppressed_count: 1,
+            absorb: None,
+            absorb_count: 1,
         });
         let json = serde_json::to_value(&spawn).expect("serialize");
         assert_eq!(
@@ -1011,9 +1013,12 @@ mod tests {
             "flatten tag carries the spawn token: {json}",
         );
         assert_eq!(
-            json.get("fire_count").and_then(serde_json::Value::as_u64),
-            Some(3),
-            "spawn payload inlines its bare keys: {json}",
+            (
+                json.get("fire_count").and_then(serde_json::Value::as_u64),
+                json.get("absorb_count").and_then(serde_json::Value::as_u64),
+            ),
+            (Some(3), Some(1)),
+            "spawn payload inlines its bare keys, its absorb facts among them: {json}",
         );
         assert!(
             json.get("minted_live").is_none(),
@@ -1031,6 +1036,13 @@ mod tests {
             minted_scope: WireEffectScope::PerStableFile,
             minted_program: vec!["[0] exec /bin/true".to_string()],
             minted_live: 2,
+            minted_absorbing: Some(WireMintedAbsorbing {
+                armed: 1,
+                last: WireAbsorbWindow {
+                    expiry: WireTime::from(UNIX_EPOCH),
+                    mode: WireAbsorbMode::PersistUntil,
+                },
+            }),
         });
         let json = serde_json::to_value(&mint).expect("serialize");
         assert_eq!(
@@ -1050,8 +1062,19 @@ mod tests {
             "the template knob lands prefixed beside it: {json}",
         );
         assert!(
-            json.get("fire_count").is_none() && json.get("last_fired_at").is_none(),
-            "a mint row carries no fire stats at all: {json}",
+            ["fire_count", "last_fired_at", "absorb", "absorb_count"]
+                .iter()
+                .all(|key| json.get(key).is_none()),
+            "a mint row carries no fire or fold stats of its own: {json}",
+        );
+        assert_eq!(
+            json.get("minted_absorbing"),
+            Some(&serde_json::json!({
+                "armed": 1,
+                "expiry": "1970-01-01T00:00:00Z",
+                "mode": "persist_until",
+            })),
+            "the matches' summary carries its last window's keys inline: {json}",
         );
         let bytes = serde_json::to_vec(&mint).expect("serialize");
         let back: SubDetails = parse_strict(&bytes).expect("flattened mint round-trips");
@@ -1073,6 +1096,8 @@ mod tests {
             last_fired_at: None,
             fire_count: 0,
             dedup_suppressed_count: 0,
+            absorb: None,
+            absorb_count: 0,
         });
         let mut value = serde_json::to_value(&spawn).expect("serialize");
         value
@@ -1098,8 +1123,6 @@ mod tests {
             profile: WireId(2),
             state: None,
             anchor: None,
-            absorb: None,
-            absorb_count: 0,
             settle_ms: 150,
             minted_by: None,
             reaction,
