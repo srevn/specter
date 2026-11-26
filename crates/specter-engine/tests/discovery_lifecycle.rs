@@ -126,8 +126,8 @@ fn settle_minted(e: &mut Engine, mid: SubId, kind: Option<EntryKind>, mut at: In
 /// advances the clock — an enumeration mint's cold Seed pins on its single in-flight sample.
 /// Appearance mints (Batching-first, no probe at mint time) are deliberately *not* converged here: a
 /// test that needs one settled drives it through `settle_minted` at its own timeline position.
-fn settle_minted_seeds(e: &mut Engine, source: SubId, at: Instant) {
-    let minted: Vec<SubId> = discovery_subs_of(e, source).into_values().collect();
+fn settle_minted_seeds(e: &mut Engine, template: SubId, at: Instant) {
+    let minted: Vec<SubId> = discovery_subs_of(e, template).into_values().collect();
     for mid in minted {
         if e.pending_probe_for(pid_of(e, mid)).is_some() {
             let _ = settle_minted(e, mid, None, at);
@@ -135,35 +135,37 @@ fn settle_minted_seeds(e: &mut Engine, source: SubId, at: Instant) {
     }
 }
 
-/// The `DiscoveryMinted` narration in emission order, projected to `(source, path)`.
+/// The `DiscoveryMinted` narration in emission order, projected to `(template, path)`.
 fn minted_paths(out: &StepOutput) -> Vec<(SubId, String)> {
     out.diagnostics
         .iter()
         .filter_map(|d| match d {
-            Diagnostic::DiscoveryMinted { source, path, .. } => {
-                Some((*source, path.display().to_string()))
+            Diagnostic::DiscoveryMinted { template, path, .. } => {
+                Some((*template, path.display().to_string()))
             }
             _ => None,
         })
         .collect()
 }
 
-/// The `DiscoveryUnsupportedAnchorKind` narration in emission order, projected to `(source, path,
+/// The `DiscoveryUnsupportedAnchorKind` narration in emission order, projected to `(template, path,
 /// kind)`.
 fn unsupported_warns(out: &StepOutput) -> Vec<(SubId, String, EntryKind)> {
     out.diagnostics
         .iter()
         .filter_map(|d| match d {
-            Diagnostic::DiscoveryUnsupportedAnchorKind { source, path, kind } => {
-                Some((*source, path.display().to_string(), *kind))
-            }
+            Diagnostic::DiscoveryUnsupportedAnchorKind {
+                template,
+                path,
+                kind,
+            } => Some((*template, path.display().to_string(), *kind)),
             _ => None,
         })
         .collect()
 }
 
 /// Cold-Seed first reconcile mints one Sub per chain terminus (both terminus kinds), with
-/// deterministic synthesised names, source attribution, and the minted Profiles' own cold-Seed
+/// deterministic synthesised names, each naming its template, and the minted Profiles' own cold-Seed
 /// probes in the same `StepOutput`; a Standard re-reconcile over the same tree is a dedup no-op.
 #[test]
 fn cold_seed_reconcile_mints_per_terminus_then_re_reconcile_dedups() {
@@ -232,7 +234,7 @@ fn cold_seed_reconcile_mints_per_terminus_then_re_reconcile_dedups() {
             "minted Profile {mp:?} cold-Seed probe rides the reconcile step",
         );
         let s = e.subs().get(mid).unwrap();
-        assert_eq!(s.minted_by(), Some(sid), "mint carries its source");
+        assert_eq!(s.minted_by(), Some(sid), "a mint carries its template");
         assert!(!s.is_template(), "minted Subs are never templates");
     }
     let attached = out
@@ -242,7 +244,7 @@ fn cold_seed_reconcile_mints_per_terminus_then_re_reconcile_dedups() {
             |d| matches!(d, Diagnostic::SubAttached { minted_by, .. } if *minted_by == Some(sid)),
         )
         .count();
-    assert_eq!(attached, 2, "one SubAttached per mint, keyed to its source");
+    assert_eq!(attached, 2, "one SubAttached per mint, naming its template");
 
     settle_minted_seeds(&mut e, sid, now);
 
@@ -294,7 +296,7 @@ fn witnessed_appearance_mints_sub_that_fires() {
     assert!(
         out.diagnostics.iter().any(|d| matches!(
             d,
-            Diagnostic::DiscoveryMinted { source, entry: MintEntry::Appeared, .. } if *source == sid
+            Diagnostic::DiscoveryMinted { template, entry: MintEntry::Appeared, .. } if *template == sid
         )),
         "the narration carries the appearance classification",
     );
@@ -816,8 +818,8 @@ fn terminus_delete_drives_clamped_reconcile_and_reaps_minted() {
     assert!(
         out.diagnostics.iter().any(|d| matches!(
             d,
-            Diagnostic::DiscoverySubReaped { source, sub, .. }
-                if *source == sid && *sub == mid
+            Diagnostic::DiscoverySubReaped { template, sub, .. }
+                if *template == sid && *sub == mid
         )),
         "reap narration rides the reconcile",
     );
@@ -1056,10 +1058,10 @@ fn terminus_vanish_reaps_minted_and_reappearance_remints_fresh() {
     assert!(
         gone.diagnostics.iter().any(|d| matches!(
             d,
-            Diagnostic::DiscoverySubReaped { source, sub, .. }
-                if *source == sid && *sub == old_mid
+            Diagnostic::DiscoverySubReaped { template, sub, .. }
+                if *template == sid && *sub == old_mid
         )),
-        "source-keyed reap narration rides the reconcile; got {:?}",
+        "the template's reap narration rides the reconcile; got {:?}",
         gone.diagnostics,
     );
     assert!(
@@ -1142,8 +1144,8 @@ fn ancestor_rename_reaps_old_minted_and_mints_new() {
     assert!(
         moved.diagnostics.iter().any(|d| matches!(
             d,
-            Diagnostic::DiscoverySubReaped { source, sub, path }
-                if *source == sid && *sub == old_mid
+            Diagnostic::DiscoverySubReaped { template, sub, path }
+                if *template == sid && *sub == old_mid
                     && path.display().to_string() == "/srv/a/log"
         )),
         "the old path reaps, narrated with the OLD path; got {:?}",
@@ -1337,7 +1339,7 @@ fn terminus_replace_keeps_minted_sub_and_re_fires() {
 }
 
 /// Detaching the discovery template cascades: the template detaches under the caller's reason,
-/// every minted Sub under `DiscoverySourceDetached`, and every Profile reaps.
+/// every minted Sub under `TemplateDetached`, and every Profile reaps.
 #[test]
 fn detach_discovery_template_cascades_to_minted_subs() {
     let mut e = Engine::new();
@@ -1368,11 +1370,11 @@ fn detach_discovery_template_cascades_to_minted_subs() {
                 d,
                 Diagnostic::SubDetached {
                     sub,
-                    reason: DetachReason::DiscoverySourceDetached,
+                    reason: DetachReason::TemplateDetached,
                     ..
                 } if *sub == mid
             )),
-            "minted Sub {mid:?} cascades under DiscoverySourceDetached",
+            "minted Sub {mid:?} cascades under TemplateDetached",
         );
         assert!(e.subs().get(mid).is_none());
     }
@@ -1442,7 +1444,7 @@ fn a_mint_at_a_slot_a_watch_rejection_vacated_founds_its_profile_kinded() {
         .diagnostics
         .iter()
         .filter_map(|d| match d {
-            Diagnostic::DiscoveryMinted { source, kind, .. } if *source == beta => Some(*kind),
+            Diagnostic::DiscoveryMinted { template, kind, .. } if *template == beta => Some(*kind),
             _ => None,
         })
         .collect();
@@ -1500,7 +1502,7 @@ fn template_join_on_idle_discovery_profile_reseeds_and_mints_cold() {
     assert!(
         out.diagnostics.iter().any(|d| matches!(
             d,
-            Diagnostic::DiscoveryMinted { source, entry: MintEntry::Enumerated, .. } if *source == sid2
+            Diagnostic::DiscoveryMinted { template, entry: MintEntry::Enumerated, .. } if *template == sid2
         )),
         "a first-enumeration mint narrates cold",
     );
@@ -2094,8 +2096,8 @@ fn fanout_threshold_warns_exactly_once() {
             .filter(|d| {
                 matches!(
                     d,
-                    Diagnostic::DiscoveryFanoutThreshold { source, count }
-                        if *source == sid && *count == 1001
+                    Diagnostic::DiscoveryFanoutThreshold { template, count }
+                        if *template == sid && *count == 1001
                 )
             })
             .count()
@@ -2127,8 +2129,8 @@ fn subs_kept_beneath_a_denied_directory_count_toward_fanout() {
         o.diagnostics.iter().any(|d| {
             matches!(
                 d,
-                Diagnostic::DiscoveryFanoutThreshold { source, count }
-                    if *source == sid && *count == 1001
+                Diagnostic::DiscoveryFanoutThreshold { template, count }
+                    if *template == sid && *count == 1001
             )
         })
     };
@@ -2321,7 +2323,9 @@ fn a_prefix_seen_absent_delivers_appearances_to_every_template_on_it() {
         .diagnostics
         .iter()
         .filter_map(|d| match d {
-            Diagnostic::DiscoveryMinted { source, entry, .. } => Some((*source, *entry)),
+            Diagnostic::DiscoveryMinted {
+                template, entry, ..
+            } => Some((*template, *entry)),
             _ => None,
         })
         .collect();
@@ -2404,7 +2408,7 @@ fn second_template_detach_leaves_siblings_minted_set_intact() {
     assert!(
         out.diagnostics.iter().any(|d| matches!(
             d,
-            Diagnostic::SubDetached { sub, reason: DetachReason::DiscoverySourceDetached, .. }
+            Diagnostic::SubDetached { sub, reason: DetachReason::TemplateDetached, .. }
                 if *sub == mid1
         )),
         "detached template's mint cascades; got {:?}",

@@ -315,7 +315,7 @@ impl Engine {
         vanished.sort_unstable();
         for (slot, sub) in vanished {
             out.diagnostics.push(Diagnostic::DiscoverySubReaped {
-                source: template,
+                template,
                 sub,
                 path: self.anchor_path(slot),
             });
@@ -333,7 +333,7 @@ impl Engine {
         {
             out.diagnostics
                 .push(Diagnostic::DiscoveryUnsupportedAnchorKind {
-                    source: template,
+                    template,
                     path: Arc::from(skipped.dir.join(skipped.name.as_str())),
                     kind: skipped.kind,
                 });
@@ -346,20 +346,18 @@ impl Engine {
                 .subs
                 .narrate_once(template, MintNarration::FanoutThreshold)
         {
-            out.diagnostics.push(Diagnostic::DiscoveryFanoutThreshold {
-                source: template,
-                count,
-            });
+            out.diagnostics
+                .push(Diagnostic::DiscoveryFanoutThreshold { template, count });
         }
         self.subs.close_enumeration(template);
     }
 
     /// A template left the registry: what it minted follows, whatever removed it, each under
-    /// [`DetachReason::DiscoverySourceDetached`]. Depth one — a minted Sub mints nothing, so no
-    /// detach here hands back orphans of its own.
+    /// [`DetachReason::TemplateDetached`]. Depth one — a minted Sub mints nothing, so no detach
+    /// here hands back orphans of its own.
     pub(crate) fn reap_orphans(&mut self, orphans: BTreeSet<SubId>, out: &mut StepOutput) {
         for orphan in orphans {
-            self.detach_sub_inner(orphan, DetachReason::DiscoverySourceDetached, out);
+            self.detach_sub_inner(orphan, DetachReason::TemplateDetached, out);
         }
     }
 

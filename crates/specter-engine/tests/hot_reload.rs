@@ -615,7 +615,7 @@ fn config_diff_add_dynamic_attaches_and_first_reconcile_mints() {
     assert!(
         minted.diagnostics.iter().any(|d| matches!(
             d,
-            Diagnostic::DiscoveryMinted { source, .. } if *source == sid
+            Diagnostic::DiscoveryMinted { template, .. } if *template == sid
         )),
         "first reconcile mints; got {:?}",
         minted.diagnostics,
@@ -654,9 +654,9 @@ fn config_diff_add_dynamic_with_missing_prefix_goes_pending() {
 }
 
 /// `modified_identity` naming a template replaces it: the old template detaches under
-/// `ConfigDiffIdentityChanged`, its minted set cascades under `DiscoverySourceDetached` (a
-/// mid-cold-Seed minted probe is cancelled cleanly), and the replacement attaches in the same step.
-/// Its first reconcile re-mints fresh `SubId`s — a replace, never a rebind.
+/// `ConfigDiffIdentityChanged`, its minted set cascades under `TemplateDetached` (a mid-cold-Seed
+/// minted probe is cancelled cleanly), and the replacement attaches in the same step. Its first
+/// reconcile re-mints fresh `SubId`s — a replace, never a rebind.
 #[test]
 fn config_diff_modify_template_cascades_and_remints() {
     let mut e = Engine::new();
@@ -697,7 +697,7 @@ fn config_diff_modify_template_cascades_and_remints() {
     assert!(
         out.diagnostics.iter().any(|d| matches!(
             d,
-            Diagnostic::SubDetached { sub, reason: DetachReason::DiscoverySourceDetached, .. }
+            Diagnostic::SubDetached { sub, reason: DetachReason::TemplateDetached, .. }
                 if *sub == old_minted
         )),
         "minted set cascades with the old template",
@@ -771,10 +771,10 @@ fn config_diff_remove_dynamic_cascades() {
         assert!(
             out.diagnostics.iter().any(|d| matches!(
                 d,
-                Diagnostic::SubDetached { sub, reason: DetachReason::DiscoverySourceDetached, .. }
+                Diagnostic::SubDetached { sub, reason: DetachReason::TemplateDetached, .. }
                     if *sub == mid
             )),
-            "minted Sub {mid:?} cascades under DiscoverySourceDetached",
+            "minted Sub {mid:?} cascades under TemplateDetached",
         );
     }
     assert_eq!(e.subs().iter().count(), 0, "registry fully unwound");
@@ -867,8 +867,8 @@ fn config_diff_modified_params_rebinds_a_template_and_the_set_it_minted() {
     assert!(
         out.diagnostics.iter().any(|d| matches!(
             d,
-            Diagnostic::DiscoveryMinted { source, entry: MintEntry::Appeared, .. }
-                if *source == template
+            Diagnostic::DiscoveryMinted { template: owner, entry: MintEntry::Appeared, .. }
+                if *owner == template
         )),
         "a match after the edit is an appearance; got {:?}",
         out.diagnostics,

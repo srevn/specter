@@ -22,7 +22,7 @@
 use super::EngineDriver;
 use crate::ipc::wire::WireTime;
 use crossbeam::channel::TrySendError;
-use specter_core::{Diagnostic, EffectOp, Input, MintEntry, ProbeOp, StepOutput, SubId};
+use specter_core::{Diagnostic, EffectOp, Input, ProbeOp, StepOutput, SubId};
 use specter_sensor::FsWatcher;
 use std::ops::ControlFlow;
 use std::time::SystemTime;
@@ -488,15 +488,9 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
             // Operator-declared attach: high signal, low rate (one per `[[watch]]` block per
             // reload). INFO is the operator-facing default per the catalog severity table.
             None => tracing::info!(?sub, %name, "sub attached"),
-            // Discovery-minted attach: same lifecycle event but emitted once per pattern match,
-            // which can be many per reconcile. DEBUG keeps operator logs uncluttered;
-            // `DiscoveryMinted` already carries the path-level signal at the same severity.
-            Some(source) => tracing::debug!(
-                ?sub,
-                %name,
-                ?source,
-                "dynamic sub attached (discovery-minted)",
-            ),
+            // A minted attach: one per match, which can be many per pass. DEBUG keeps operator logs
+            // uncluttered; `DiscoveryMinted` carries the path at the same severity.
+            Some(template) => tracing::debug!(?sub, %name, ?template, "minted sub attached"),
         },
         Diagnostic::SubFired {
             sub,
@@ -533,35 +527,43 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
             "rebind targeted an unknown Sub (dispatcher routing breach)",
         ),
         Diagnostic::DiscoveryMinted {
-            source,
+            template,
             path,
             kind,
             entry,
         } => tracing::debug!(
-            ?source,
+            ?template,
             path = %path.display(),
             ?kind,
-            appeared = *entry == MintEntry::Appeared,
-            "discovery reconcile minted a dynamic Sub",
+            ?entry,
+            "discovery minted a sub for a match",
         ),
-        Diagnostic::DiscoveryUnsupportedAnchorKind { source, path, kind } => tracing::warn!(
-            ?source,
+        Diagnostic::DiscoveryUnsupportedAnchorKind {
+            template,
+            path,
+            kind,
+        } => tracing::warn!(
+            ?template,
             path = %path.display(),
             ?kind,
             "discovery match skipped: terminus kind cannot anchor a watch \
              (regular files and directories only); later unsupported matches \
              under this template skip silently",
         ),
-        Diagnostic::DiscoveryFanoutThreshold { source, count } => tracing::warn!(
-            ?source,
+        Diagnostic::DiscoveryFanoutThreshold { template, count } => tracing::warn!(
+            ?template,
             count,
             "discovery fanout exceeded warning threshold (consider tightening pattern)",
         ),
-        Diagnostic::DiscoverySubReaped { source, sub, path } => tracing::debug!(
-            ?source,
+        Diagnostic::DiscoverySubReaped {
+            template,
+            sub,
+            path,
+        } => tracing::debug!(
+            ?template,
             ?sub,
             path = %path.display(),
-            "discovery-minted Sub reaped (matched path vanished from the certified match set)",
+            "minted sub reaped (its match left the certified match set)",
         ),
         Diagnostic::DiscoveryDenied { template, path } => tracing::warn!(
             ?template,
@@ -614,14 +616,14 @@ pub(super) const fn diag_sub_id(d: &Diagnostic) -> Option<SubId> {
         | D::EffectCompleteForUnknownSub { sub }
         | D::EffectCompleteOutsideAwaiting { sub, .. } => Some(*sub),
 
-        // The discovery family keys to the *source* template — the entity an operator names in a
-        // per-Sub filter. The minted/reaped Sub's own lifecycle signals (`SubAttached` /
-        // `SubDetached`) project their own ids alongside.
-        D::DiscoveryMinted { source, .. }
-        | D::DiscoveryUnsupportedAnchorKind { source, .. }
-        | D::DiscoveryFanoutThreshold { source, .. }
-        | D::DiscoverySubReaped { source, .. } => Some(*source),
-        D::DiscoveryDenied { template, .. } => Some(*template),
+        // The discovery family keys to its template — the watch an operator names in a per-Sub
+        // filter. The minted/reaped Sub's own lifecycle signals (`SubAttached` / `SubDetached`)
+        // project their own ids alongside.
+        D::DiscoveryMinted { template, .. }
+        | D::DiscoveryUnsupportedAnchorKind { template, .. }
+        | D::DiscoveryFanoutThreshold { template, .. }
+        | D::DiscoverySubReaped { template, .. }
+        | D::DiscoveryDenied { template, .. } => Some(*template),
 
         D::StaleProbeResponse { .. }
         | D::StaleTimer { .. }

@@ -503,32 +503,40 @@ fn write_fields(out: &mut String, d: &WireDiagnostic, sty: Styler) {
             field(out, sty, "sub", sub.0);
         }
         WireDiagnostic::DiscoveryMinted {
-            source,
+            template,
             path,
             kind,
-            appeared,
+            entry,
             ..
         } => {
-            field(out, sty, "source", source.0);
+            field(out, sty, "template", template.0);
             field(out, sty, "path", path);
             field(out, sty, "kind", kind);
-            field(out, sty, "appeared", appeared);
+            field(out, sty, "entry", entry);
         }
         WireDiagnostic::DiscoveryUnsupportedAnchorKind {
-            source, path, kind, ..
+            template,
+            path,
+            kind,
+            ..
         } => {
-            field(out, sty, "source", source.0);
+            field(out, sty, "template", template.0);
             field(out, sty, "path", path);
             field(out, sty, "kind", kind);
         }
-        WireDiagnostic::DiscoveryFanoutThreshold { source, count, .. } => {
-            field(out, sty, "source", source.0);
+        WireDiagnostic::DiscoveryFanoutThreshold {
+            template, count, ..
+        } => {
+            field(out, sty, "template", template.0);
             field(out, sty, "count", count);
         }
         WireDiagnostic::DiscoverySubReaped {
-            source, sub, path, ..
+            template,
+            sub,
+            path,
+            ..
         } => {
-            field(out, sty, "source", source.0);
+            field(out, sty, "template", template.0);
             field(out, sty, "sub", sub.0);
             field(out, sty, "path", path);
         }
@@ -888,17 +896,17 @@ mod tests {
             }),
             "sub_rebound" | "rebind_unknown_sub" => json!({"diag": tag, "at": at, "sub": id}),
             "discovery_minted" => json!({
-                "diag": tag, "at": at, "source": id, "path": "/x", "kind": "dir",
-                "appeared": true,
+                "diag": tag, "at": at, "template": id, "path": "/x", "kind": "dir",
+                "entry": "appeared",
             }),
             "discovery_unsupported_anchor_kind" => json!({
-                "diag": tag, "at": at, "source": id, "path": "/x", "kind": "symlink",
+                "diag": tag, "at": at, "template": id, "path": "/x", "kind": "symlink",
             }),
             "discovery_fanout_threshold" => json!({
-                "diag": tag, "at": at, "source": id, "count": 1024,
+                "diag": tag, "at": at, "template": id, "count": 1024,
             }),
             "discovery_sub_reaped" => json!({
-                "diag": tag, "at": at, "source": id, "sub": id, "path": "/x",
+                "diag": tag, "at": at, "template": id, "sub": id, "path": "/x",
             }),
             "discovery_denied" => json!({
                 "diag": tag, "at": at, "template": id, "path": "/x",

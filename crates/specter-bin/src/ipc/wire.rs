@@ -490,25 +490,25 @@ pub(crate) enum WireDiagnostic {
     },
     DiscoveryMinted {
         at: WireTime,
-        source: WireId,
+        template: WireId,
         path: WirePath,
         kind: WireResourceKind,
-        appeared: bool,
+        entry: WireMintEntry,
     },
     DiscoveryUnsupportedAnchorKind {
         at: WireTime,
-        source: WireId,
+        template: WireId,
         path: WirePath,
         kind: WireEntryKind,
     },
     DiscoveryFanoutThreshold {
         at: WireTime,
-        source: WireId,
+        template: WireId,
         count: usize,
     },
     DiscoverySubReaped {
         at: WireTime,
-        source: WireId,
+        template: WireId,
         sub: WireId,
         path: WirePath,
     },
@@ -871,35 +871,41 @@ impl From<(&Diagnostic, &WireTime)> for WireDiagnostic {
                 sub: WireId::from(*sub),
             },
             Diagnostic::DiscoveryMinted {
-                source,
+                template,
                 path,
                 kind,
                 entry,
             } => Self::DiscoveryMinted {
                 at: at.clone(),
-                source: WireId::from(*source),
+                template: WireId::from(*template),
                 path: WirePath::from(path),
                 kind: WireResourceKind::from(*kind),
-                appeared: *entry == MintEntry::Appeared,
+                entry: WireMintEntry::from(*entry),
             },
-            Diagnostic::DiscoveryUnsupportedAnchorKind { source, path, kind } => {
-                Self::DiscoveryUnsupportedAnchorKind {
-                    at: at.clone(),
-                    source: WireId::from(*source),
-                    path: WirePath::from(path),
-                    kind: WireEntryKind::from(*kind),
-                }
-            }
-            Diagnostic::DiscoveryFanoutThreshold { source, count } => {
+            Diagnostic::DiscoveryUnsupportedAnchorKind {
+                template,
+                path,
+                kind,
+            } => Self::DiscoveryUnsupportedAnchorKind {
+                at: at.clone(),
+                template: WireId::from(*template),
+                path: WirePath::from(path),
+                kind: WireEntryKind::from(*kind),
+            },
+            Diagnostic::DiscoveryFanoutThreshold { template, count } => {
                 Self::DiscoveryFanoutThreshold {
                     at: at.clone(),
-                    source: WireId::from(*source),
+                    template: WireId::from(*template),
                     count: *count,
                 }
             }
-            Diagnostic::DiscoverySubReaped { source, sub, path } => Self::DiscoverySubReaped {
+            Diagnostic::DiscoverySubReaped {
+                template,
+                sub,
+                path,
+            } => Self::DiscoverySubReaped {
                 at: at.clone(),
-                source: WireId::from(*source),
+                template: WireId::from(*template),
                 sub: WireId::from(*sub),
                 path: WirePath::from(path),
             },
@@ -1408,6 +1414,53 @@ impl std::fmt::Display for WireResourceKind {
     }
 }
 
+/// Mirror of [`specter_core::MintEntry`], the `entry` of [`WireDiagnostic::DiscoveryMinted`].
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum WireMintEntry {
+    Enumerated,
+    Appeared,
+}
+
+impl From<MintEntry> for WireMintEntry {
+    fn from(e: MintEntry) -> Self {
+        match e {
+            MintEntry::Enumerated => Self::Enumerated,
+            MintEntry::Appeared => Self::Appeared,
+        }
+    }
+}
+
+impl WireMintEntry {
+    /// Every variant — the round-trip witness source; the tripwire below keeps it exhaustive.
+    const ALL: [Self; 2] = [Self::Enumerated, Self::Appeared];
+
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Enumerated => "enumerated",
+            Self::Appeared => "appeared",
+        }
+    }
+}
+
+// `ALL`-completeness tripwire: a new variant's arm overruns the fixed-size `ALL` (a compile error)
+// until `ALL` lists it. Defined, never called — the body's out-of-bounds index is checked anyway.
+const _: () = {
+    const fn all_complete(v: WireMintEntry) -> WireMintEntry {
+        match v {
+            WireMintEntry::Enumerated => WireMintEntry::ALL[0],
+            WireMintEntry::Appeared => WireMintEntry::ALL[1],
+        }
+    }
+    const _: fn(WireMintEntry) -> WireMintEntry = all_complete;
+};
+
+impl std::fmt::Display for WireMintEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum WireClaimKind {
@@ -1519,7 +1572,7 @@ pub(crate) enum WireDetachReason {
     ConfigDiffIdentityChanged,
     IpcDisabled,
     MatchVanished,
-    DiscoverySourceDetached,
+    TemplateDetached,
 }
 
 impl From<DetachReason> for WireDetachReason {
@@ -1529,7 +1582,7 @@ impl From<DetachReason> for WireDetachReason {
             DetachReason::ConfigDiffIdentityChanged => Self::ConfigDiffIdentityChanged,
             DetachReason::IpcDisabled => Self::IpcDisabled,
             DetachReason::MatchVanished => Self::MatchVanished,
-            DetachReason::DiscoverySourceDetached => Self::DiscoverySourceDetached,
+            DetachReason::TemplateDetached => Self::TemplateDetached,
         }
     }
 }
@@ -1541,7 +1594,7 @@ impl WireDetachReason {
         Self::ConfigDiffIdentityChanged,
         Self::IpcDisabled,
         Self::MatchVanished,
-        Self::DiscoverySourceDetached,
+        Self::TemplateDetached,
     ];
 
     pub(crate) const fn as_str(self) -> &'static str {
@@ -1550,7 +1603,7 @@ impl WireDetachReason {
             Self::ConfigDiffIdentityChanged => "config_diff_identity_changed",
             Self::IpcDisabled => "ipc_disabled",
             Self::MatchVanished => "match_vanished",
-            Self::DiscoverySourceDetached => "discovery_source_detached",
+            Self::TemplateDetached => "template_detached",
         }
     }
 }
@@ -1564,7 +1617,7 @@ const _: () = {
             WireDetachReason::ConfigDiffIdentityChanged => WireDetachReason::ALL[1],
             WireDetachReason::IpcDisabled => WireDetachReason::ALL[2],
             WireDetachReason::MatchVanished => WireDetachReason::ALL[3],
-            WireDetachReason::DiscoverySourceDetached => WireDetachReason::ALL[4],
+            WireDetachReason::TemplateDetached => WireDetachReason::ALL[4],
         }
     }
     const _: fn(WireDetachReason) -> WireDetachReason = all_complete;
@@ -2057,7 +2110,7 @@ mod tests {
     use super::{
         KNOWN_WIRE_VARIANTS, WireAbsorbMode, WireBurstHelper, WireBurstIntent, WireClaimKind,
         WireDetachReason, WireDiagnostic, WireEffectScope, WireEntryKind, WireFsEvent,
-        WireOverflowScope, WirePath, WireProfileStateDiscriminant, WireReactionKind,
+        WireMintEntry, WireOverflowScope, WirePath, WireProfileStateDiscriminant, WireReactionKind,
         WireReapTrigger, WireReloadTrigger, WireResourceKind, WireSpliceFailureCause,
         WireStateLabel, WireTime, WireWatchFailure,
     };
@@ -2443,25 +2496,25 @@ mod tests {
             },
             WireDiagnostic::DiscoveryMinted {
                 at: at(),
-                source: WireId(190),
+                template: WireId(190),
                 path: WirePath::from(Path::new("/srv/app1/log")),
                 kind: WireResourceKind::Dir,
-                appeared: true,
+                entry: WireMintEntry::Appeared,
             },
             WireDiagnostic::DiscoveryUnsupportedAnchorKind {
                 at: at(),
-                source: WireId(194),
+                template: WireId(194),
                 path: WirePath::from(Path::new("/srv/app1/current")),
                 kind: WireEntryKind::Symlink,
             },
             WireDiagnostic::DiscoveryFanoutThreshold {
                 at: at(),
-                source: WireId(191),
+                template: WireId(191),
                 count: 1024,
             },
             WireDiagnostic::DiscoverySubReaped {
                 at: at(),
-                source: WireId(192),
+                template: WireId(192),
                 sub: WireId(193),
                 path: WirePath::from(Path::new("/srv/app1/log")),
             },
@@ -2565,6 +2618,11 @@ mod tests {
     #[test]
     fn wire_entry_kind_round_trips_every_variant() {
         assert_snake_round_trip(&WireEntryKind::ALL, WireEntryKind::as_str);
+    }
+
+    #[test]
+    fn wire_mint_entry_round_trips_every_variant() {
+        assert_snake_round_trip(&WireMintEntry::ALL, WireMintEntry::as_str);
     }
 
     #[test]

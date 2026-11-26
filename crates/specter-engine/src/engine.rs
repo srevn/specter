@@ -370,7 +370,7 @@ impl Engine {
             }
         }
         out.diagnostics.push(Diagnostic::DiscoveryMinted {
-            source: template,
+            template,
             path,
             kind,
             entry,

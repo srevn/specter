@@ -123,17 +123,16 @@ pub enum SpliceFailureCause {
 ///   lifecycle authority for minted Subs, both directions. Deliberately *not* an anchor-loss story:
 ///   an atomic replace keeps the terminus in the set (slot identity is `(parent, segment)`), so the
 ///   minted Sub survives replaces with its fire history intact and only a genuinely vanished match
-///   reaps. Pairs with [`Diagnostic::DiscoverySubReaped`] (source-keyed, path-carrying narration).
-/// - [`Self::DiscoverySourceDetached`]: the discovery Sub that minted this Sub was detached, so the
-///   cascade reaped the minted set — named for what actually happened to *this* Sub's source rather
-///   than overloading the match story.
+///   reaps. Follows the [`Diagnostic::DiscoverySubReaped`] that names its template and path.
+/// - [`Self::TemplateDetached`]: the template that minted this Sub was detached, whatever detached
+///   it, and the set it minted follows it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DetachReason {
     ConfigDiffRemoved,
     ConfigDiffIdentityChanged,
     IpcDisabled,
     MatchVanished,
-    DiscoverySourceDetached,
+    TemplateDetached,
 }
 
 /// Engine-emitted diagnostic. Equality is structural so tests can pin the exact variant + fields
@@ -620,9 +619,8 @@ pub enum Diagnostic {
     /// Distinct from siblings:
     /// - [`Self::DetachUnknownSub`] — a *failed* detach (stale id); no Sub was removed, no
     ///   `SubDetached`.
-    /// - [`Self::DiscoverySubReaped`] — source-keyed narration for the same dynamic-Sub teardown
-    ///   that this variant captures per-Sub. The two pair: `DiscoverySubReaped` carries the path,
-    ///   `SubDetached` carries the per-Sub `(sub, profile, reason)` triple.
+    /// - [`Self::DiscoverySubReaped`] — the template's line for a match it reaps, carrying the
+    ///   path; this variant is the reaped Sub's own `(sub, profile, reason)`.
     /// - [`Self::SubRebound`] — in-place `modified_params` rebind; `has_fired` and the per-Sub
     ///   history survive, no `SubDetached`. The `modified_identity` arm IS a detach + attach and
     ///   DOES emit `SubDetached` with [`DetachReason::ConfigDiffIdentityChanged`].
@@ -650,29 +648,22 @@ pub enum Diagnostic {
     /// a benign no-op. Distinct from [`Self::DetachUnknownSub`] (a stale-id detach attempt) and
     /// from [`Self::EffectCompleteForUnknownSub`] (a stray completion arrival).
     RebindUnknownSub { sub: SubId },
-    /// A discovery template's reconcile pass matched `path` and minted a dynamic Sub for it; `kind`
-    /// is the snapshot's kind for the matched terminus. `source` is the discovery Sub the mint ran
-    /// for. Operator narration — the bin logs it as a mint observed.
-    ///
-    /// `kind` is [`ResourceKind`] — it names the minted *slot's* kind, exactly what the Tree
-    /// stamped at mint. The sibling [`Self::DiscoveryUnsupportedAnchorKind`] deliberately carries
-    /// [`EntryKind`] instead; see its rustdoc.
-    ///
-    /// `entry` is how the match entered the template's set — an enumeration pins cold, an
-    /// appearance owes its first fire — so the log answers "why did / didn't this mint react".
+    /// `template`'s pass matched `path` and minted a Sub for it. `kind` is the kind the Tree
+    /// stamped on the match's slot; `entry` is how the match entered the template's set — an
+    /// enumeration pins cold, an appearance owes its first fire — so the line answers "why did /
+    /// didn't this mint react".
     DiscoveryMinted {
-        source: SubId,
+        template: SubId,
         path: Arc<Path>,
         kind: ResourceKind,
         entry: MintEntry,
     },
-    /// A discovery reconcile matched a chain terminus whose kind can never anchor a minted Sub —
-    /// `Symlink` or `Other` (fifo / socket / device) — and skipped the mint wholesale: no Sub
-    /// attaches, no Profile anchors there (the post-graft reconciler's own diff bookkeeping is
-    /// independent). Minting would create a File-kind Sub whose first probe folds `Vanished` (the
-    /// anchor-file walk accepts only regular files), tearing it down and re-minting on the next
-    /// reconcile — a mint→reap round-trip per chain event, forever, precisely on the patterns
-    /// symlink farms match (`/srv/*/current`).
+    /// `template`'s pass matched a terminus whose kind can never anchor a minted Sub — `Symlink` or
+    /// `Other` (fifo / socket / device) — and skipped the mint wholesale: no Sub attaches, no Profile
+    /// anchors there (the post-graft reconciler's own diff bookkeeping is independent). Minting would
+    /// create a File-kind Sub whose first probe folds `Vanished` (the anchor-file walk accepts only
+    /// regular files), tearing it down and re-minting on the next reconcile — a mint→reap round-trip
+    /// per chain event, forever, precisely on the patterns symlink farms match (`/srv/*/current`).
     ///
     /// Once per template lifetime ([`crate::SubRegistry::narrate_once`]): later unsupported matches
     /// under the same template skip silently. Only this line is once — the terminus kind is read
@@ -682,24 +673,21 @@ pub enum Diagnostic {
     /// `kind` is [`EntryKind`], **not** [`ResourceKind`]: the Tree projection folds `Symlink`/`Other`
     /// into `File`, which would make the narration name the one kind the terminus isn't.
     DiscoveryUnsupportedAnchorKind {
-        source: SubId,
+        template: SubId,
         path: Arc<Path>,
         kind: EntryKind,
     },
-    /// A discovery template's live minted-Sub count (derived from `SubRegistry`) crossed the
-    /// warning threshold for the first time — the pattern is matching more targets than typical
-    /// (likely too broad, e.g. `/*` without further constraint). Once per template lifetime
-    /// ([`crate::SubRegistry::narrate_once`]).
-    DiscoveryFanoutThreshold { source: SubId, count: usize },
-    /// A dynamic Sub minted by the discovery template `source` at `path` was reaped because the
-    /// reconcile's certified match set no longer contains its terminus — the removal half of the
-    /// reconcile-owned minted lifecycle. Operator narration; if the path re-materialises a later
-    /// reconcile re-mints it (under a fresh [`SubId`]). A *replaced* terminus never reaches here:
-    /// its slot survives the replace, so the dedup finds the still-attached Sub and its own
-    /// recovery descent fires. Pairs with the per-Sub [`Self::SubDetached`] carrying
-    /// [`DetachReason::MatchVanished`].
+    /// `template`'s minted set grew past the warning threshold to `count` Subs: the pattern is
+    /// matching more targets than typical (likely too broad, e.g. `/*` without further constraint).
+    /// Once per template lifetime ([`crate::SubRegistry::narrate_once`]).
+    DiscoveryFanoutThreshold { template: SubId, count: usize },
+    /// The Sub `template` minted at `path` was reaped: the pass's certified match set no longer
+    /// holds its match. A match that appears again is minted afresh, under a new [`SubId`]; a
+    /// *replaced* one never reaches here — its slot survives the replace, so the dedup finds the
+    /// Sub still attached and its own recovery descent fires. The Sub's [`Self::SubDetached`]
+    /// follows, under [`DetachReason::MatchVanished`].
     DiscoverySubReaped {
-        source: SubId,
+        template: SubId,
         sub: SubId,
         path: Arc<Path>,
     },
