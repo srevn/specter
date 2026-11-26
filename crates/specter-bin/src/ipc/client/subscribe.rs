@@ -2,7 +2,9 @@
 //!
 //! Both verbs open a connection, write a [`WireRequest::Subscribe`], read + validate the
 //! [`ResponsePayload::SubscribeAck`] line, and then loop reading line-delimited
-//! [`WireDiagnostic`]s. The pre-loop work is identical; this module owns it.
+//! [`WireDiagnostic`]s. The pre-loop work is identical; this module owns it: `tail` opens the whole
+//! stream ([`open`]), `wait` one watch's ([`open_watch`]), which also hands back the Sub the daemon
+//! resolved the watch's name to.
 //!
 //! The post-ack stream loop diverges between the two verbs:
 //!
@@ -24,7 +26,7 @@ use std::time::Duration;
 
 use crate::ipc::client::connect;
 use crate::ipc::framing::parse_strict;
-use crate::ipc::protocol::{ResponsePayload, WireRequest};
+use crate::ipc::protocol::{ResponsePayload, WireId, WireRequest};
 use crate::ipc::wire::WireDiagnostic;
 
 /// Live subscription over a daemon connection: post-ack, ready for streamed [`WireDiagnostic`] reads.
@@ -41,23 +43,45 @@ pub(crate) struct Subscription {
     line_buf: String,
 }
 
-/// Open a daemon connection, ship the Subscribe request, validate the ack, return a
-/// [`Subscription`] ready for the stream loop.
+/// Open the whole stream: every line the daemon narrates (the `tail` shape).
+pub(crate) fn open(client: &ClientArgs, verb: &'static str) -> Result<Subscription, ExitCode> {
+    handshake(client, verb, None).map(|(subscription, _)| subscription)
+}
+
+/// Open the stream of the watch `name`, and the Sub the daemon resolved the name to. The name is
+/// resolved atomically inside the Subscribe handler (closes the historical resolve-then-subscribe
+/// race window — `disable` either lands before, producing `WireErrorCode::UnknownSub`, or after,
+/// surfacing as `SubDetached` on the stream). An ack that names no Sub answers no named subscribe:
+/// it fails here, where a wait reading it would never see its watch's own detach.
+pub(crate) fn open_watch(
+    client: &ClientArgs,
+    verb: &'static str,
+    name: CompactString,
+) -> Result<(Subscription, WireId), ExitCode> {
+    match handshake(client, verb, Some(name))? {
+        (subscription, Some(target)) => Ok((subscription, target)),
+        (_, None) => {
+            connect::emit_error(
+                client,
+                format_args!("specter {verb}: subscribe ack named no watch"),
+            );
+            Err(ExitCode::from(1))
+        }
+    }
+}
+
+/// Open a daemon connection, ship the Subscribe request, validate the ack, and return a
+/// [`Subscription`] ready for the stream loop beside the Sub the ack names.
 ///
 /// `verb` is the operator-facing command name (`"tail"` / `"wait"`), the `specter <verb>:` prefix
 /// on every failure path: the connect stage routes through [`connect::dial`] (the seam shared with
 /// the one-shot verbs), the remaining transport stages through [`connect::emit_error`], the ack
 /// tail through [`connect::fail_response`]. Call sites `return code` directly.
-///
-/// `name = None` ⇒ unfiltered subscription (the `tail` shape). `name = Some(_)` ⇒ per-Sub filter,
-/// server-resolved atomically inside the Subscribe handler (closes the historical
-/// resolve-then-subscribe race window — `disable` either lands before, producing
-/// `WireErrorCode::UnknownSub`, or after, surfacing as `SubDetached` on the stream).
-pub(crate) fn open(
+fn handshake(
     client: &ClientArgs,
     verb: &'static str,
     name: Option<CompactString>,
-) -> Result<Subscription, ExitCode> {
+) -> Result<(Subscription, Option<WireId>), ExitCode> {
     let mut stream = connect::dial(client, verb)?;
 
     // Ship the Subscribe through the same write helper status/list/show use — JSON line + LF in one
@@ -68,8 +92,8 @@ pub(crate) fn open(
     })?;
 
     // BufReader wraps the stream by ownership. The ack uses the connect-time 5s read deadline
-    // (mirrors `connect::round_trip`); the caller overrides it after `open` returns — `tail` clears
-    // to indefinite, `wait` re-applies the remaining `--timeout` budget before each read.
+    // (mirrors `connect::round_trip`); the caller overrides it once the stream is open — `tail`
+    // clears to indefinite, `wait` re-applies the remaining `--timeout` budget before each read.
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     let n = reader.read_line(&mut line).map_err(|e| {
@@ -92,10 +116,13 @@ pub(crate) fn open(
             ExitCode::from(1)
         })?;
     match ack {
-        ResponsePayload::SubscribeAck { .. } => Ok(Subscription {
-            reader,
-            line_buf: String::new(),
-        }),
+        ResponsePayload::SubscribeAck { sub } => Ok((
+            Subscription {
+                reader,
+                line_buf: String::new(),
+            },
+            sub,
+        )),
         other => Err(connect::fail_response(client, verb, other)),
     }
 }
@@ -135,5 +162,38 @@ impl Subscription {
         serde_json::from_str::<WireDiagnostic>(self.line_buf.trim_end_matches('\n'))
             .map(Some)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::open_watch;
+    use specter_config::{ClientArgs, ColorWhen};
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
+
+    /// A named subscribe whose ack names no Sub fails at the handshake: a wait holding no target
+    /// would read past its watch's own detach to the timeout.
+    #[test]
+    fn open_watch_refuses_an_ack_that_names_no_watch() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let socket = dir.path().join("specter.sock");
+        let listener = UnixListener::bind(&socket).expect("bind the stand-in daemon");
+        let daemon = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept the client");
+            let mut reader = BufReader::new(stream);
+            let mut request = String::new();
+            reader.read_line(&mut request).expect("read the subscribe");
+            reader
+                .get_mut()
+                .write_all(b"{\"kind\":\"subscribe_ack\",\"sub\":null}\n")
+                .expect("write the ack");
+        });
+        let client = ClientArgs {
+            socket: Some(socket),
+            color: ColorWhen::Never,
+        };
+        assert!(open_watch(&client, "wait", "logs".into()).is_err());
+        daemon.join().expect("the stand-in daemon answered");
     }
 }

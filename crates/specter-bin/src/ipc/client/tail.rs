@@ -53,7 +53,7 @@ pub(crate) fn run(args: &TailArgs) -> ExitCode {
         return ExitCode::from(2);
     }
 
-    let mut sub = match subscribe::open(&args.client, "tail", None) {
+    let mut sub = match subscribe::open(&args.client, "tail") {
         Ok(s) => s,
         Err(code) => return code,
     };

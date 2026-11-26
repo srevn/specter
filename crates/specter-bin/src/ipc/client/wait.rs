@@ -1,9 +1,9 @@
 //! `specter wait <name>` client handler.
 //!
-//! Subscribes by name (server resolves `name → SubId` atomic with `add_subscriber`; an unknown name
-//! fails the Subscribe immediately with `WireErrorCode::UnknownSub`), then reads streamed
-//! [`WireDiagnostic`]s until one matches the requested `--kind` (or the deadline fires, or the
-//! stream ends without a match).
+//! Subscribes to the watch's stream by name (server resolves `name → SubId` atomic with
+//! `add_subscriber`; an unknown name fails the Subscribe immediately with
+//! `WireErrorCode::UnknownSub`), then reads streamed [`WireDiagnostic`]s until one matches the
+//! requested `--kind` (or the deadline fires, or the stream ends without a match).
 //!
 //! # Exit codes
 //!
@@ -11,9 +11,9 @@
 //!   confirmation (one human line).
 //! - `1` — connect / subscribe failure (including the daemon's structured
 //!   `WireErrorCode::UnknownSub` error response).
-//! - `2` — precondition violated mid-wait: `--kind fire` observed a [`WireDiagnostic::SubDetached`]
-//!   before the requested fire. The Sub is gone; no fire is coming, an indefinite wait would hang
-//!   for an event that will never arrive.
+//! - `2` — precondition violated mid-wait: `--kind fire` observed the watch's own
+//!   [`WireDiagnostic::SubDetached`] before the requested fire. The watch is gone; no fire is
+//!   coming, an indefinite wait would hang for an event that will never arrive.
 //! - `124` — deadline elapsed (POSIX `timeout(1)` convention).
 //! - other non-zero ([`ExitCode::FAILURE`]) — stream ended without a match (daemon shutdown closed
 //!   the conn, peer terminated mid- stream, etc.).
@@ -51,6 +51,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use crate::ipc::client::{connect, subscribe};
+use crate::ipc::protocol::WireId;
 use crate::ipc::render::{diag, style};
 use crate::ipc::wire::WireDiagnostic;
 
@@ -59,8 +60,8 @@ pub(crate) fn run(args: &WaitArgs) -> ExitCode {
     let deadline = args.timeout.map(|d| Instant::now() + d);
 
     let name = CompactString::from(args.name.as_str());
-    let mut sub = match subscribe::open(&args.client, "wait", Some(name)) {
-        Ok(s) => s,
+    let (mut sub, target) = match subscribe::open_watch(&args.client, "wait", name) {
+        Ok(opened) => opened,
         Err(code) => return code,
     };
 
@@ -97,7 +98,7 @@ pub(crate) fn run(args: &WaitArgs) -> ExitCode {
         }
 
         match sub.read_next() {
-            Ok(Some(wire)) => match classify(args.kind, &wire) {
+            Ok(Some(wire)) => match classify(args.kind, &wire, target) {
                 Match::Matched => return emit_matched(&args.client, &wire),
                 Match::DetachBeforeFire => {
                     connect::emit_error(
@@ -138,27 +139,29 @@ pub(crate) fn run(args: &WaitArgs) -> ExitCode {
 enum Match {
     /// The event is the one the operator was waiting for. Render + exit `0`.
     Matched,
-    /// `--kind fire` observed a [`WireDiagnostic::SubDetached`]. The Sub is gone; no fire is
-    /// coming. Exit `2`.
+    /// `--kind fire` observed the watch's own [`WireDiagnostic::SubDetached`]. The watch is gone;
+    /// no fire is coming. Exit `2`.
     DetachBeforeFire,
-    /// Not the requested kind — keep reading. Per-Sub server-side filtering guarantees we only see
-    /// events naming the resolved Sub, so this arm covers in-stream events like
-    /// [`WireDiagnostic::SubRebound`] (a `modified_params` rebind) or post-fire effects from
-    /// earlier bursts.
+    /// Not an event this wait decides on — keep reading: a [`WireDiagnostic::SubRebound`], a fire
+    /// during a detach-wait, a match's own detach.
     Skip,
 }
 
-/// Classify one event against the wait kind.
+/// Classify one event against the wait kind. `target` is the Sub the daemon resolved the watch's
+/// name to: any fire on the stream is the watch's, its own or a match's, but only the target's own
+/// detach decides — on a dynamic watch's stream a match's reap is not the watch leaving.
 ///
-/// The per-Sub server-side filter guarantees every reachable event names the resolved Sub, so this
-/// match only branches on the variant tag. A new per-Sub diagnostic variant (added to both
-/// [`specter_core::Diagnostic`] and `crate::driver::forward`'s `diag_sub_id` projection) reaches
-/// the `Skip` arm by default; that's the right behaviour — only Fire/Detach are wait-actionable.
-const fn classify(kind: WaitKind, wire: &WireDiagnostic) -> Match {
+/// A new per-Sub diagnostic variant reaches the `Skip` arm by default; that's the right behaviour —
+/// only Fire/Detach are wait-actionable.
+const fn classify(kind: WaitKind, wire: &WireDiagnostic, target: WireId) -> Match {
     match (kind, wire) {
-        (WaitKind::Fire, WireDiagnostic::SubFired { .. })
-        | (WaitKind::Detach, WireDiagnostic::SubDetached { .. }) => Match::Matched,
-        (WaitKind::Fire, WireDiagnostic::SubDetached { .. }) => Match::DetachBeforeFire,
+        (WaitKind::Fire, WireDiagnostic::SubFired { .. }) => Match::Matched,
+        (WaitKind::Detach, WireDiagnostic::SubDetached { sub, .. }) if sub.0 == target.0 => {
+            Match::Matched
+        }
+        (WaitKind::Fire, WireDiagnostic::SubDetached { sub, .. }) if sub.0 == target.0 => {
+            Match::DetachBeforeFire
+        }
         _ => Match::Skip,
     }
 }
@@ -200,10 +203,13 @@ mod tests {
     use specter_config::WaitKind;
     use std::time::UNIX_EPOCH;
 
+    /// The Sub the daemon resolved the waited watch's name to.
+    const TARGET: WireId = WireId(1);
+
     fn sub_fired() -> WireDiagnostic {
         WireDiagnostic::SubFired {
             at: WireTime::from(UNIX_EPOCH),
-            sub: WireId(1),
+            sub: TARGET,
             profile: WireId(2),
             count: 1,
             minted_by: None,
@@ -213,7 +219,7 @@ mod tests {
     fn sub_detached(reason: WireDetachReason) -> WireDiagnostic {
         WireDiagnostic::SubDetached {
             at: WireTime::from(UNIX_EPOCH),
-            sub: WireId(1),
+            sub: TARGET,
             profile: WireId(2),
             reason,
             minted_by: None,
@@ -223,7 +229,7 @@ mod tests {
     fn sub_rebound() -> WireDiagnostic {
         WireDiagnostic::SubRebound {
             at: WireTime::from(UNIX_EPOCH),
-            sub: WireId(1),
+            sub: TARGET,
             minted_by: None,
         }
     }
@@ -232,14 +238,13 @@ mod tests {
     #[test]
     fn classify_fire_matches_subfired() {
         assert!(matches!(
-            classify(WaitKind::Fire, &sub_fired()),
+            classify(WaitKind::Fire, &sub_fired(), TARGET),
             Match::Matched,
         ));
     }
 
-    /// `--kind detach` against `SubDetached` matches regardless of reason (`ConfigDiffRemoved`,
-    /// `IpcDisabled`, `MatchVanished`, `ConfigDiffIdentityChanged`). Operators waiting for "this
-    /// Sub left" don't differentiate the cause.
+    /// `--kind detach` against the target's `SubDetached` matches regardless of reason. Operators
+    /// waiting for "this watch left" don't differentiate the cause.
     #[test]
     fn classify_detach_matches_subdetached_any_reason() {
         for reason in [
@@ -247,23 +252,44 @@ mod tests {
             WireDetachReason::ConfigDiffIdentityChanged,
             WireDetachReason::IpcDisabled,
             WireDetachReason::MatchVanished,
+            WireDetachReason::TemplateDetached,
         ] {
             assert!(matches!(
-                classify(WaitKind::Detach, &sub_detached(reason)),
+                classify(WaitKind::Detach, &sub_detached(reason), TARGET),
                 Match::Matched,
             ));
         }
     }
 
-    /// `--kind fire` observing a detach is a precondition violation — the Sub is gone, no fire is
-    /// coming. The handler exits `2`. Distinct from `124` (timeout) and `1` (subscribe failure) so
-    /// scripts can branch on the cause.
+    /// `--kind fire` observing the target's detach is a precondition violation — the watch is gone,
+    /// no fire is coming. The handler exits `2`. Distinct from `124` (timeout) and `1` (subscribe
+    /// failure) so scripts can branch on the cause.
     #[test]
     fn classify_fire_observes_detach_returns_detach_before_fire() {
         assert!(matches!(
-            classify(WaitKind::Fire, &sub_detached(WireDetachReason::IpcDisabled)),
+            classify(
+                WaitKind::Fire,
+                &sub_detached(WireDetachReason::IpcDisabled),
+                TARGET,
+            ),
             Match::DetachBeforeFire,
         ));
+    }
+
+    /// On a dynamic watch's stream a match's detach is not the watch leaving: both kinds skip it
+    /// and read on, where the target's own detach decides.
+    #[test]
+    fn classify_skips_a_match_detach_for_both_kinds() {
+        let reaped = WireDiagnostic::SubDetached {
+            at: WireTime::from(UNIX_EPOCH),
+            sub: WireId(7),
+            profile: WireId(8),
+            reason: WireDetachReason::MatchVanished,
+            minted_by: Some(TARGET),
+        };
+        for kind in [WaitKind::Fire, WaitKind::Detach] {
+            assert!(matches!(classify(kind, &reaped, TARGET), Match::Skip));
+        }
     }
 
     /// `--kind detach` observing a fire is normal — fires happen during a detach-wait. Skip and
@@ -271,7 +297,7 @@ mod tests {
     #[test]
     fn classify_detach_observes_fire_skips() {
         assert!(matches!(
-            classify(WaitKind::Detach, &sub_fired()),
+            classify(WaitKind::Detach, &sub_fired(), TARGET),
             Match::Skip,
         ));
     }
@@ -281,11 +307,11 @@ mod tests {
     #[test]
     fn classify_subrebound_is_skip_for_both_kinds() {
         assert!(matches!(
-            classify(WaitKind::Fire, &sub_rebound()),
+            classify(WaitKind::Fire, &sub_rebound(), TARGET),
             Match::Skip,
         ));
         assert!(matches!(
-            classify(WaitKind::Detach, &sub_rebound()),
+            classify(WaitKind::Detach, &sub_rebound(), TARGET),
             Match::Skip,
         ));
     }

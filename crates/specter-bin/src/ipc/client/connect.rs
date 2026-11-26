@@ -243,7 +243,8 @@ pub(crate) fn fail_response(
 }
 
 /// The single resolve-and-connect seam both client verb families route through — the one-shot
-/// family ([`round_trip`]) and the streaming family ([`crate::ipc::client::subscribe::open`]).
+/// family ([`round_trip`]) and the streaming family ([`crate::ipc::client::subscribe::open`],
+/// [`crate::ipc::client::subscribe::open_watch`]).
 ///
 /// Resolve the socket-path policy ([`resolve::resolve`], reading `--socket` then `$SPECTER_SOCK` then
 /// the per-platform convention through the one [`resolve::env_os`] touchpoint the daemon shares),
