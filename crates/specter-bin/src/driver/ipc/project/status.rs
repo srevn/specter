@@ -50,6 +50,7 @@ mod tests {
     use super::status;
     use crate::driver::{DriverState, ReloadTrigger};
     use crate::ipc::wire::WirePath;
+    use crate::testkit::{EngineGuard, config_from_watches, engine_with, fresh_state};
     use compact_str::CompactString;
     use specter_config::Config;
     use specter_engine::Engine;
@@ -57,10 +58,6 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::thread::sleep;
     use std::time::Duration;
-
-    fn fresh_state() -> DriverState {
-        DriverState::new(PathBuf::from("/tmp/specter-test.sock"))
-    }
 
     #[test]
     fn status_empty_engine_zero_counters() {
@@ -189,20 +186,7 @@ mod tests {
         let engine = Engine::new();
         let ds = fresh_state();
         let disabled = BTreeSet::<CompactString>::new();
-
-        let toml = r#"
-    [[watch]]
-    name      = "off_one"
-    path      = "/tmp"
-    actions   = [{ exec = ["true"] }]
-    enabled   = false
-    
-    [[watch]]
-    name      = "on_one"
-    path      = "/tmp"
-    actions   = [{ exec = ["true"] }]
-    "#;
-        let config = Config::from_str(toml).expect("mixed config parses");
+        let config = config_from_watches(&[("off_one", "/tmp", false), ("on_one", "/tmp", true)]);
 
         let r = status(
             &engine,
@@ -219,37 +203,15 @@ mod tests {
     /// `sub_total` carries all three.
     #[test]
     fn status_discovery_active_counts_templates() {
-        use specter_core::Input;
-        use std::time::Instant;
-
-        let toml = r#"
-    [[watch]]
-    name      = "logs_a"
-    path      = "/srv/a/*/log"
-    actions   = [{ exec = ["true"] }]
-
-    [[watch]]
-    name      = "logs_b"
-    path      = "/srv/b/*/log"
-    actions   = [{ exec = ["true"] }]
-
-    [[watch]]
-    name      = "plain"
-    path      = "/srv/plain"
-    actions   = [{ exec = ["true"] }]
-    "#;
-        let config = Config::from_str(toml).expect("mixed config parses");
-        let mut engine = Engine::new();
-        let now = Instant::now();
-        for spec in config.active_watches() {
-            let _ = engine.step(Input::AttachSub(spec.to_attach_request()), now);
-        }
-        // The attaches pend on absent prefixes with descent probes in flight; the projection only
-        // reads registry counts, so disarm before asserting.
-        let _ = engine.cancel_all_in_flight_probes();
+        let config = config_from_watches(&[
+            ("logs_a", "/srv/a/*/log", true),
+            ("logs_b", "/srv/b/*/log", true),
+            ("plain", "/srv/plain", true),
+        ]);
+        let guard = EngineGuard::wrap(engine_with(&config));
 
         let r = status(
-            &engine,
+            guard.engine(),
             &fresh_state(),
             &BTreeSet::new(),
             &config,

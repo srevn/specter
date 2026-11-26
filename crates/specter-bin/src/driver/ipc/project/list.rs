@@ -117,85 +117,13 @@ fn disabled_row(name: &str, source: DisabledSource) -> ListRow {
 #[cfg(test)]
 mod tests {
     use super::list;
-    use crate::driver::DriverState;
     use crate::ipc::protocol::{DisabledSource, WireId};
     use crate::ipc::wire::WireReactionKind;
-    use crate::testkit::mint_one;
+    use crate::testkit::{EngineGuard, config_from_watches, engine_with, fresh_state, mint_one};
     use compact_str::CompactString;
     use specter_config::Config;
-    use specter_core::Input;
     use specter_engine::Engine;
     use std::collections::BTreeSet;
-    use std::fmt::Write as _;
-    use std::path::PathBuf;
-    use std::time::Instant;
-
-    fn fresh_state() -> DriverState {
-        DriverState::new(PathBuf::from("/tmp/specter-test.sock"))
-    }
-
-    /// Build a Config from a TOML string keyed by anchor path so the tests can stage many watches
-    /// at different paths. The path itself is irrelevant to the projection — the engine descends
-    /// but never resolves it in these tests.
-    fn config_from_watches(watches: &[(&str, &str, bool)]) -> Config {
-        let mut s = String::new();
-        for (name, path, enabled) in watches {
-            let enabled = if *enabled { "true" } else { "false" };
-            let _ = write!(
-                s,
-                r#"
-    [[watch]]
-    name      = "{name}"
-    path      = "{path}"
-    actions   = [{{ exec = ["true"] }}]
-    enabled   = {enabled}
-    "#,
-            );
-        }
-        Config::from_str(&s).expect("test config parses")
-    }
-
-    /// Attach every active watch in `config` through `engine.step`. The returned engine carries one
-    /// Sub per active watch, in source order. `StepOutput`s are discarded — the projection reads
-    /// `engine.subs()` directly.
-    fn engine_with(config: &Config) -> Engine {
-        let mut engine = Engine::new();
-        let now = Instant::now();
-        for spec in config.active_watches() {
-            let _ = engine.step(Input::AttachSub(spec.to_attach_request()), now);
-        }
-        engine
-    }
-
-    /// RAII guard that drains every in-flight probe before the wrapped `Engine` drops. Without it
-    /// `ProbeSlot`'s linear-edge tripwire (`specter_core::probe`) panics on test teardown — every
-    /// attach arms a probe on the descent / Seed path.
-    ///
-    /// Tests construct the engine, hand it to [`Self::wrap`], project off [`Self::engine`], and
-    /// `drop(guard)` cleans up.
-    struct EngineGuard {
-        engine: Option<Engine>,
-    }
-
-    impl EngineGuard {
-        fn wrap(engine: Engine) -> Self {
-            Self {
-                engine: Some(engine),
-            }
-        }
-
-        fn engine(&self) -> &Engine {
-            self.engine.as_ref().expect("engine present until drop")
-        }
-    }
-
-    impl Drop for EngineGuard {
-        fn drop(&mut self) {
-            if let Some(mut e) = self.engine.take() {
-                let _ = e.cancel_all_in_flight_probes();
-            }
-        }
-    }
 
     /// All three sources contribute rows; output is name-keyed and alphabetic.
     #[test]

@@ -149,75 +149,14 @@ fn project_details(
 #[cfg(test)]
 mod tests {
     use super::show;
-    use crate::driver::DriverState;
     use crate::ipc::protocol::{DisabledSource, ShowResponse, WireReaction};
-    use crate::testkit::mint_one;
+    use crate::testkit::{EngineGuard, config_from_watches, engine_with, fresh_state, mint_one};
     use compact_str::CompactString;
     use specter_config::Config;
     use specter_core::Input;
     use specter_engine::Engine;
     use std::collections::BTreeSet;
-    use std::fmt::Write as _;
-    use std::path::PathBuf;
     use std::time::{Duration, Instant};
-
-    fn fresh_state() -> DriverState {
-        DriverState::new(PathBuf::from("/tmp/specter-test.sock"))
-    }
-
-    fn config_from_watches(watches: &[(&str, &str, bool)]) -> Config {
-        let mut s = String::new();
-        for (name, path, enabled) in watches {
-            let enabled = if *enabled { "true" } else { "false" };
-            let _ = write!(
-                s,
-                r#"
-    [[watch]]
-    name      = "{name}"
-    path      = "{path}"
-    actions   = [{{ exec = ["true"] }}]
-    enabled   = {enabled}
-    "#,
-            );
-        }
-        Config::from_str(&s).expect("test config parses")
-    }
-
-    fn engine_with(config: &Config) -> Engine {
-        let mut engine = Engine::new();
-        let now = Instant::now();
-        for spec in config.active_watches() {
-            let _ = engine.step(Input::AttachSub(spec.to_attach_request()), now);
-        }
-        engine
-    }
-
-    /// RAII guard — see [`crate::driver::ipc::project::list::tests::EngineGuard`] for the
-    /// linear-edge `ProbeSlot` rationale. Inlined here rather than reaching across the inline tests
-    /// to keep the test modules self-contained.
-    struct EngineGuard {
-        engine: Option<Engine>,
-    }
-
-    impl EngineGuard {
-        fn wrap(engine: Engine) -> Self {
-            Self {
-                engine: Some(engine),
-            }
-        }
-
-        fn engine(&self) -> &Engine {
-            self.engine.as_ref().expect("engine present until drop")
-        }
-    }
-
-    impl Drop for EngineGuard {
-        fn drop(&mut self) {
-            if let Some(mut e) = self.engine.take() {
-                let _ = e.cancel_all_in_flight_probes();
-            }
-        }
-    }
 
     /// An engine-attached name returns `Active` with a populated `SubDetails`. Anchor is
     /// `Some(path)` for a freshly attached Sub (the engine descends synchronously when the path
