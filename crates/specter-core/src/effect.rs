@@ -28,10 +28,8 @@ use std::sync::Arc;
 /// [`relative`](Effect::relative)) is a derived method, never a stored field, so a stored
 /// projection cannot drift from the shape.
 ///
-/// `capture_output` mirrors the Sub's `log_output` at emit time: the actuator picks `Stdio::null()`
-/// (discard) vs `Stdio::inherit()` (forward to Specter's stdout/stderr, where the supervisor's log
-/// facility captures it). `program` / `anchor_path` / `exclude` are `Arc`-shared so coalesced
-/// Effects from one emit call reuse one allocation each.
+/// `program` / `anchor_path` / `exclude` are `Arc`-shared so coalesced Effects from one emit call
+/// reuse one allocation each.
 #[derive(Clone, Debug)]
 pub struct Effect {
     pub sub: SubId,
@@ -48,7 +46,6 @@ pub struct Effect {
     /// — the same operator-narration id with one extra cross-actor hop.
     pub correlation: CorrelationId,
     pub forced: bool,
-    pub capture_output: bool,
     pub sub_name: CompactString,
     pub program: Arc<ActionProgram>,
     pub anchor_path: Arc<Path>,
@@ -76,11 +73,8 @@ pub enum EffectTarget {
     },
 }
 
-/// Constructor input for [`Effect`].
-///
-/// Destructured into the flat identity/payload fields, never stored. Shared by both engine emit
-/// arms and every test fixture; the multiple consumers earn it a name (a stored field group with no
-/// second consumer would not).
+/// Constructor input for [`Effect`]: what [`Effect::subtree`] and [`Effect::per_file`] share,
+/// destructured into the flat fields and never stored.
 #[derive(Debug)]
 pub struct EffectCommon {
     pub sub: SubId,
@@ -88,7 +82,6 @@ pub struct EffectCommon {
     pub anchor: ResourceId,
     pub correlation: CorrelationId,
     pub forced: bool,
-    pub capture_output: bool,
     pub sub_name: CompactString,
     pub program: Arc<ActionProgram>,
     pub anchor_path: Arc<Path>,
@@ -131,7 +124,6 @@ impl Effect {
             anchor: common.anchor,
             correlation: common.correlation,
             forced: common.forced,
-            capture_output: common.capture_output,
             sub_name: common.sub_name,
             program: common.program,
             anchor_path: common.anchor_path,

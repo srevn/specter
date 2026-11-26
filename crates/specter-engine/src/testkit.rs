@@ -152,9 +152,9 @@ pub fn attach_request(
 /// Attach a subtree-root Sub at `anchor`, returning the attach `StepOutput` too — for tests
 /// asserting on the attach step (probe present/absent, diagnostics).
 ///
-/// Fixture defaults: `SETTLE`, `/bin/true`, `EffectScope::SubtreeRoot`, `log_output = false`.
-/// `max_settle` is explicit, not defaulted: it folds into `config_hash`, so a distinct `max_settle`
-/// forks a distinct Profile — the multi-Profile fork tests rely on that.
+/// Fixture defaults: `SETTLE`, `/bin/true`, `EffectScope::SubtreeRoot`. `max_settle` is explicit,
+/// not defaulted: it folds into `config_hash`, so a distinct `max_settle` forks a distinct Profile
+/// — the multi-Profile fork tests rely on that.
 #[must_use]
 pub fn attach_returning(
     e: &mut Engine,
@@ -174,7 +174,6 @@ pub fn attach_returning(
         specter_core::testkit::empty_program(),
         EffectScope::SubtreeRoot,
         mask,
-        false,
     );
     attach_request(e, req, now)
 }
@@ -657,9 +656,9 @@ pub const fn watch_op_rejected_input(resource: ResourceId) -> Input {
 /// The fixtures' dynamic watch over `pattern`.
 ///
 /// Each Sub it mints fires on the default (unbounded) subtree scan under [`NO_EVENTS`] and
-/// [`MAX_SETTLE`], debounced at [`SETTLE`], launching `/bin/true` (`empty_program`, no log
-/// forwarding); the template's own Profile takes the pattern's identity. A request is plain fields:
-/// a pin that needs another scope, mask, scan or program writes it over this one.
+/// [`MAX_SETTLE`], debounced at [`SETTLE`], launching `/bin/true` (`empty_program`); the template's
+/// own Profile takes the pattern's identity. A request is plain fields: a pin that needs another
+/// scope, mask, scan or program writes it over this one.
 #[must_use]
 pub fn discovery_req(name: &str, pattern: &str) -> SubAttachRequest {
     SubAttachRequest {
@@ -675,7 +674,6 @@ pub fn discovery_req(name: &str, pattern: &str) -> SubAttachRequest {
             spawn: SpawnSpec::new(
                 specter_core::testkit::empty_program(),
                 EffectScope::SubtreeRoot,
-                false,
             ),
         },
     }

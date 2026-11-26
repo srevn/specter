@@ -44,9 +44,6 @@ pub struct Config {
 
 /// Engine-telemetry configuration — the operator-facing diagnostic stream's level, sink, and (for
 /// [`LogDestination::File`]) target path.
-///
-/// This block is *only* about engine logs. Subprocess output is a separate concern controlled
-/// per-watch by [`SubSpec::log_output`].
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub struct LogConfig {
     pub level: LogLevel,
@@ -164,9 +161,6 @@ pub struct SubSpec {
     /// sequence, so a cosmetic edit of the TOML — whitespace, a comment, key order — is no reload.
     pub program: Arc<ActionProgram>,
     pub scope: EffectScope,
-    /// Forward subprocess stdout/stderr to Specter's own stdio; `false`, the default, sends it to
-    /// `/dev/null`.
-    pub log_output: bool,
     pub settle: Duration,
     pub scan: SubtreeScan,
     /// The event-class mask: the TOML's `events`, or the scope's default
@@ -200,14 +194,14 @@ impl SubSpec {
             events: self.events,
             params: SubParams {
                 settle: self.settle,
-                spawn: SpawnSpec::new(Arc::clone(&self.program), self.scope, self.log_output),
+                spawn: SpawnSpec::new(Arc::clone(&self.program), self.scope),
             },
         }
     }
 
     /// True iff the edit from `self` to `other` moves the watch to another Profile: its target, or
-    /// one of the three axes a firing Profile's identity folds. What is left — `program`, `scope`,
-    /// `log_output`, `settle` — rebinds in place; `name` is the diff's key and `enabled` its
+    /// one of the three axes a firing Profile's identity folds. What is left lowers to the
+    /// request's [`SubParams`] and rebinds in place; `name` is the diff's key and `enabled` its
     /// filter, so neither reaches here. Field-derived, so no [`core::ProfileIdentity`] is built to
     /// be compared and dropped.
     #[must_use]
@@ -1275,7 +1269,6 @@ fn validate_watch(idx: usize, raw: &RawWatch) -> Result<SubSpec, Vec<ValidationI
             target,
             program,
             scope,
-            log_output: raw.log_output,
             settle,
             scan,
             events,
@@ -1550,30 +1543,7 @@ mod tests {
             panic!("expected SpawnBody::Exec");
         };
         assert_eq!(exec.argv().len(), 1);
-        assert!(!w.log_output, "log_output defaults to false");
         assert!(w.enabled, "enabled defaults to true (field omitted)");
-    }
-
-    #[test]
-    fn log_output_explicit_true_round_trips() {
-        let cfg = Config::from_str(&minimal_toml("log_output = true\n")).unwrap();
-        assert!(cfg.watches[0].log_output);
-    }
-
-    #[test]
-    fn log_output_explicit_false_round_trips() {
-        let cfg = Config::from_str(&minimal_toml("log_output = false\n")).unwrap();
-        assert!(!cfg.watches[0].log_output);
-    }
-
-    #[test]
-    fn log_output_threads_into_attach_request() {
-        let cfg = Config::from_str(&minimal_toml("log_output = true\n")).unwrap();
-        let req = cfg.watches[0].to_attach_request();
-        assert!(
-            req.params.spawn.log_output(),
-            "SubSpec.log_output reaches the request's SpawnSpec via to_attach_request",
-        );
     }
 
     #[test]
@@ -2386,7 +2356,6 @@ mod tests {
         assert_eq!(w.name, "logs");
         assert!(matches!(w.target, WatchTarget::Dynamic(_)));
         assert_eq!(w.scope, EffectScope::SubtreeRoot);
-        assert!(!w.log_output);
         assert_eq!(w.settle, Duration::from_millis(200));
         assert_eq!(w.max_settle, Duration::from_hours(1));
         assert_eq!(w.events, ClassSet::DEFAULT_SUBTREE_ROOT);
@@ -2404,7 +2373,6 @@ mod tests {
                     settle = \"300ms\"\nmax_settle = \"1200ms\"\n\
                     scope = \"per-stable-file\"\n\
                     events = [\"content\"]\n\
-                    log_output = true\n\
                     pattern = \"*.log\"\n\
                     recursive = false\nhidden = true\n";
         let cfg = Config::from_str(toml).unwrap();
@@ -2415,7 +2383,6 @@ mod tests {
         };
         assert_eq!(spec.source(), "/srv/log/*");
         assert_eq!(w.scope, EffectScope::PerStableFile);
-        assert!(w.log_output);
         assert_eq!(w.settle, Duration::from_millis(300));
         assert_eq!(w.max_settle, Duration::from_millis(1200));
         assert_eq!(w.events, ClassSet::CONTENT);
@@ -2439,7 +2406,6 @@ mod tests {
         );
         assert_eq!(req.params.settle, w.settle);
         assert_eq!(req.params.spawn.scope(), w.scope);
-        assert!(req.params.spawn.log_output());
     }
 
     /// Dynamic watches accept `pattern` (per-Sub include filter) and `exclude` (per-Sub exclude

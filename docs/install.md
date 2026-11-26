@@ -67,8 +67,10 @@ they share a common reload contract:
 - **Restart on failure** — systemd: `Restart=on-failure` with 5s backoff.
   launchd: `KeepAlive=true`. FreeBSD: managed by `daemon(8)`.
 - **Logs** — go to the supervisor's journal (systemd), the configured
-  `StandardOutPath` (launchd), or the file in `command_args -o ...`
-  (FreeBSD). Specter's own log destination is set in `[log]`.
+  `StandardErrorPath` (launchd), or the file in `command_args -o ...`
+  (FreeBSD). Specter's own log destination is set in `[log]`. A
+  command's output is not among them — see
+  [Command output](configuration.md#command-output).
 - **IPC socket** — the daemon binds `/run/specter/specter.sock`
   (systemd provisions the dir via `RuntimeDirectory=specter`),
   `/var/run/specter/specter.sock` (the FreeBSD rc script provisions it

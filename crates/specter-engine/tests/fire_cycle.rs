@@ -81,7 +81,6 @@ fn subtree_request(name: &str, r: ResourceId) -> SubAttachRequest {
         empty_program(),
         EffectScope::SubtreeRoot,
         DEFAULT_EVENTS,
-        false,
     )
 }
 
@@ -97,7 +96,6 @@ fn subtree_request_with_content(name: &str, r: ResourceId) -> SubAttachRequest {
         empty_program(),
         EffectScope::SubtreeRoot,
         ClassSet::CONTENT,
-        false,
     )
 }
 
@@ -1002,7 +1000,6 @@ fn fire_cycle_mixed_ok_failed_decrements_uniformly() {
         empty_program(),
         EffectScope::PerStableFile,
         ClassSet::CONTENT,
-        false,
     );
     let (sid, pid, seed_done) = attach_and_complete_seed_with(&mut e, req, &dir_snap(&[]), now);
 
@@ -1461,7 +1458,6 @@ fn fire_cycle_perfile_suppresses_post_rebase_phantom_for_non_idempotent_format()
         empty_program(),
         EffectScope::PerStableFile,
         ClassSet::CONTENT,
-        false,
     );
     let (sid, pid, seed_done) = attach_and_complete_seed_with(&mut e, req, &dir_snap(&[]), now);
 
@@ -1565,7 +1561,6 @@ fn fire_cycle_perfile_refires_on_real_change_not_gated_by_fire_history() {
         empty_program(),
         EffectScope::PerStableFile,
         ClassSet::CONTENT,
-        false,
     );
     let (sid, pid, seed_done) = attach_and_complete_seed_with(&mut e, req, &dir_snap(&[]), now);
 

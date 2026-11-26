@@ -18,10 +18,11 @@ actions   = [{ exec = ["cargo", "build"] }]
 ## `[log]`
 
 Engine telemetry. Goes to whatever the supervisor (systemd journal, launchd
-`StandardOutPath`, FreeBSD `daemon(8)`'s `-o` file) captures from stderr,
+`StandardErrorPath`, FreeBSD `daemon(8)`'s `-o` file) captures from stderr,
 or to the explicit file when `destination = "file"`.
 
-Subprocess output is per-watch — see `log_output` below.
+A command's output never reaches it — see
+[Command output](#command-output).
 
 ## `[[watch]]`
 
@@ -43,7 +44,6 @@ everything else has a default.
 | `hidden`     | `false`              | Scan dotfiles.                                     |
 | `recursive`  | `true`               | `false` lists one level, as `max_depth = 1`.       |
 | `max_depth`  | unbounded            | Levels listed; above 1 only with `recursive`.      |
-| `log_output` | `false`              | Forward child stdout/stderr to specter's stdio.    |
 
 ### `max_settle`
 
@@ -98,11 +98,11 @@ actions = [{ exec = ["rotate", "${specter.path}"] }]
   resolved. A prefix that does not exist yet is waited for, as a pending
   static path is.
 - **What the knobs describe.** `actions`, `settle`, `max_settle`, `scope`,
-  `events`, `log_output` and the scan knobs (`pattern`, `exclude`, `hidden`,
-  `recursive`, `max_depth`) describe each match's watch, as they would a
-  static watch at that path. The walk that finds the matches is the
-  daemon's own: it watches entries come and go (`structure`) and debounces
-  at a fixed 150ms, with a 2s ceiling.
+  `events` and the scan knobs (`pattern`, `exclude`, `hidden`, `recursive`,
+  `max_depth`) describe each match's watch, as they would a static watch at
+  that path. The walk that finds the matches is the daemon's own: it watches
+  entries come and go (`structure`) and debounces at a fixed 150ms, with a
+  2s ceiling.
 - **What runs.** Matches present when the watch attaches — at start, at the
   reload that adds or replaces it, at `enable` — do not run its actions. A
   match that appears later runs them once it settles. A prefix the daemon
@@ -125,11 +125,11 @@ actions = [{ exec = ["rotate", "${specter.path}"] }]
   `absorb` and `show` take the watch's own name and reach every match it
   holds; a match's own name is refused (`minted_sub_no_op`), or unknown to
   `show`. See [control.md](control.md).
-- **An edit** of `actions`, `log_output` or `settle` — or of `scope` with
-  `events` written out — applies in place, to every match. An edit of the
-  pattern, a scan knob, `events`, `max_settle`, or `scope` with `events`
-  omitted (the default mask moves with it) replaces the watch: its matches
-  are found again, and, present when it attaches, do not run.
+- **An edit** of `actions` or `settle` — or of `scope` with `events` written
+  out — applies in place, to every match. An edit of the pattern, a scan
+  knob, `events`, `max_settle`, or `scope` with `events` omitted (the
+  default mask moves with it) replaces the watch: its matches are found
+  again, and, present when it attaches, do not run.
 
 ## Actions
 
@@ -210,6 +210,23 @@ else = [{ exec = ["notify-send", "tests failed"] }]
   itself does not accept a top-level `timeout`.
 - `then` and `else` are full recursive action arrays — nested
   conditionals and pipes are both legal.
+
+### Command output
+
+A command's stdin, stdout and stderr are `/dev/null`: Specter feeds a
+command nothing and keeps nothing it prints. A command whose output
+matters routes it itself — into a file the daemon's user can write:
+
+```toml
+[[watch]]
+name    = "rebuild"
+path    = "/srv/repo/src"
+actions = [{ exec = ["sh", "-c", "exec cargo build >>/srv/repo/build.log 2>&1"] }]
+```
+
+`exec` gives the command the shell's place: it is the process Specter
+runs, so its exit status is the action's, and a step's `timeout`
+signals the command itself.
 
 ## Hot reload
 

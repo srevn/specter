@@ -41,51 +41,17 @@ pub struct EnvVar<'a> {
 /// Spawner>` move into the actuator thread (see `specter-bin`'s `spawn_actuator_thread`); no caller
 /// ever shares `&dyn Spawner` across threads, so `Sync` is not part of the contract.
 pub trait Spawner: Send {
-    /// Spawn a child for the given argv + env + cwd + stdio policy. Returns paired handles: the
-    /// `waiter` (consumed by the wait thread) and the `signaler` (held by the controller, used for
-    /// SIGTERM/SIGKILL).
-    ///
-    /// `capture_output` is the per-Effect stdio policy mirrored from the owning Sub's `log_output`.
-    /// `false` (the default) routes stdout/stderr to `/dev/null`; `true` inherits Specter's own
-    /// stdio so the parent's supervisor (systemd journal, launchd `StandardOutPath`, FreeBSD
-    /// `daemon -o`) captures the bytes. Stdin is unconditionally `/dev/null` regardless — a
-    /// watch-action command never reads from the parent's tty.
-    fn spawn(
-        &self,
-        argv: &[String],
-        env: &[EnvVar<'_>],
-        cwd: &Path,
-        capture_output: bool,
-    ) -> io::Result<SpawnHandles>;
+    /// Spawn one child, returning its [`SpawnHandles`].
+    fn spawn(&self, argv: &[String], env: &[EnvVar<'_>], cwd: &Path) -> io::Result<SpawnHandles>;
 
-    /// Spawn N stages wired stdout→stdin. The producer-side of stage K writes to a pipe whose
-    /// read-end is the consumer-side stdin of stage K+1; the kernel handles the SIGPIPE chain when
-    /// an upstream stage exits.
-    ///
-    /// Returns paired handles:
-    /// - `waiter` — single aggregating waiter that drains every stage sequentially and applies
-    ///   pipefail-on semantics (any non-zero stage exit ⇒ aggregated `Failed`, carrying the last
-    ///   non-zero exit in spawn order and the first observed signal).
-    /// - `combined_signaler` — fans SIGTERM/SIGKILL out to every stage. Used by the controller's
-    ///   shutdown path.
-    /// - `stage_signalers` — parallel-indexed with the input stage slice; the controller hands each
-    ///   one to its per-stage timer thread (if the stage's [`specter_core::ExecAction::timeout`] is
-    ///   set).
+    /// Spawn N stages wired stdout→stdin, returning their [`PipeSpawnHandles`]. The producer-side
+    /// of stage K writes to a pipe whose read-end is the consumer-side stdin of stage K+1; the
+    /// kernel handles the SIGPIPE chain when an upstream stage exits.
     ///
     /// On partial-spawn failure (stage K's spawn raises [`io::Error`]), implementations must roll
     /// back: SIGKILL + `reap_blocking` every prior stage and close every pipe fd in the parent
     /// before returning the error. Returning leaves no zombies and no orphan pipe fds.
-    ///
-    /// `capture_output` controls the **last** stage's stdout: `true` ⇒ inherit Specter's stdout;
-    /// `false` ⇒ route to `/dev/null`. Earlier stages' stdouts are always plumbed to the next stage's
-    /// stdin. Every stage's stderr follows the `capture_output` policy (inherit vs `/dev/null`).
-    /// Stage 0's stdin is always `/dev/null` (a pipe never reads from the parent's tty).
-    fn spawn_pipe(
-        &self,
-        stages: &[StageSpec<'_>],
-        cwd: &Path,
-        capture_output: bool,
-    ) -> io::Result<PipeSpawnHandles>;
+    fn spawn_pipe(&self, stages: &[StageSpec<'_>], cwd: &Path) -> io::Result<PipeSpawnHandles>;
 }
 
 /// One stage of a pipe spawn. Borrow shape mirrors [`Spawner::spawn`]: argv as `&[String]` (the
@@ -113,7 +79,7 @@ pub struct PipeSpawnHandles {
     /// this pipe". The actuator surfaces this via `pool::state::RunningJob::pid` and uses it only for
     /// log lines; the per-stage signalers carry their own pids internally for syscall routing.
     pub last_pid: u32,
-    /// Aggregating waiter: drains every stage sequentially and applies pipefail-on semantics.
+    /// Aggregating waiter: waits on every stage concurrently and applies pipefail-on semantics.
     /// Consumed once via `Box<dyn ChildWaiter>::wait`.
     pub waiter: Box<dyn ChildWaiter>,
     /// Shutdown signaler: fans SIGTERM/SIGKILL out to every stage.

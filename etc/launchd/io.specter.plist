@@ -22,8 +22,6 @@
     <true/>
     <key>WorkingDirectory</key>
     <string>/</string>
-    <key>StandardOutPath</key>
-    <string>@SPECTER_LOG@</string>
     <key>StandardErrorPath</key>
     <string>@SPECTER_LOG@</string>
     <key>ProcessType</key>

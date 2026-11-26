@@ -63,7 +63,7 @@ fn shared_profile_via_config_hash() {
         "build-a".into(),
         SubParams {
             settle: SETTLE,
-            spawn: SpawnSpec::new(build_program(), EffectScope::SubtreeRoot, false),
+            spawn: SpawnSpec::new(build_program(), EffectScope::SubtreeRoot),
         },
     ));
 

@@ -745,7 +745,6 @@ mod tests {
             anchor: ResourceId::default(),
             correlation,
             forced,
-            capture_output: false,
             sub_name: CompactString::from(sub_name),
             program: single_exec_program(argv),
             anchor_path: Arc::from(anchor_path.to_path_buf()),

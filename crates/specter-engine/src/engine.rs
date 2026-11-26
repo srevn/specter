@@ -1348,7 +1348,6 @@ mod tests {
             specter_core::testkit::single_exec_program(std::iter::empty()),
             specter_core::EffectScope::SubtreeRoot,
             specter_core::ClassSet::default(),
-            false,
         );
         let out = e.step(Input::AttachSub(req), Instant::now());
 
@@ -1381,7 +1380,6 @@ mod tests {
             specter_core::testkit::single_exec_program(std::iter::empty()),
             specter_core::EffectScope::SubtreeRoot,
             specter_core::ClassSet::default(),
-            false,
         );
         let out = e.step(Input::AttachSub(req), Instant::now());
         let sid = specter_core::testkit::first_attached_sub(&out);
@@ -1427,7 +1425,6 @@ mod tests {
             specter_core::testkit::single_exec_program(std::iter::empty()),
             specter_core::EffectScope::SubtreeRoot,
             specter_core::ClassSet::default(),
-            false,
         );
         let out = e.step(Input::AttachSub(req), Instant::now());
         let sid = specter_core::testkit::first_attached_sub(&out);
@@ -1467,7 +1464,6 @@ mod tests {
             specter_core::testkit::single_exec_program(std::iter::empty()),
             specter_core::EffectScope::SubtreeRoot,
             specter_core::ClassSet::default(),
-            false,
         );
         let out = e.step(Input::AttachSub(req), Instant::now());
         let sid = specter_core::testkit::first_attached_sub(&out);
@@ -1535,7 +1531,6 @@ mod tests {
             specter_core::testkit::single_exec_program(std::iter::empty()),
             specter_core::EffectScope::SubtreeRoot,
             ClassSet::EMPTY,
-            false,
         )
     }
 
@@ -1756,7 +1751,6 @@ mod tests {
             specter_core::testkit::single_exec_program(std::iter::empty()),
             specter_core::EffectScope::SubtreeRoot,
             ClassSet::EMPTY,
-            false,
         );
         let now = Instant::now();
         let out = e.step(Input::AttachSub(req), now);

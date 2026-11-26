@@ -59,7 +59,6 @@ fn abandoned_burst_evidence_rides_next_bursts_obligation_and_fires() {
         empty_program(),
         EffectScope::SubtreeRoot,
         ClassSet::CONTENT,
-        false,
     );
     let out = e.step(Input::AttachSub(req), now);
     let sid = first_attached_sub(&out).expect("attach succeeded");

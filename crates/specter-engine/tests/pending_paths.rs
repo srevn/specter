@@ -42,7 +42,6 @@ fn attach_sub_path_pending_then_anchor_appears() {
         empty_program(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
-        false,
     );
     let now = Instant::now();
     let attach_out = e.step(Input::AttachSub(req), now);
@@ -146,7 +145,6 @@ fn pending_path_witnessed_appearance_fires() {
         empty_program(),
         EffectScope::SubtreeRoot,
         ClassSet::DEFAULT_SUBTREE_ROOT,
-        false,
     );
     let out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&out).expect("attach succeeded");
@@ -238,7 +236,6 @@ fn pending_path_event_racing_inflight_probe_repays_and_fires() {
         empty_program(),
         EffectScope::SubtreeRoot,
         ClassSet::DEFAULT_SUBTREE_ROOT,
-        false,
     );
     let out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&out).expect("attach succeeded");
@@ -343,7 +340,6 @@ fn sibling_churn_during_attach_descent_pins_silently() {
         empty_program(),
         EffectScope::SubtreeRoot,
         ClassSet::DEFAULT_SUBTREE_ROOT,
-        false,
     );
     let out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&out).expect("attach succeeded");
@@ -431,7 +427,6 @@ fn prefix_vanished_rewind_then_recompletion_fires() {
         empty_program(),
         EffectScope::SubtreeRoot,
         ClassSet::DEFAULT_SUBTREE_ROOT,
-        false,
     );
     let out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&out).expect("attach succeeded");
@@ -504,7 +499,6 @@ fn pending_path_failed_probe_retains_state() {
         empty_program(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
-        false,
     );
     let attach_out = e.step(Input::AttachSub(req), Instant::now());
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
@@ -555,7 +549,6 @@ fn pending_path_event_at_prefix_emits_fresh_probe() {
         empty_program(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
-        false,
     );
     let attach_out = e.step(Input::AttachSub(req), Instant::now());
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
@@ -621,7 +614,6 @@ fn anchor_disappears_re_enters_pending_via_watch_root_parent() {
         empty_program(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
-        false,
     );
     let now = Instant::now();
     let attach_out = e.step(Input::AttachSub(req), now);
@@ -692,7 +684,6 @@ fn detach_pending_profile_with_inflight_descent_emits_cancel() {
         empty_program(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
-        false,
     );
     let now = Instant::now();
     let attach_out = e.step(Input::AttachSub(req), now);
@@ -752,7 +743,6 @@ fn pending_profile_event_at_anchor_lands_in_no_consumer_branch() {
         empty_program(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
-        false,
     );
     let now = Instant::now();
     let attach_out = e.step(Input::AttachSub(req), now);
@@ -857,7 +847,6 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
         empty_program(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
-        false,
     );
     let now = Instant::now();
     let attach_a_out = e.step(Input::AttachSub(req_a), now);
@@ -892,7 +881,6 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
         empty_program(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
-        false,
     );
     let attach_b_out = e.step(Input::AttachSub(req_b), now);
     let sid_b =
@@ -951,7 +939,6 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
         empty_program(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
-        false,
     );
     // C attaches after B's loss; keep instants strictly monotonic.
     let c_attach = b_fail_at + SETTLE;

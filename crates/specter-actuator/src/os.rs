@@ -1,10 +1,5 @@
 //! Production [`Spawner`] impl using `std::process::Command` + `nix::sys::signal`.
 //!
-//! Stdin is always routed to `/dev/null`. Stdout/stderr default to `/dev/null` (the Sub's
-//! `log_output = false` case); when `capture_output` is `true` they `inherit()` Specter's own fds,
-//! letting the supervisor's log facility capture child bytes. cwd is validated by `Command::spawn`
-//! at spawn time; failure surfaces as an `io::Result::Err`.
-//!
 //! On macOS, `Command::spawn` is forced down the fork+exec path via a no-op `pre_exec` hook — see
 //! [`disqualify_posix_spawn`] for the full rationale. macOS `posix_spawn` returns `EBADF` once the
 //! parent crosses ~10,200 open fds (`OPEN_MAX = 10240`), which deep kqueue watch trees trip on the
@@ -37,10 +32,8 @@ use std::sync::Arc;
 
 /// Production `Spawner`.
 ///
-/// Spawns via `std::process::Command`. Stdin is always `/dev/null`. Stdout/stderr go to `/dev/null`
-/// by default; when `capture_output` is `true` they inherit Specter's own fds so the parent
-/// supervisor's log facility captures child bytes. cwd is passed to `Command::current_dir` and
-/// validated at spawn time.
+/// cwd is passed to `Command::current_dir` and validated at spawn time: a cwd the child cannot
+/// enter fails the spawn with an `io::Error`.
 #[derive(Debug, Default)]
 pub struct OsSpawner;
 
@@ -52,32 +45,11 @@ impl OsSpawner {
 }
 
 impl Spawner for OsSpawner {
-    fn spawn(
-        &self,
-        argv: &[String],
-        env: &[EnvVar<'_>],
-        cwd: &Path,
-        capture_output: bool,
-    ) -> io::Result<SpawnHandles> {
-        if argv.is_empty() {
+    fn spawn(&self, argv: &[String], env: &[EnvVar<'_>], cwd: &Path) -> io::Result<SpawnHandles> {
+        let Some((head, tail)) = argv.split_first() else {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "argv is empty"));
-        }
-        let (stdout, stderr) = if capture_output {
-            (Stdio::inherit(), Stdio::inherit())
-        } else {
-            (Stdio::null(), Stdio::null())
         };
-        let mut cmd = build_command(
-            &argv[0],
-            &argv[1..],
-            env,
-            cwd,
-            Stdio::null(),
-            stdout,
-            stderr,
-        );
-        let child = cmd.spawn()?;
-        let (pid, waiter, signaler) = build_pair(child);
+        let (pid, waiter, signaler) = build_pair(build_command(head, tail, env, cwd).spawn()?);
         Ok(SpawnHandles {
             pid,
             waiter: Box::new(waiter),
@@ -85,12 +57,7 @@ impl Spawner for OsSpawner {
         })
     }
 
-    fn spawn_pipe(
-        &self,
-        stages: &[StageSpec<'_>],
-        cwd: &Path,
-        capture_output: bool,
-    ) -> io::Result<PipeSpawnHandles> {
+    fn spawn_pipe(&self, stages: &[StageSpec<'_>], cwd: &Path) -> io::Result<PipeSpawnHandles> {
         let n = stages.len();
         if n < 2 {
             return Err(io::Error::new(
@@ -109,81 +76,50 @@ impl Spawner for OsSpawner {
 
         // Pipe layout: interleave pipe(2) creation with each stage's spawn so the parent holds at
         // most one pipe pair's fds at any moment, rather than all N-1 pairs up front. Caps the
-        // parent- side fd footprint at ~3 fds even for deep pipes — relevant on hosts under fd
+        // parent-side fd footprint at ~3 fds even for deep pipes — relevant on hosts under fd
         // pressure (kqueue watchers already consume one O_EVTONLY fd per watched directory).
         //
         // `prev_read` carries pipe K-1's read end (whose write end was moved into stage K-1's
-        // stdout on the prior iter) into iter K as stage K's stdin. After each non-last iter sets
-        // it; the next iter consumes it via `take()`. The OwnedFds are *moved* (not cloned) into
-        // `Stdio::from`, which consumes them — parent's copy closes as soon as `cmd` is dropped at
-        // end of iter. The child's dup'd fd (stdin fd 0 / stdout fd 1) carries forward the pipe
-        // through fork+exec; CLOEXEC on the OwnedFd is cleared by dup2 on the dup target only (the
-        // source keeps CLOEXEC and closes anyway when the parent drops it).
+        // stdout on the prior iter) into iter K as stage K's stdin. Each non-last iter sets it; the
+        // next iter consumes it via `take()`. The OwnedFds are *moved* (not cloned) into `cmd`,
+        // which consumes them — parent's copy closes as soon as `cmd` is dropped at end of iter.
+        // The child's dup'd fd (stdin fd 0 / stdout fd 1) carries forward the pipe through
+        // fork+exec; CLOEXEC on the OwnedFd is cleared by dup2 on the dup target only (the source
+        // keeps CLOEXEC and closes anyway when the parent drops it).
         //
         // Producer write-end timing: by moving pipe K-1's write end into stage K-1's stdout (rather
         // than holding a parent copy until end of function), the kernel sees zero parent-side
         // writers from the moment iter K-1 returns. When stage K-1 exits, its dup of pipe K-1's
         // write end is the only remaining writer; closing it gives stage K a prompt EOF rather than
-        // hanging waiting for an end-of-function `drop(pipes)`.
+        // hanging until the function returns.
         let mut prev_read: Option<OwnedFd> = None;
         let mut stage_waiters: Vec<Box<dyn ChildWaiter>> = Vec::with_capacity(n);
         let mut stage_signalers: Vec<Arc<dyn ChildSignaler>> = Vec::with_capacity(n);
         let mut last_pid: u32 = 0;
 
         for (idx, stage) in stages.iter().enumerate() {
-            let is_last = idx == n - 1;
-
-            let stdin = if idx == 0 {
-                Stdio::null()
-            } else {
-                let read = prev_read
-                    .take()
-                    .expect("prev_read set by the previous non-last iter");
-                Stdio::from(read)
-            };
-
-            let stdout = if is_last {
-                if capture_output {
-                    Stdio::inherit()
-                } else {
-                    Stdio::null()
-                }
-            } else {
-                // `create_cloexec_pipe` returns `(read, write)`. The write end becomes this stage's
-                // stdout (moved into Stdio::from). The read end is parked in `prev_read` for the
-                // next iter's stdin. On failure here, prior stages roll back; the just-taken stdin
-                // OwnedFd (if any) drops via Stdio's OwnedFd Drop.
+            let mut cmd = build_command(&stage.argv[0], &stage.argv[1..], stage.env, cwd);
+            if idx > 0 {
+                cmd.stdin(prev_read.take().expect("stage K-1 parked its read end"));
+            }
+            if idx + 1 < n {
                 let (read, write) = match create_cloexec_pipe() {
-                    Ok(p) => p,
+                    Ok(link) => link,
                     Err(e) => {
+                        // `cmd` drops on the early return, closing the read end it took.
                         rollback_partial_pipe(&stage_signalers);
                         return Err(e);
                     }
                 };
+                cmd.stdout(write);
                 prev_read = Some(read);
-                Stdio::from(write)
-            };
-            let stderr = if capture_output {
-                Stdio::inherit()
-            } else {
-                Stdio::null()
-            };
-
-            let mut cmd = build_command(
-                &stage.argv[0],
-                &stage.argv[1..],
-                stage.env,
-                cwd,
-                stdin,
-                stdout,
-                stderr,
-            );
+            }
             let child = match cmd.spawn() {
                 Ok(c) => c,
                 Err(e) => {
-                    // `cmd` drops on early return, closing the Stdio- held OwnedFds (this iter's
-                    // stdin/stdout pipe ends) in the parent. `prev_read` (if Some — this iter
-                    // parked the new pipe's read end before calling spawn) drops at function exit.
+                    // `cmd` drops on the early return, closing the pipe ends it holds in the
+                    // parent; `prev_read` (if Some — this iter parked the new pipe's read end
+                    // before calling spawn) drops at function exit.
                     rollback_partial_pipe(&stage_signalers);
                     return Err(e);
                 }
@@ -218,10 +154,11 @@ impl Spawner for OsSpawner {
     }
 }
 
-/// Build the [`Command`] shared between [`OsSpawner::spawn`] and the per-stage spawn loop in
-/// [`OsSpawner::spawn_pipe`]. Routes through [`disqualify_posix_spawn`] on macOS to force the
-/// fork+exec path (see that fn for the fd-table rationale); on every other Unix the call is a
-/// compile-time no-op.
+/// The [`Command`] every child is spawned from, with stdin, stdout and stderr on `/dev/null`. Specter
+/// keeps nothing a command prints — an inherited fd would interleave its bytes with the daemon's own
+/// lines and with every other command's — so a command that keeps its output routes it itself.
+/// [`OsSpawner::spawn_pipe`] rewires only a pipe's interior links. `Command` inherits all three by
+/// default: a line dropped here hands the child the daemon's own fd, its terminal or its log.
 ///
 /// # Env-handling contract: **additive**
 ///
@@ -247,22 +184,14 @@ impl Spawner for OsSpawner {
 /// Operators who run specter under a credential-bearing supervisor should scrub the supervisor's
 /// env before spawning specter (a `systemd` unit with `Environment=` is the canonical shape), since
 /// v1 has no actuator-side scrub.
-fn build_command(
-    arg0: &str,
-    argv_tail: &[String],
-    env: &[EnvVar<'_>],
-    cwd: &Path,
-    stdin: Stdio,
-    stdout: Stdio,
-    stderr: Stdio,
-) -> Command {
+fn build_command(arg0: &str, argv_tail: &[String], env: &[EnvVar<'_>], cwd: &Path) -> Command {
     let mut cmd = Command::new(arg0);
     cmd.args(argv_tail)
         .envs(env.iter().map(|e| (e.key, e.value.as_ref())))
         .current_dir(cwd)
-        .stdin(stdin)
-        .stdout(stdout)
-        .stderr(stderr);
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     disqualify_posix_spawn(&mut cmd);
     cmd
 }
@@ -495,9 +424,7 @@ mod recovery_tests {
         let env: Vec<EnvVar<'_>> = Vec::new();
         let cwd = Path::new("/tmp");
 
-        let handles = spawner
-            .spawn(&argv, &env, cwd, false)
-            .expect("spawn /bin/sleep");
+        let handles = spawner.spawn(&argv, &env, cwd).expect("spawn /bin/sleep");
         let pid = handles.pid;
         let signaler = handles.signaler;
 
@@ -537,7 +464,7 @@ mod recovery_tests {
         let env: Vec<EnvVar<'_>> = Vec::new();
         let cwd = Path::new("/tmp");
 
-        let handles = spawner.spawn(&argv, &env, cwd, false).expect("spawn");
+        let handles = spawner.spawn(&argv, &env, cwd).expect("spawn");
         let signaler = handles.signaler;
         drop(handles.waiter);
 
@@ -586,9 +513,7 @@ mod pipe_tests {
         ];
         let cwd = Path::new("/tmp");
 
-        let handles = spawner
-            .spawn_pipe(&stages, cwd, /*capture_output=*/ false)
-            .expect("spawn_pipe");
+        let handles = spawner.spawn_pipe(&stages, cwd).expect("spawn_pipe");
         assert_ne!(handles.last_pid, 0, "last_pid is the cat pid");
         assert_eq!(handles.stage_signalers.len(), 2);
 
@@ -627,7 +552,7 @@ mod pipe_tests {
         let cwd = Path::new("/tmp");
 
         let start = Instant::now();
-        let result = spawner.spawn_pipe(&stages, cwd, false);
+        let result = spawner.spawn_pipe(&stages, cwd);
         let elapsed = start.elapsed();
 
         assert!(result.is_err(), "stage-1 spawn must fail and propagate");
@@ -639,6 +564,64 @@ mod pipe_tests {
             "rollback must complete inside the call, not wait for sleep to exit naturally \
              (elapsed = {elapsed:?})",
         );
+    }
+}
+
+#[cfg(test)]
+mod stdio_tests {
+    //! What a child finds on stdin, stdout and stderr: `/dev/null`, save where a pipe links two
+    //! stages. `[ /dev/stdout -ef /dev/null ]` holds where the child's fd 1 is `/dev/null` itself.
+    //! Each test first points its own fd 0 at a pipe: nextest hands every test `/dev/null` as
+    //! stdin, where a child that inherited fd 0 would pass for one handed `/dev/null`. The dup2 is
+    //! process-wide, and no other test in this binary reads stdin.
+
+    use super::*;
+    use crate::spawner::{Spawner, StageSpec};
+    use std::path::Path;
+
+    fn sh(script: &str) -> Vec<String> {
+        vec!["/bin/sh".into(), "-c".into(), script.into()]
+    }
+
+    fn stdin_from_pipe() {
+        let (read, _write) = create_cloexec_pipe().expect("pipe");
+        nix::unistd::dup2_stdin(&read).expect("dup2 onto fd 0");
+    }
+
+    #[test]
+    fn spawn_puts_stdin_stdout_and_stderr_on_dev_null() {
+        stdin_from_pipe();
+        let argv = sh(
+            "[ /dev/stdin -ef /dev/null ] && [ /dev/stdout -ef /dev/null ] \
+             && [ /dev/stderr -ef /dev/null ]",
+        );
+        let handles = OsSpawner::new()
+            .spawn(&argv, &[], Path::new("/tmp"))
+            .expect("spawn");
+        assert_eq!(handles.waiter.wait().expect("wait"), EffectOutcome::Ok);
+    }
+
+    /// Three stages: a token crosses both links, so the middle stage reads one and writes the other.
+    #[test]
+    fn spawn_pipe_rewires_only_the_links_between_stages() {
+        stdin_from_pipe();
+        let argvs = [
+            sh(
+                "[ /dev/stdin -ef /dev/null ] && [ /dev/stderr -ef /dev/null ] && echo specter-link",
+            ),
+            sh(
+                "read l && [ \"$l\" = specter-link ] && [ /dev/stderr -ef /dev/null ] && echo \"$l\"",
+            ),
+            sh(
+                "read l && [ \"$l\" = specter-link ] && [ /dev/stdout -ef /dev/null ] \
+                && [ /dev/stderr -ef /dev/null ]",
+            ),
+        ];
+        let stages = argvs.each_ref().map(|argv| StageSpec { argv, env: &[] });
+        let handles = OsSpawner::new()
+            .spawn_pipe(&stages, Path::new("/tmp"))
+            .expect("spawn_pipe");
+        assert_eq!(handles.waiter.wait().expect("wait"), EffectOutcome::Ok);
     }
 }
 
@@ -721,7 +704,7 @@ mod tests {
         let argv: Vec<String> = vec!["/bin/sh".into(), "-c".into(), "exit 0".into()];
         let env: Vec<EnvVar<'_>> = Vec::new();
         let handles = spawner
-            .spawn(&argv, &env, cwd, false)
+            .spawn(&argv, &env, cwd)
             .expect("spawn must succeed under high fd pressure (fork+exec route)");
         let outcome = handles
             .waiter

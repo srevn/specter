@@ -22,9 +22,9 @@ use std::collections::BTreeMap;
 /// - **`modified_identity`** — the target / scan / max_settle / events differ, for either kind of
 ///   watch; a path edit across the `is_dynamic` boundary changes the target's kind. The engine asks
 ///   the attach's gate, then runs `detach_old → attach_new`.
-/// - **`modified_params`** — only per-Sub fields differ (`program`, `scope`, `settle`,
-///   `log_output`), for either kind. The engine rebinds the live Sub in place, a template with the
-///   set it minted; no Profile churn, no kernel-watch flap, no baseline loss.
+/// - **`modified_params`** — only what the request's [`SubParams`](specter_core::SubParams) carries
+///   differs, for either kind. The engine rebinds the live Sub in place, a template with the set it
+///   minted; no Profile churn, no kernel-watch flap, no baseline loss.
 ///
 /// The partition is exhaustive and disjoint: every modified entry lands in exactly one bucket.
 ///

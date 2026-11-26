@@ -1001,7 +1001,6 @@ mod tests {
             empty_program(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
-            false,
         );
         let out = e.step(Input::AttachSub(req), Instant::now());
         let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
@@ -1134,7 +1133,6 @@ mod tests {
             empty_program(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
-            false,
         );
         let out = e.step(Input::AttachSub(req), Instant::now());
         let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
@@ -1451,7 +1449,6 @@ mod tests {
             empty_program(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
-            false,
         );
         let out = e.step(Input::AttachSub(req), Instant::now());
         let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
@@ -1638,7 +1635,6 @@ mod tests {
             empty_program(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
-            false,
         );
         let out = e.step(Input::AttachSub(req), Instant::now());
         let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
@@ -1715,7 +1711,6 @@ mod tests {
             empty_program(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
-            false,
         );
         let req2 = SubAttachRequest::for_anchor(
             "b".into(),
@@ -1726,7 +1721,6 @@ mod tests {
             empty_program(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
-            false,
         );
         let _ = e.step(Input::AttachSub(req1), Instant::now());
         let _ = e.step(Input::AttachSub(req2), Instant::now());
@@ -1755,7 +1749,6 @@ mod tests {
             empty_program(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
-            false,
         );
         let out = e.step(Input::AttachSub(req), Instant::now());
         let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
@@ -1806,7 +1799,6 @@ mod tests {
             empty_program(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
-            false,
         );
         let out = e.step(Input::AttachSub(req), Instant::now());
 
@@ -1929,7 +1921,6 @@ mod tests {
             empty_program(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
-            false,
         );
         let out = e.step(Input::AttachSub(req), Instant::now());
         let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
@@ -1966,7 +1957,6 @@ mod tests {
             empty_program(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
-            false,
         );
         let out = e.step(Input::AttachSub(req), Instant::now());
         let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
@@ -2070,7 +2060,6 @@ mod tests {
             empty_program(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
-            false,
         );
         let out = e.step(Input::AttachSub(req), Instant::now());
         let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");

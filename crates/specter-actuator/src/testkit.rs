@@ -25,7 +25,6 @@ pub struct SpawnRecord {
     pub argv: Vec<String>,
     pub env: Vec<(String, String)>,
     pub cwd: PathBuf,
-    pub capture_output: bool,
 }
 
 /// Recorded signal call. `Reap` records the synchronous reap path taken on
@@ -129,7 +128,6 @@ impl MockSpawner {
         argv: Vec<String>,
         env: Vec<(String, String)>,
         cwd: PathBuf,
-        capture_output: bool,
     ) -> (u32, Receiver<EffectOutcome>, DeadFlag) {
         let pid = self.next_pid.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = bounded::<EffectOutcome>(1);
@@ -139,7 +137,6 @@ impl MockSpawner {
             argv,
             env,
             cwd,
-            capture_output,
         });
         (pid, rx, DeadFlag::new())
     }
@@ -154,25 +151,15 @@ impl MockSpawner {
 }
 
 impl Spawner for MockSpawner {
-    fn spawn(
-        &self,
-        argv: &[String],
-        env: &[EnvVar<'_>],
-        cwd: &Path,
-        capture_output: bool,
-    ) -> io::Result<SpawnHandles> {
+    fn spawn(&self, argv: &[String], env: &[EnvVar<'_>], cwd: &Path) -> io::Result<SpawnHandles> {
         // Copy out of the lock before checking — Mutex guard's significant Drop should not span the
         // if-let body.
         let injected = *self.inject_spawn_error.lock().unwrap();
         if let Some(kind) = injected {
             return Err(io::Error::from(kind));
         }
-        let (pid, rx, dead) = self.allocate_spawn(
-            argv.to_vec(),
-            Self::env_to_owned(env),
-            cwd.to_owned(),
-            capture_output,
-        );
+        let (pid, rx, dead) =
+            self.allocate_spawn(argv.to_vec(), Self::env_to_owned(env), cwd.to_owned());
         Ok(SpawnHandles {
             pid,
             waiter: Box::new(MockChildWaiter {
@@ -187,12 +174,7 @@ impl Spawner for MockSpawner {
         })
     }
 
-    fn spawn_pipe(
-        &self,
-        stages: &[StageSpec<'_>],
-        cwd: &Path,
-        capture_output: bool,
-    ) -> io::Result<PipeSpawnHandles> {
+    fn spawn_pipe(&self, stages: &[StageSpec<'_>], cwd: &Path) -> io::Result<PipeSpawnHandles> {
         // Same injection point as `spawn` — tests can flip the flag and observe a pipe spawn
         // failure as a stage-0 failure.
         let injected = *self.inject_spawn_error.lock().unwrap();
@@ -213,7 +195,6 @@ impl Spawner for MockSpawner {
                 stage.argv.to_vec(),
                 Self::env_to_owned(stage.env),
                 cwd.to_owned(),
-                capture_output,
             );
             last_pid = pid;
             stage_waiters.push(Box::new(MockChildWaiter {

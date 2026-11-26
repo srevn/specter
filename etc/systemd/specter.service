@@ -18,7 +18,6 @@ Group=@SPECTER_GROUP@
 RuntimeDirectory=specter
 RuntimeDirectoryMode=0700
 
-StandardOutput=journal
 StandardError=journal
 
 [Install]

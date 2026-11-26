@@ -224,7 +224,6 @@ impl SubAttachRequest {
         program: Arc<ActionProgram>,
         scope: EffectScope,
         events: ClassSet,
-        log_output: bool,
     ) -> Self {
         Self {
             name,
@@ -234,7 +233,7 @@ impl SubAttachRequest {
             events,
             params: SubParams {
                 settle,
-                spawn: SpawnSpec::new(program, scope, log_output),
+                spawn: SpawnSpec::new(program, scope),
             },
         }
     }

@@ -28,9 +28,6 @@
 //!   swappable. The bin calls [`ObservabilityHandle::reopen_file`] unconditionally on SIGHUP so
 //!   `logrotate copytruncate` / move-then-create rotation cycles see their freshly-opened path
 //!   picked up without restart.
-//!
-//! Subprocess output is *not* this module's concern. See the actuator and `Effect.capture_output`
-//! for how user-visible bytes are routed.
 
 use specter_config::{LogConfig, LogDestination, LogLevel};
 use std::fs::OpenOptions;

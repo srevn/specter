@@ -31,7 +31,6 @@ fn attach_subtree_root(
         empty_program(),
         EffectScope::SubtreeRoot,
         ClassSet::CONTENT,
-        false,
     );
     let out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
@@ -310,7 +309,6 @@ fn descent_prefix_claim_purged_then_anchor_appears_no_recovery() {
         empty_program(),
         EffectScope::SubtreeRoot,
         ClassSet::EMPTY,
-        false,
     );
     let attach_out = e.step(Input::AttachSub(req), Instant::now());
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");

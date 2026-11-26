@@ -35,8 +35,7 @@ pub enum SubAttachAnchor {
     Path(PathBuf),
 }
 
-/// What a `Spawn` reaction launches when its Profile settles: the program, its scope, and the
-/// output routing.
+/// What a `Spawn` reaction launches when its Profile settles: the program and its scope.
 ///
 /// Construction-sealed: [`Self::new`] derives `needs_diff` once from the scope and the program's
 /// placeholder set, and private fields make a desynced `needs_diff` unconstructable — there is no
@@ -47,18 +46,16 @@ pub enum SubAttachAnchor {
 pub struct SpawnSpec {
     program: Arc<ActionProgram>,
     scope: EffectScope,
-    log_output: bool,
     needs_diff: bool,
 }
 
 impl SpawnSpec {
     #[must_use]
-    pub fn new(program: Arc<ActionProgram>, scope: EffectScope, log_output: bool) -> Self {
+    pub fn new(program: Arc<ActionProgram>, scope: EffectScope) -> Self {
         let needs_diff = scope == EffectScope::PerStableFile || program.references_diff_derived();
         Self {
             program,
             scope,
-            log_output,
             needs_diff,
         }
     }
@@ -73,14 +70,6 @@ impl SpawnSpec {
     #[must_use]
     pub const fn scope(&self) -> EffectScope {
         self.scope
-    }
-
-    /// Forward subprocess stdout/stderr to Specter's own stdio (`Stdio::inherit()`); `false` routes
-    /// child output to `/dev/null`. Threaded onto each emitted [`crate::Effect`] as
-    /// `capture_output`; not identity.
-    #[must_use]
-    pub const fn log_output(&self) -> bool {
-        self.log_output
     }
 
     /// Whether emitted Effects need the tree [`crate::Diff`]: true iff `scope` is `PerStableFile`
@@ -297,12 +286,12 @@ pub struct SubAttachRequest {
 ///   Profile partition (the partition key is `(anchor_resource, ProfileIdentity::config_hash())`).
 ///   The engine asks the attach's gate first, then performs `detach_old → attach_new`; a refused
 ///   target leaves the old Sub in place — structural rollback at the composition layer.
-/// - **Params change** (`modified_params`): the target and identity are unchanged; only the params
-///   differ (`program`, `scope`, `settle`, `log_output`). The engine rebinds the live Sub in place,
-///   a template with the set it minted ([`SubRegistry::rebind`]): no Profile churn, no kernel-watch
-///   flap, no baseline loss. On the rare case where the prior attach failed and the Sub never
-///   entered the registry, the engine degrades the entry to a fresh attach
-///   ([`crate::Diagnostic::ConfigDiffRebindFallbackAttach`] narrates the reason).
+/// - **Params change** (`modified_params`): the target and identity are unchanged; only the
+///   [`SubParams`] differ. The engine rebinds the live Sub in place, a template with the set it
+///   minted ([`SubRegistry::rebind`]): no Profile churn, no kernel-watch flap, no baseline loss. On
+///   the rare case where the prior attach failed and the Sub never entered the registry, the engine
+///   degrades the entry to a fresh attach ([`crate::Diagnostic::ConfigDiffRebindFallbackAttach`]
+///   narrates the reason).
 ///
 /// Engine processes `removed → modified_params → modified_identity → added` atomically in one step.
 /// The four buckets are name-disjoint by diff construction.
@@ -1089,7 +1078,7 @@ mod tests {
     fn params(program: Arc<ActionProgram>, scope: EffectScope) -> SubParams {
         SubParams {
             settle: SETTLE,
-            spawn: SpawnSpec::new(program, scope, false),
+            spawn: SpawnSpec::new(program, scope),
         }
     }
 
@@ -1143,23 +1132,19 @@ mod tests {
 
     #[test]
     fn needs_diff_set_for_per_stable_file_scope() {
-        let spec = SpawnSpec::new(anchor_only_program(), EffectScope::PerStableFile, false);
+        let spec = SpawnSpec::new(anchor_only_program(), EffectScope::PerStableFile);
         assert!(spec.needs_diff());
     }
 
     #[test]
     fn needs_diff_set_for_diff_placeholder_in_subtree_scope() {
-        let spec = SpawnSpec::new(
-            program_with(Placeholder::Created),
-            EffectScope::SubtreeRoot,
-            false,
-        );
+        let spec = SpawnSpec::new(program_with(Placeholder::Created), EffectScope::SubtreeRoot);
         assert!(spec.needs_diff());
     }
 
     #[test]
     fn needs_diff_false_for_anchor_subtree_combo() {
-        let spec = SpawnSpec::new(anchor_only_program(), EffectScope::SubtreeRoot, false);
+        let spec = SpawnSpec::new(anchor_only_program(), EffectScope::SubtreeRoot);
         assert!(!spec.needs_diff());
     }
 
@@ -1549,7 +1534,7 @@ mod tests {
             sid,
             SubParams {
                 settle: new_settle,
-                spawn: SpawnSpec::new(Arc::clone(&new_program), EffectScope::PerStableFile, true),
+                spawn: SpawnSpec::new(Arc::clone(&new_program), EffectScope::PerStableFile),
             },
         );
 
@@ -1578,7 +1563,6 @@ mod tests {
         let spec = s.spawn_spec().expect("spawn reaction carries a spec");
         assert_eq!(spec.scope(), EffectScope::PerStableFile, "scope replaced");
         assert_eq!(s.settle(), new_settle, "settle replaced");
-        assert!(spec.log_output(), "log_output replaced");
         assert!(
             Arc::ptr_eq(spec.program(), &new_program),
             "program Arc replaced (no rewrap)",
@@ -1704,7 +1688,7 @@ mod tests {
             disc,
             SubParams {
                 settle: SETTLE * 2,
-                spawn: SpawnSpec::new(Arc::clone(&program), EffectScope::SubtreeRoot, false),
+                spawn: SpawnSpec::new(Arc::clone(&program), EffectScope::SubtreeRoot),
             },
         );
 

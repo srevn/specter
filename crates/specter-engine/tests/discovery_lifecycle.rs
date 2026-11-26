@@ -1339,7 +1339,7 @@ fn a_minted_subs_per_file_fire_and_late_completion_name_its_template() {
     let now = Instant::now();
     let mut per_file = discovery_req("disc", "/data/*");
     per_file.events = DEFAULT_EVENTS;
-    per_file.params.spawn = SpawnSpec::new(empty_program(), EffectScope::PerStableFile, false);
+    per_file.params.spawn = SpawnSpec::new(empty_program(), EffectScope::PerStableFile);
     let (sid, pid, _) = attach_request(&mut e, per_file, now);
     let _ = respond(&mut e, pid, &dir_snap(&[("x", EntryKind::Dir, 1)]), now);
     settle_minted_seeds(&mut e, sid, now);
@@ -1572,7 +1572,7 @@ fn prefix_rm_rf_recovery_preserves_minted_sub_without_per_file_warning() {
     let root = e.tree().parent(data).expect("FS root");
     let now = Instant::now();
     let mut per_file = discovery_req("disc", "/data/*");
-    per_file.params.spawn = SpawnSpec::new(empty_program(), EffectScope::PerStableFile, false);
+    per_file.params.spawn = SpawnSpec::new(empty_program(), EffectScope::PerStableFile);
     let (sid, pid, _) = attach_request(&mut e, per_file, now);
     let _ = respond(&mut e, pid, &dir_snap(&[("x", EntryKind::Dir, 1)]), now);
     settle_minted_seeds(&mut e, sid, now);

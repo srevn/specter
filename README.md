@@ -53,11 +53,11 @@ actions = [{ exec = ["cargo", "build"] }]
 
 Each `[[watch]]` block declares one reaction: a name, an absolute path,
 and an `actions` array. Optional knobs cover settle window, scope
-(subtree vs per-file), glob filters, event mask, recursion, and child
-stdio routing. The actions array supports sequences, pipes (`a | b | c`
-with pipefail-on), and conditionals (`when` / `then` / `else`). Argv
-slots accept `${specter.*}` and `${env.*}` placeholders; the child
-process receives a matching `SPECTER_*` environment set.
+(subtree vs per-file), glob filters, event mask, and recursion. The
+actions array supports sequences, pipes (`a | b | c` with pipefail-on),
+and conditionals (`when` / `then` / `else`). Argv slots accept
+`${specter.*}` and `${env.*}` placeholders; the child process receives
+a matching `SPECTER_*` environment set.
 
 See:
 
@@ -89,13 +89,12 @@ overrides it.
 See [docs/control.md](docs/control.md) for the IPC reference — socket
 resolution, wire format, error codes, subscribe semantics, exit codes.
 
-## Subprocess output
+## Command output
 
-Child stdout/stderr go to `/dev/null` by default — Specter doesn't
-parse, format, or annotate user command output. Set `log_output = true`
-per watch and the actuator inherits Specter's own stdio fds, so the
-supervisor's log facility captures the bytes. For richer routing
-(notifications, conditional teeing), wrap the action with `sh -c`.
+A command's stdin, stdout and stderr are `/dev/null`. Specter never
+parses, stores or forwards what a command prints; see
+[Command output](docs/configuration.md#command-output) for how a
+command keeps its output.
 
 ## Layout
 

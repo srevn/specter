@@ -497,7 +497,6 @@ mod tests {
             empty_program(),
             EffectScope::SubtreeRoot,
             events,
-            false,
         );
         let t0 = Instant::now();
         let attach_out = e.step(Input::AttachSub(req), t0);
@@ -788,7 +787,6 @@ mod tests {
             empty_program(),
             EffectScope::SubtreeRoot,
             ClassSet::EMPTY,
-            false,
         );
         let t0 = Instant::now();
         let attach_out = e.step(Input::AttachSub(req), t0);
@@ -861,7 +859,6 @@ mod tests {
             empty_program(),
             EffectScope::SubtreeRoot,
             ClassSet::STRUCTURE,
-            false,
         );
         let t0 = Instant::now();
         let attach_out = e.step(Input::AttachSub(req), t0);

@@ -29,7 +29,6 @@ pub(crate) struct RawLogConfig {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct RawWatch {
     pub name: String,
     pub path: String,
@@ -61,12 +60,6 @@ pub(crate) struct RawWatch {
     pub scope: Option<String>,
     pub max_depth: Option<u32>,
     pub events: Option<Vec<String>>,
-    /// Forward subprocess stdout/stderr to Specter's own stdio. Default `false` — the engine
-    /// threads `Stdio::null()` so a chatty hook doesn't flood the operator's console; setting this
-    /// to `true` routes child output through the supervisor's log facility (systemd journal,
-    /// launchd `StandardOutPath`).
-    #[serde(default)]
-    pub log_output: bool,
     /// Suppress this entry without removing it from the TOML. Default `true` — present entries are
     /// effective by default; `false` is structurally equivalent to "absent from the config"
     /// (filtered by [`crate::Config::active_watches`] before the engine sees anything).

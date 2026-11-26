@@ -1032,23 +1032,11 @@ impl ActuatorState {
     ) -> Result<(), SpawnFailureCause> {
         let now = std::time::SystemTime::now();
         let cwd: &Path = resolve::compute_cwd(effect);
-        let capture_output = effect.capture_output;
 
         let op = &effect.program.ops()[cursor as usize];
         match op.body() {
             SpawnBody::Exec(exec) => self.spawn_exec_with_permit(
-                key,
-                sub,
-                effect,
-                cursor,
-                exec,
-                now,
-                cwd,
-                capture_output,
-                diff_tmp,
-                permit,
-                spawner,
-                reap_tx,
+                key, sub, effect, cursor, exec, now, cwd, diff_tmp, permit, spawner, reap_tx,
             ),
             SpawnBody::Pipe(stages) => {
                 // `MultiStage::stages()` borrows the shared stage slice; its Arc lifetime is tied
@@ -1065,7 +1053,6 @@ impl ActuatorState {
                     stages_slice,
                     now,
                     cwd,
-                    capture_output,
                     diff_tmp,
                     permit,
                     spawner,
@@ -1103,7 +1090,6 @@ impl ActuatorState {
         exec: &ExecAction,
         now: std::time::SystemTime,
         cwd: &Path,
-        capture_output: bool,
         diff_tmp: Option<&Arc<DiffTmpFile>>,
         permit: Permit,
         spawner: &dyn Spawner,
@@ -1123,7 +1109,7 @@ impl ActuatorState {
                 }
             };
 
-        let handles = match spawner.spawn(&argv, &env, cwd, capture_output) {
+        let handles = match spawner.spawn(&argv, &env, cwd) {
             Ok(h) => h,
             Err(e) => {
                 tracing::error!(?key, cursor, ?cwd, ?e, "spawn failed");
@@ -1202,7 +1188,7 @@ impl ActuatorState {
     /// The shape mirrors [`Self::spawn_exec_with_permit`] at every step, scaled to N stages:
     ///
     /// 1. Resolve every stage's argv + env against the shared `now` (so `${specter.time}` agrees
-    ///    across stages — see [`Spawner::spawn_pipe`] for the contract).
+    ///    across stages — see [`Self::spawn_step_with_permit`] for the contract).
     /// 2. Call [`Spawner::spawn_pipe`] which mints N processes, an aggregating
     ///    [`crate::spawner::ChildWaiter`], a combined [`crate::spawner::ChildSignaler`] for
     ///    shutdown fan-out, and per-stage signalers for per-stage timer threads.
@@ -1231,7 +1217,6 @@ impl ActuatorState {
         stages: &[ExecAction],
         now: std::time::SystemTime,
         cwd: &Path,
-        capture_output: bool,
         diff_tmp: Option<&Arc<DiffTmpFile>>,
         permit: Permit,
         spawner: &dyn Spawner,
@@ -1263,7 +1248,7 @@ impl ActuatorState {
             })
             .collect();
 
-        let handles = match spawner.spawn_pipe(&stage_specs, cwd, capture_output) {
+        let handles = match spawner.spawn_pipe(&stage_specs, cwd) {
             Ok(h) => h,
             Err(e) => {
                 // Partial-spawn rollback already happened inside `spawn_pipe` (every prior stage
@@ -1649,7 +1634,6 @@ mod tests {
             anchor: target,
             correlation: CorrelationId::from(corr),
             forced: false,
-            capture_output: false,
             sub_name: CompactString::new(""),
             program: n_step_program(steps),
             anchor_path: Arc::from(PathBuf::from("/tmp")),
@@ -1676,7 +1660,6 @@ mod tests {
             _argv: &[String],
             _env: &[EnvVar<'_>],
             _cwd: &Path,
-            _capture_output: bool,
         ) -> io::Result<SpawnHandles> {
             unreachable!("UnusedSpawner used by a test that didn't expect spawn()")
         }
@@ -1684,7 +1667,6 @@ mod tests {
             &self,
             _stages: &[crate::spawner::StageSpec<'_>],
             _cwd: &Path,
-            _capture_output: bool,
         ) -> io::Result<crate::spawner::PipeSpawnHandles> {
             unreachable!("UnusedSpawner used by a test that didn't expect spawn_pipe()")
         }
@@ -1733,7 +1715,6 @@ mod tests {
             _argv: &[String],
             _env: &[EnvVar<'_>],
             _cwd: &Path,
-            _capture_output: bool,
         ) -> io::Result<SpawnHandles> {
             // Copy out of the lock before checking — the MutexGuard's significant Drop would
             // otherwise live across the if-let.
@@ -1759,7 +1740,6 @@ mod tests {
             &self,
             _stages: &[crate::spawner::StageSpec<'_>],
             _cwd: &Path,
-            _capture_output: bool,
         ) -> io::Result<crate::spawner::PipeSpawnHandles> {
             // The multi-step pure-state tests in this module don't exercise pipe dispatch — they
             // use single-Exec programs only. Treat as a regression catcher: if a future test

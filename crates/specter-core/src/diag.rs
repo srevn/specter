@@ -638,11 +638,10 @@ pub enum Diagnostic {
         reason: DetachReason,
         minted_by: Option<SubId>,
     },
-    /// A Sub's params (`program`, `scope`, `settle`, `log_output`) were rebound in place — the
-    /// `modified_params` arm of [`crate::SubRegistryDiff`]; what a rebind keeps is
-    /// [`crate::SubRegistry::rebind`]'s, `has_fired` included, so the next fire runs the new
-    /// program and an unchanged tree does not re-fire. Symmetric with [`Self::SubAttached`]; pure
-    /// operator narration.
+    /// A Sub's [`crate::SubParams`] were rebound in place — the `modified_params` arm of
+    /// [`crate::SubRegistryDiff`]; what a rebind keeps is [`crate::SubRegistry::rebind`]'s,
+    /// `has_fired` included, so the next fire runs the new program and an unchanged tree does not
+    /// re-fire. Symmetric with [`Self::SubAttached`]; pure operator narration.
     ///
     /// A template's rebind reaches every Sub it minted in that one registry edge and makes one
     /// line, naming the template: a count of the Subs it reached would repeat the minted set's size

@@ -51,7 +51,6 @@ fn config_diff_add_sub_to_existing_profile() {
             empty_program(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
-            false,
         )),
         now,
     );
@@ -70,7 +69,6 @@ fn config_diff_add_sub_to_existing_profile() {
         empty_program(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
-        false,
     ));
     let out = e.step(Input::ConfigDiff(diff), now);
 
@@ -107,7 +105,6 @@ fn config_diff_remove_sole_sub_reaps_profile() {
         empty_program(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
-        false,
     );
     let now = Instant::now();
     let attach_out = e.step(Input::AttachSub(req), now);
@@ -156,7 +153,6 @@ fn config_diff_mid_burst_remove_defers_reap() {
             empty_program(),
             EffectScope::SubtreeRoot,
             DEFAULT_EVENTS,
-            false,
         )),
         now,
     );
@@ -225,7 +221,6 @@ fn config_diff_modified_params_mid_burst_rebinds_in_place() {
             empty_program(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
-            false,
         )),
         now,
     );
@@ -257,7 +252,6 @@ fn config_diff_modified_params_mid_burst_rebinds_in_place() {
         empty_program(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
-        false,
     ));
     let out = e.step(Input::ConfigDiff(diff), t1);
 
@@ -322,7 +316,6 @@ fn config_diff_modified_params_settle_change_recomputes_profile_settle() {
             empty_program(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
-            false,
         )),
         now,
     );
@@ -342,7 +335,6 @@ fn config_diff_modified_params_settle_change_recomputes_profile_settle() {
         empty_program(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
-        false,
     ));
     let watch_demand_before = e.tree().get(r).unwrap().watch_demand();
 
@@ -414,7 +406,6 @@ fn config_diff_modified_identity_validate_failure_leaves_old_sub_in_place() {
             empty_program(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
-            false,
         )),
         now,
     );
@@ -434,7 +425,6 @@ fn config_diff_modified_identity_validate_failure_leaves_old_sub_in_place() {
         empty_program(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
-        false,
     ));
     let post_seed = now + SETTLE + SETTLE + SETTLE;
     let out = e.step(Input::ConfigDiff(diff), post_seed);
@@ -484,7 +474,6 @@ fn effect_complete_after_detach_drops_silently() {
             empty_program(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
-            false,
         )),
         now,
     );
@@ -554,7 +543,6 @@ fn config_diff_modified_identity_same_path_rebinds_profile_safely() {
             empty_program(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
-            false,
         )),
         now,
     );
@@ -576,7 +564,6 @@ fn config_diff_modified_identity_same_path_rebinds_profile_safely() {
         empty_program(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
-        false,
     ));
     let _out = e.step(Input::ConfigDiff(diff), post_seed);
 
@@ -820,7 +807,7 @@ fn config_diff_modified_params_rebinds_a_template_and_the_set_it_minted() {
 
     let program = single_exec_program([ArgTemplate::new([ArgPart::literal("/bin/new")])]);
     let mut edit = watch;
-    edit.params.spawn = SpawnSpec::new(Arc::clone(&program), EffectScope::SubtreeRoot, false);
+    edit.params.spawn = SpawnSpec::new(Arc::clone(&program), EffectScope::SubtreeRoot);
     let t1 = now + SETTLE;
     let out = e.step(params_edit(edit), t1);
     assert_eq!(
@@ -908,7 +895,6 @@ fn config_diff_modified_params_of_a_template_refolds_each_minted_floor() {
         empty_program(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
-        false,
     );
     let (_, joined, _) = attach_request(&mut e, operator, now);
     assert_eq!(
@@ -948,7 +934,6 @@ fn config_diff_modified_params_of_a_template_refolds_each_minted_floor() {
     command.params.spawn = SpawnSpec::new(
         single_exec_program([ArgTemplate::new([ArgPart::literal("/bin/new")])]),
         EffectScope::SubtreeRoot,
-        false,
     );
     let _ = e.step(params_edit(command), now);
     assert_eq!(

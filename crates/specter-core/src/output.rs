@@ -295,7 +295,6 @@ mod tests {
             anchor: target,
             correlation: CorrelationId::default(),
             forced: false,
-            capture_output: false,
             sub_name: CompactString::new(""),
             program: fixture_program(),
             anchor_path: Arc::from(PathBuf::new()),

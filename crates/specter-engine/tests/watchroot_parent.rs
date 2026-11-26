@@ -34,7 +34,6 @@ fn attach_sub_creates_watch_root_parent_contribution() {
         specter_core::testkit::empty_program(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
-        false,
     );
     let out = e.step(Input::AttachSub(req), Instant::now());
     let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
@@ -74,7 +73,6 @@ fn root_anchor_has_no_watch_root_parent() {
         specter_core::testkit::empty_program(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
-        false,
     );
     let attach_out = e.step(Input::AttachSub(req), Instant::now());
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
@@ -104,7 +102,6 @@ fn detach_sub_releases_watch_root_parent_contribution() {
         specter_core::testkit::empty_program(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
-        false,
     );
     let attach_out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
@@ -160,7 +157,6 @@ fn multiple_profiles_share_one_watch_root_parent() {
             specter_core::testkit::empty_program(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
-            false,
         )),
         now,
     );
@@ -174,7 +170,6 @@ fn multiple_profiles_share_one_watch_root_parent() {
             specter_core::testkit::empty_program(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
-            false,
         )),
         now,
     );
@@ -211,7 +206,6 @@ fn watch_root_parent_role_stays_user_when_already_user() {
             specter_core::testkit::empty_program(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
-            false,
         )),
         now,
     );
@@ -231,7 +225,6 @@ fn watch_root_parent_role_stays_user_when_already_user() {
             specter_core::testkit::empty_program(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
-            false,
         )),
         now,
     );

@@ -79,7 +79,6 @@ fn engine_with_attached_sub() -> (
         empty_program(),
         EffectScope::SubtreeRoot,
         DEFAULT_EVENTS,
-        false,
     );
     let out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
@@ -235,7 +234,6 @@ fn attach_sub_unprobed_anchor_seeds_kind_on_first_response() {
         empty_program(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
-        false,
     );
     let attach_out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
@@ -296,7 +294,6 @@ fn dispatch_burst_outcome_classifies_kind_on_first_seed_subtree() {
         empty_program(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
-        false,
     );
     let now = Instant::now();
     let attach_out = e.step(Input::AttachSub(req), now);
@@ -354,7 +351,6 @@ fn dispatch_burst_outcome_classifies_kind_on_first_seed_anchor() {
         empty_program(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
-        false,
     );
     let now = Instant::now();
     let attach_out = e.step(Input::AttachSub(req), now);
@@ -418,7 +414,6 @@ fn dispatch_descent_with_anchor_outcome_is_walker_contract_violation() {
         empty_program(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
-        false,
     );
     let now = Instant::now();
     let attach_out = e.step(Input::AttachSub(req), now);
@@ -518,7 +513,6 @@ fn kind_mismatched_response_routes_through_finalize_anchor_lost_debug() {
         empty_program(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
-        false,
     );
     let now = Instant::now();
     let attach_out = e.step(Input::AttachSub(req), now);
@@ -604,7 +598,6 @@ fn attach_sub_existing_profile_bumps_refcount() {
         empty_program(),
         EffectScope::SubtreeRoot,
         DEFAULT_EVENTS,
-        false,
     );
     let out = e.step(Input::AttachSub(req), now);
     let sid2 = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
@@ -971,7 +964,6 @@ fn emit_effects_subtree_root_uses_parent_dir_for_file_profile() {
         empty_program(),
         EffectScope::SubtreeRoot,
         DEFAULT_EVENTS,
-        false,
     );
     let attach_out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
@@ -1061,7 +1053,6 @@ fn standard_burst_on_file_anchor_targets_anchor_not_parent_dir() {
         empty_program(),
         EffectScope::SubtreeRoot,
         DEFAULT_EVENTS,
-        false,
     );
     let attach_out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
@@ -1597,7 +1588,6 @@ fn fs_event_terminal_on_descendant_file_folds_to_content_and_drops() {
         empty_program(),
         EffectScope::SubtreeRoot,
         ClassSet::STRUCTURE,
-        false,
     );
     let out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
@@ -2184,7 +2174,6 @@ fn effect_emission_carries_diff_when_needs_diff() {
         diff_program(), // references ${specter.created}
         EffectScope::SubtreeRoot,
         NO_EVENTS,
-        false,
     );
     let out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
@@ -2311,7 +2300,6 @@ fn probe_op_for_file_anchor_is_file_kind() {
         empty_program(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
-        false,
     );
     let now = Instant::now();
     let attach_out = e.step(Input::AttachSub(req), now);
@@ -2420,7 +2408,6 @@ fn watch_op_rejected_purges_pending_descent_at_rejected_prefix() {
         empty_program(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
-        false,
     );
     let _ = e.step(Input::AttachSub(req), Instant::now());
     let pid = {
@@ -2543,7 +2530,6 @@ fn watch_op_rejected_purges_multiple_descents_at_same_prefix() {
         empty_program(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
-        false,
     );
     let req_b = SubAttachRequest::for_anchor(
         "b".into(),
@@ -2554,7 +2540,6 @@ fn watch_op_rejected_purges_multiple_descents_at_same_prefix() {
         empty_program(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
-        false,
     );
     let attach_out = e.step(Input::AttachSub(req_a), Instant::now());
     let sid_a =
@@ -2920,7 +2905,6 @@ fn sensor_overflow_pending_descent_latches_and_repays() {
         empty_program(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
-        false,
     );
     let _ = e.step(Input::AttachSub(req), Instant::now());
     let pid = {
@@ -3029,7 +3013,6 @@ fn sensor_overflow_pending_profile_reprobes() {
         empty_program(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
-        false,
     );
     let _ = e.step(Input::AttachSub(req), Instant::now());
     let pid = {
@@ -3110,7 +3093,6 @@ fn sensor_overflow_resource_scope_filters_profiles() {
         empty_program(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
-        false,
     );
     let req_b = SubAttachRequest {
         name: "sub-b".into(),
@@ -3352,7 +3334,6 @@ fn detach_sub_settle_recomputed_when_subs_remain() {
             empty_program(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
-            false,
         )),
         now,
     );
@@ -3369,7 +3350,6 @@ fn detach_sub_settle_recomputed_when_subs_remain() {
             empty_program(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
-            false,
         )),
         now,
     );
@@ -3405,7 +3385,6 @@ fn config_diff_added_only_attaches_subs() {
         empty_program(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
-        false,
     );
     let mut diff = specter_core::SubRegistryDiff::default();
     diff.added.push(req);
@@ -3459,7 +3438,6 @@ fn config_diff_removed_then_added_atomic() {
         empty_program(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
-        false,
     );
     let mut diff = specter_core::SubRegistryDiff::default();
     diff.removed.push(CompactString::from("test-sub"));
@@ -3495,7 +3473,6 @@ fn config_diff_unknown_removed_diagnoses_unknown_modified_retries_as_attach() {
         empty_program(),
         EffectScope::SubtreeRoot,
         NO_EVENTS,
-        false,
     );
     let mut subs = specter_core::SubRegistryDiff::default();
     subs.removed.push(CompactString::from("ghost")); // never attached
@@ -3559,7 +3536,6 @@ fn per_stable_file_fires_one_effect_per_created_entry() {
         diff_program(),
         EffectScope::PerStableFile,
         ClassSet::DEFAULT_PER_FILE,
-        false,
     );
     let attach_out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
@@ -3665,7 +3641,6 @@ fn per_stable_file_skips_dir_entries() {
         diff_program(),
         EffectScope::PerStableFile,
         ClassSet::DEFAULT_PER_FILE,
-        false,
     );
     let attach_out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
@@ -3900,7 +3875,6 @@ fn b3_per_key_filter_does_not_affect_standard_burst_perfile_emission() {
         empty_program(),
         EffectScope::PerStableFile,
         ClassSet::CONTENT,
-        false,
     );
     let _ = e.step(Input::AttachSub(req), now);
     let pid = e.profiles.iter().next().unwrap().0;
@@ -3976,7 +3950,6 @@ fn has_per_file_fds_is_invariant_for_profile_lifetime() {
         empty_program(),
         EffectScope::PerStableFile,
         ClassSet::CONTENT,
-        false,
     );
     let out = e.step(Input::AttachSub(req), Instant::now());
     let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
@@ -3997,7 +3970,6 @@ fn has_per_file_fds_is_invariant_for_profile_lifetime() {
         empty_program(),
         EffectScope::PerStableFile,
         ClassSet::CONTENT,
-        false,
     );
     let _ = e.step(Input::AttachSub(req2), Instant::now());
     assert!(e.profiles.get(pid).unwrap().has_per_file_fds());
@@ -4025,7 +3997,6 @@ fn structure_only_profile_has_per_file_fds_false() {
         empty_program(),
         EffectScope::SubtreeRoot,
         ClassSet::STRUCTURE,
-        false,
     );
     let attach_out = e.step(Input::AttachSub(req), Instant::now());
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
@@ -4621,7 +4592,6 @@ fn rebasing_probes_whole_subtree_and_resets_awaiting_absorbed_residual() {
         empty_program(),
         EffectScope::SubtreeRoot,
         ClassSet::CONTENT,
-        false,
     );
     let attach_out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
@@ -4802,7 +4772,6 @@ fn post_fire_settling_reschedules_on_absorbed_event() {
         empty_program(),
         EffectScope::SubtreeRoot,
         ClassSet::CONTENT,
-        false,
     );
     let attach_out = e.step(Input::AttachSub(req), Instant::now());
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
@@ -6895,7 +6864,6 @@ fn attach_per_stable_file_sibling(
         empty_program(),
         EffectScope::PerStableFile,
         DEFAULT_EVENTS,
-        false,
     );
     let out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&out).expect("per-file sibling attached");
@@ -7236,7 +7204,6 @@ fn fire_history_is_per_sub_detach_drops_it_no_purge() {
         empty_program(),
         EffectScope::SubtreeRoot,
         DEFAULT_EVENTS,
-        false,
     );
     let out_b = e.step(Input::AttachSub(req_b), now);
     let sid_b = specter_core::testkit::first_attached_sub(&out_b).expect("sibling attached");
@@ -8158,7 +8125,6 @@ mod props {
             empty_program(),
             EffectScope::SubtreeRoot,
             NO_EVENTS,
-            false,
         );
         let out = e.step(Input::AttachSub(req), now);
         let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");

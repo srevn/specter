@@ -1937,7 +1937,6 @@ fn forward_dispatches_cancel_before_submit_on_effects_tx() {
             anchor: specter_core::ResourceId::default(),
             correlation: CorrelationId::default(),
             forced: false,
-            capture_output: false,
             sub_name: compact_str::CompactString::new(""),
             program: single_exec_program([ArgTemplate::new([ArgPart::literal("/bin/true")])]),
             anchor_path: Arc::from(PathBuf::new()),

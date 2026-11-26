@@ -1,8 +1,7 @@
 # Specter configuration.
 #
 # Top-level sections:
-#   [log]     engine telemetry (subprocess output is per-watch — see
-#             `log_output` below)
+#   [log]     engine telemetry
 #   [[watch]] one entry per filesystem subscription
 
 [log]
@@ -16,7 +15,8 @@ destination = "stderr"   # stderr | file  (when "file", path is required)
 [[watch]]
 name    = "example"
 path    = "/srv/data"                         # absolute; lenient — pending paths are OK
-actions = [{ exec = ["echo", "${specter.path}"] }]
+# A command's stdin, stdout and stderr are /dev/null: logger is what leaves the line.
+actions = [{ exec = ["logger", "-t", "specter", "${specter.watch}: ${specter.path} settled"] }]
 
 # enabled    = true                           # false ⇒ inert at runtime; toggle without deleting
 # settle     = "200ms"                        # quiet window before stable verdict
@@ -28,7 +28,6 @@ actions = [{ exec = ["echo", "${specter.path}"] }]
 # hidden     = false
 # recursive  = true                           # false lists one level, as max_depth = 1
 # max_depth  = 8                              # ≥ 1; omit for unbounded; > 1 needs recursive
-# log_output = false                          # forward child stdio to specter
 
 # Placeholders inside an exec argv slot:
 #   ${specter.path}     ${specter.relative}   ${specter.anchor}
