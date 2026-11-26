@@ -32,6 +32,7 @@ use specter_core::{
     StableReason, StepOutput, SubId, SubParams, SubRegistryDiff, TimerId, TimerKind, Tree,
     TreeSnapshot, WatchFailure, quiescence_verdict,
 };
+use std::cell::LazyCell;
 use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::Arc;
@@ -2568,8 +2569,6 @@ impl Engine {
             return EmitOutcome::default();
         }
         let resource = p.resource();
-        let baseline_snap = p.baseline();
-        let current_snap = p.current();
         // Read the cached anchor classification. `None` falls back to `Dir` — the actuator's
         // `compute_cwd` then anchors at the path itself; if the actuator's later `chdir` discovers
         // the path doesn't behave as a directory, the Effect surfaces `EffectOutcome::Failed`.
@@ -2585,18 +2584,12 @@ impl Engine {
 
         let anchor_path: Arc<Path> = self.tree.path_of(resource).unwrap_or_else(empty_path);
 
-        // Lazy-build the Diff Arc only if any Sub needs it AND both a baseline and a current snapshot
-        // are present. With baseline pinned across coalesced bursts, `Effect.diff` describes the
-        // *net* change since the last EffectComplete::Ok.
-        let mut diff_arc: Option<Arc<Diff>> = None;
-        let ensure_diff = |diff_slot: &mut Option<Arc<Diff>>| {
-            if diff_slot.is_none()
-                && let (Some(b), Some(c)) = (baseline_snap.as_ref(), current_snap.as_ref())
-            {
-                *diff_slot = Some(Arc::new(specter_core::diff_tree(b, c)));
-            }
-            diff_slot.clone()
-        };
+        // The net change since the last `EffectComplete::Ok`, built when the first Sub asks for it:
+        // `None` where the Profile has no baseline or no current snapshot to diff.
+        let net_diff = LazyCell::new(|| {
+            let (baseline, current) = p.baseline().zip(p.current())?;
+            Some(Arc::new(specter_core::diff_tree(&baseline, &current)))
+        });
 
         // Per-Profile structural component of B1 dedup. The full Subtree suppress decision combines
         // `nothing_changed` with the per-Sub `has_fired` flag (read with each Sub's other facts at
@@ -2612,26 +2605,24 @@ impl Engine {
         let sub_ids: SmallVec<[SubId; 2]> = self.subs.at(profile_id).into();
         let mut count: u32 = 0;
         for sub_id in sub_ids {
-            let (name, spec, already_fired, minted_by) = match self.subs.get(sub_id) {
-                Some(s) => match s.reaction() {
+            let Some((name, spec, already_fired, minted_by)) =
+                self.subs.get(sub_id).and_then(|sub| match sub.reaction() {
                     Reaction::Spawn { params: SubParams { spawn, .. }, minted_by, history } => {
-                        (&s.name, spawn, history.has_fired, *minted_by)
+                        Some((&sub.name, spawn, history.has_fired, *minted_by))
                     }
-                    // A template never fires — discovery's "fire" is the reconcile's batch of
-                    // attachments, and the verdict floor classifies its Profile to Reconcile before
-                    // the fire fork. Reaching here is a routing breach; the skip is the semantically
-                    // correct degrade (a Mint must not fire), loud in dev so the misrouting
-                    // dispatcher gets fixed, never daemon-fatal in release.
-                    Reaction::Mint { .. } => {
-                        debug_assert!(
-                            false,
-                            "emit_effects reached a template \
-                             (sub = {sub_id:?}, profile = {profile_id:?})",
-                        );
-                        continue;
-                    }
-                },
-                None => continue,
+                    Reaction::Mint { .. } => None,
+                })
+            else {
+                // Neither a stale id nor a template reaches here: `sub_ids` is the registry's own
+                // list, which nothing in this loop shrinks, and a template's Profile classifies to
+                // Reconcile before the fire fork. A breach degrades to a skip — a template must never
+                // fire — loud in dev, never daemon-fatal in release.
+                debug_assert!(
+                    false,
+                    "emit_effects reached no firing Sub \
+                     (sub = {sub_id:?}, profile = {profile_id:?})",
+                );
+                continue;
             };
             match fire_decision(mode, spec.scope(), sub_id, already_fired, nothing_changed) {
                 FireVerdict::SkipScope => continue,
@@ -2658,7 +2649,7 @@ impl Engine {
             };
             let pushed: u32 = match spec.scope() {
                 EffectScope::SubtreeRoot => {
-                    let diff = if spec.needs_diff() { ensure_diff(&mut diff_arc) } else { None };
+                    let diff = if spec.needs_diff() { Option::clone(&net_diff) } else { None };
                     out.push_effect(Effect::subtree(
                         effect_common(self.effect_correlations.next()),
                         diff,
@@ -2667,18 +2658,18 @@ impl Engine {
                     1
                 }
                 EffectScope::PerStableFile => {
-                    // PerStableFile implies `needs_diff` (`SpawnSpec::new`), so the diff is always
-                    // built.
-                    let Some(diff) = ensure_diff(&mut diff_arc) else {
+                    // A fresh Seed's first fire has no baseline to diff against, so it runs no file
+                    // (`warn_perfile_skipped_on_fresh_seed` narrates it).
+                    let Some(diff) = net_diff.as_ref() else {
                         continue;
                     };
                     let mut files: u32 = 0;
-                    for (target, segment) in stable_file_targets(&mut self.tree, resource, &diff) {
+                    for (target, segment) in stable_file_targets(&mut self.tree, resource, diff) {
                         out.push_effect(Effect::per_file(
                             effect_common(self.effect_correlations.next()),
                             target,
                             segment.clone(),
-                            Arc::clone(&diff),
+                            Arc::clone(diff),
                         ));
                         files = files.saturating_add(1);
                     }
